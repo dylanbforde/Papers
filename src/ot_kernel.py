@@ -445,8 +445,8 @@ def dk_dv_kernel_multi(
             ds_block = jnp.where(mask, ds_block, 0.0)
             P22 = jnp.where(mask, P22, 0.0)
 
-            dk_acc = dk_acc + jnp.einsum("bnm,bmd->bnd", ds_block.transpose(0, 2, 1), q_block)
-            dv_acc = dv_acc + jnp.einsum("bnm,bme->bne", P22.transpose(0, 2, 1), do_block)
+            dk_acc = dk_acc + jnp.einsum("bmn,bmd->bnd", ds_block, q_block)
+            dv_acc = dv_acc + jnp.einsum("bmn,bme->bne", P22, do_block)
         return (dk_acc, dv_acc)
 
     res = jax.lax.fori_loop(start_iter, end_iter, body_fn, init_state)
