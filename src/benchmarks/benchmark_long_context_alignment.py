@@ -206,24 +206,15 @@ def run_long_benchmark(model_name, vocab):
             print(f"Failed to extract embeddings: {e}")
             break
 
-        if mesh is not None:
-             num_devices = len(mesh.devices.flat)
-             
-             # Pallas block size is 128. Sequence length must be divisible by BOTH num_devices and 128.
-             # Since 128 is divisible by 8, padding to nearest 128 satisfies both constraints perfectly!
-             pad_granularity = max(num_devices, 128)
-             seq_len = emb_q.shape[2]
-             remainder = seq_len % pad_granularity
-             if remainder != 0:
-                 pad_len = pad_granularity - remainder
-                 emb_q = jnp.pad(emb_q, ((0,0), (0,0), (0, pad_len), (0,0)))
-                 emb_k = jnp.pad(emb_k, ((0,0), (0,0), (0, pad_len), (0,0)))
-                 emb_v = jnp.pad(emb_v, ((0,0), (0,0), (0, pad_len), (0,0)))
-                 
-             sharding = NamedSharding(mesh, PartitionSpec(None, None, 'seq', None))
-             emb_q = jax.device_put(emb_q, sharding)
-             emb_k = jax.device_put(emb_k, sharding)
-             emb_v = jax.device_put(emb_v, sharding)
+        # Sequence length must be divisible by 128 (Pallas tile block size constraint)
+        pad_granularity = 128
+        seq_len = emb_q.shape[2]
+        remainder = seq_len % pad_granularity
+        if remainder != 0:
+            pad_len = pad_granularity - remainder
+            emb_q = jnp.pad(emb_q, ((0,0), (0,0), (0, pad_len), (0,0)))
+            emb_k = jnp.pad(emb_k, ((0,0), (0,0), (0, pad_len), (0,0)))
+            emb_v = jnp.pad(emb_v, ((0,0), (0,0), (0, pad_len), (0,0)))
 
         dim = emb_q.shape[-1]
         
