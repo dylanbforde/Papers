@@ -242,7 +242,8 @@ def run_long_benchmark(model_name, vocab):
             print(f"| {L:<12} | {'Sinkhorn OT (Ours)':<20} | {ot_stats['fwd_latency_ms']:<10.2f} | {ot_stats['bwd_latency_ms']:<10.2f} | {'Success':<15} |")
         except Exception as e:
             print(f"| {L:<12} | {'Sinkhorn OT (Ours)':<20} | {'OOM':<10} | {'OOM':<10} | {'Failed':<15} |")
-            print(f"  -> Error details: {e}")
+            import traceback
+            traceback.print_exc()
 
         print("-" * 80)
         del embeddings, emb_q, emb_k, emb_v
