@@ -1,0 +1,73 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\citation{smith1981identification}
+\citation{needleman1970general}
+\citation{cuturi2017soft}
+\citation{mensch2018differentiable}
+\citation{peyre2019computational}
+\citation{cuturi2013sinkhorn}
+\citation{luise2018differential}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{1}{section.1}\protected@file@percent }
+\citation{dao2022flashattention}
+\@writefile{toc}{\contentsline {section}{\numberline {2}Background}{2}{section.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.1}Entropic Optimal Transport and Sinkhorn Iterations}{2}{subsection.2.1}\protected@file@percent }
+\newlabel{eq:u_update}{{2}{2}{Entropic Optimal Transport and Sinkhorn Iterations}{equation.2}{}}
+\newlabel{eq:v_update}{{3}{2}{Entropic Optimal Transport and Sinkhorn Iterations}{equation.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.2}Sinkhorn Attention}{2}{subsection.2.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3}Method}{3}{section.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Block-Wise Forward Pass}{3}{subsection.3.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Why Implicit Differentiation Fails}{3}{subsection.3.2}\protected@file@percent }
+\newlabel{sec:implicit_fails}{{3.2}{3}{Why Implicit Differentiation Fails}{subsection.3.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Multi-Transport-Plan Truncated Backpropagation}{3}{subsection.3.3}\protected@file@percent }
+\newlabel{sec:multi_P}{{3.3}{3}{Multi-Transport-Plan Truncated Backpropagation}{subsection.3.3}{}}
+\newlabel{prop:distinct_P}{{1}{4}{}{proposition.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.4}Block-Wise Backward Implementation}{4}{subsection.3.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4}Architecture}{4}{section.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5}Experiments}{5}{section.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.1}Setup}{5}{subsection.5.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.2}Results}{5}{subsection.5.2}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Alignment accuracy and memory usage across sequence lengths on TPU v6e-1. ``OOM'' indicates out-of-memory. Standard attention uses softmax; all Sinkhorn variants use 15 forward iterations with scale $\alpha = 3.0$. The 16K Sinkhorn result uses banded computation with $W\!=\!2048$.}}{5}{table.1}\protected@file@percent }
+\newlabel{tab:results}{{1}{5}{Alignment accuracy and memory usage across sequence lengths on TPU v6e-1. ``OOM'' indicates out-of-memory. Standard attention uses softmax; all Sinkhorn variants use 15 forward iterations with scale $\alpha = 3.0$. The 16K Sinkhorn result uses banded computation with $W\!=\!2048$}{table.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.3}Ablation: Sinkhorn vs.\ Softmax Attention}{5}{subsection.5.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.4}Ablation: Why Multiple Transport Plans Matter}{5}{subsection.5.4}\protected@file@percent }
+\citation{dao2022flashattention}
+\citation{flashsinkhorn2024}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Controlled comparison at 4K tokens. \textbf  {Left}: Cross-entropy loss; Sinkhorn (blue) transitions sharply at epoch $\sim $800 while softmax (red) flatlines at 2.6. \textbf  {Right}: Alignment accuracy; Sinkhorn reaches 72\% while softmax plateaus at $\sim $20\% ($3.6\times $ gap). Both models use identical architecture, hyperparameters, and data.}}{6}{figure.1}\protected@file@percent }
+\newlabel{fig:training_4k}{{1}{6}{Controlled comparison at 4K tokens. \textbf {Left}: Cross-entropy loss; Sinkhorn (blue) transitions sharply at epoch $\sim $800 while softmax (red) flatlines at 2.6. \textbf {Right}: Alignment accuracy; Sinkhorn reaches 72\% while softmax plateaus at $\sim $20\% ($3.6\times $ gap). Both models use identical architecture, hyperparameters, and data}{figure.1}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Training at 16K tokens with banded Sinkhorn ($W\!=\!2048$). Standard softmax attention exceeds available memory at this context length (annotated). Banded Sinkhorn trains to completion, exhibiting the same characteristic phase transition observed at 4K.}}{6}{figure.2}\protected@file@percent }
+\newlabel{fig:training_16k}{{2}{6}{Training at 16K tokens with banded Sinkhorn ($W\!=\!2048$). Standard softmax attention exceeds available memory at this context length (annotated). Banded Sinkhorn trains to completion, exhibiting the same characteristic phase transition observed at 4K}{figure.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.5}Scaling to Long Contexts}{6}{subsection.5.5}\protected@file@percent }
+\citation{dedal2022}
+\citation{mensch2018differentiable}
+\citation{plasma2023}
+\citation{bai2019deep}
+\citation{luise2018differential}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Real benchmark outputs from controlled ablation at 4K tokens on TPU. \textbf  {(a)} Pallas Sinkhorn: loss drops sharply and accuracy reaches $>$60\%. \textbf  {(b)} Softmax attention: loss flatlines at 2.7 and accuracy crawls to $\sim $19\%. Same model, same data, same hyperparameters.}}{7}{figure.3}\protected@file@percent }
+\newlabel{fig:ablation}{{3}{7}{Real benchmark outputs from controlled ablation at 4K tokens on TPU. \textbf {(a)} Pallas Sinkhorn: loss drops sharply and accuracy reaches $>$60\%. \textbf {(b)} Softmax attention: loss flatlines at 2.7 and accuracy crawls to $\sim $19\%. Same model, same data, same hyperparameters}{figure.3}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Attention-only latency (fwd+bwd) on TPU v6e-1. ``Normal'' and ``Flash'' are softmax-based (single normalization pass). Sinkhorn latency is higher due to 15 iterative normalization passes, but enables doubly-stochastic transport that softmax cannot provide. Banded Sinkhorn ($W\!=\!2048$) reduces cost from $O(L^2)$ to $O(L{\cdot }W)$ while extending to 131K tokens.}}{7}{table.2}\protected@file@percent }
+\newlabel{tab:latency}{{2}{7}{Attention-only latency (fwd+bwd) on TPU v6e-1. ``Normal'' and ``Flash'' are softmax-based (single normalization pass). Sinkhorn latency is higher due to 15 iterative normalization passes, but enables doubly-stochastic transport that softmax cannot provide. Banded Sinkhorn ($W\!=\!2048$) reduces cost from $O(L^2)$ to $O(L{\cdot }W)$ while extending to 131K tokens}{table.2}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {6}Related Work}{7}{section.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {7}Conclusion}{7}{section.7}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces Peak memory comparison across sequence lengths. Naive dense attention (red) grows quadratically $O(L^2)$, exceeding TPU HBM capacity (32\,GB, dashed line). Pallas Sinkhorn (green) remains flat $O(L)$, enabling massive contexts on the same hardware.}}{8}{figure.4}\protected@file@percent }
+\newlabel{fig:memory}{{4}{8}{Peak memory comparison across sequence lengths. Naive dense attention (red) grows quadratically $O(L^2)$, exceeding TPU HBM capacity (32\,GB, dashed line). Pallas Sinkhorn (green) remains flat $O(L)$, enabling massive contexts on the same hardware}{figure.4}{}}
+\bibstyle{plainnat}
+\bibdata{references}
+\bibcite{bai2019deep}{{1}{2019}{{Bai et~al.}}{{Bai, Kolter, and Koltun}}}
+\bibcite{cuturi2013sinkhorn}{{2}{2013}{{Cuturi}}{{}}}
+\bibcite{cuturi2017soft}{{3}{2017}{{Cuturi and Blondel}}{{}}}
+\bibcite{dao2022flashattention}{{4}{2022}{{Dao et~al.}}{{Dao, Fu, Ermon, Rudra, and R{\'e}}}}
+\bibcite{dedal2022}{{5}{2023}{{Llinares-L{\'o}pez et~al.}}{{Llinares-L{\'o}pez, Berthet, Blondel, Teboul, and Vert}}}
+\bibcite{luise2018differential}{{6}{2018}{{Luise et~al.}}{{Luise, Rudi, Pontil, and Ciliberto}}}
+\@writefile{lof}{\contentsline {figure}{\numberline {5}{\ignorespaces Attention forward pass latency on TPU v6e-1 (log-log scale). Softmax-based methods (Normal, Flash) are faster per-operation but cannot learn alignment ($\sim $20\% accuracy). Pallas Sinkhorn is slower due to 15 iterative normalization passes but achieves 72\% accuracy. Banded Sinkhorn provides a $\sim $$2\times $ speedup over full Sinkhorn while extending to 131K.}}{9}{figure.5}\protected@file@percent }
+\newlabel{fig:latency}{{5}{9}{Attention forward pass latency on TPU v6e-1 (log-log scale). Softmax-based methods (Normal, Flash) are faster per-operation but cannot learn alignment ($\sim $20\% accuracy). Pallas Sinkhorn is slower due to 15 iterative normalization passes but achieves 72\% accuracy. Banded Sinkhorn provides a $\sim $$2\times $ speedup over full Sinkhorn while extending to 131K}{figure.5}{}}
+\bibcite{mensch2018differentiable}{{7}{2018}{{Mensch and Blondel}}{{}}}
+\bibcite{needleman1970general}{{8}{1970}{{Needleman and Wunsch}}{{}}}
+\bibcite{peyre2019computational}{{9}{2019}{{Peyr{\'e} and Cuturi}}{{}}}
+\bibcite{smith1981identification}{{10}{1981}{{Smith and Waterman}}{{}}}
+\bibcite{plasma2023}{{11}{2025}{{Wang et~al.}}{{Wang, Zhou, Wang, Tan, Zhao, Li{\`o}, and Hong}}}
+\bibcite{flashsinkhorn2024}{{12}{2024}{{Ye et~al.}}{{Ye, Li, Yu, Chang, Chu, and Wertheimer}}}
+\@writefile{toc}{\contentsline {section}{\numberline {A}Proof of Proposition~\ref {prop:distinct_P}}{10}{appendix.A}\protected@file@percent }
+\newlabel{app:proof}{{A}{10}{Proof of Proposition~\ref {prop:distinct_P}}{appendix.A}{}}
+\gdef \@abspage@last{11}

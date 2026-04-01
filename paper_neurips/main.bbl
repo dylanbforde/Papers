@@ -1,0 +1,91 @@
+\begin{thebibliography}{12}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[Bai et~al.(2019)Bai, Kolter, and Koltun]{bai2019deep}
+Shaojie Bai, J~Zico Kolter, and Vladlen Koltun.
+\newblock Deep equilibrium models.
+\newblock In \emph{Advances in Neural Information Processing Systems},
+  volume~32, 2019.
+
+\bibitem[Cuturi(2013)]{cuturi2013sinkhorn}
+Marco Cuturi.
+\newblock Sinkhorn distances: Lightspeed computation of optimal transport.
+\newblock In \emph{Advances in Neural Information Processing Systems},
+  volume~26, 2013.
+
+\bibitem[Cuturi and Blondel(2017)]{cuturi2017soft}
+Marco Cuturi and Mathieu Blondel.
+\newblock Soft-dtw: a differentiable loss function for time-series.
+\newblock In \emph{International Conference on Machine Learning}, pages
+  894--903, 2017.
+
+\bibitem[Dao et~al.(2022)Dao, Fu, Ermon, Rudra, and
+  R{\'e}]{dao2022flashattention}
+Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher R{\'e}.
+\newblock Flash{A}ttention: Fast and memory-efficient exact attention with
+  {IO}-awareness.
+\newblock In \emph{Advances in Neural Information Processing Systems},
+  volume~35, 2022.
+
+\bibitem[Llinares-L{\'o}pez et~al.(2023)Llinares-L{\'o}pez, Berthet, Blondel,
+  Teboul, and Vert]{dedal2022}
+Felipe Llinares-L{\'o}pez, Quentin Berthet, Mathieu Blondel, Olivier Teboul,
+  and Jean-Philippe Vert.
+\newblock {DEDAL}: Deep embedding and differentiable alignment for protein
+  sequences.
+\newblock \emph{Nature Methods}, 20:\penalty0 104--111, 2023.
+
+\bibitem[Luise et~al.(2018)Luise, Rudi, Pontil, and
+  Ciliberto]{luise2018differential}
+Giulia Luise, Alessandro Rudi, Massimiliano Pontil, and Carlo Ciliberto.
+\newblock Differential properties of {S}inkhorn approximation for learning with
+  {W}asserstein distance.
+\newblock In \emph{Advances in Neural Information Processing Systems},
+  volume~31, 2018.
+
+\bibitem[Mensch and Blondel(2018)]{mensch2018differentiable}
+Arthur Mensch and Mathieu Blondel.
+\newblock Differentiable dynamic programming for structured prediction and
+  attention.
+\newblock In \emph{International Conference on Machine Learning}, pages
+  3462--3471, 2018.
+
+\bibitem[Needleman and Wunsch(1970)]{needleman1970general}
+Saul~B Needleman and Christian~D Wunsch.
+\newblock A general method applicable to the search for similarities in the
+  amino acid sequence of two proteins.
+\newblock \emph{Journal of Molecular Biology}, 48\penalty0 (3):\penalty0
+  443--453, 1970.
+
+\bibitem[Peyr{\'e} and Cuturi(2019)]{peyre2019computational}
+Gabriel Peyr{\'e} and Marco Cuturi.
+\newblock Computational optimal transport.
+\newblock \emph{Foundations and Trends in Machine Learning}, 11\penalty0
+  (5-6):\penalty0 355--607, 2019.
+
+\bibitem[Smith and Waterman(1981)]{smith1981identification}
+Temple~F Smith and Michael~S Waterman.
+\newblock Identification of common molecular subsequences.
+\newblock \emph{Journal of Molecular Biology}, 147\penalty0 (1):\penalty0
+  195--197, 1981.
+
+\bibitem[Wang et~al.(2025)Wang, Zhou, Wang, Tan, Zhao, Li{\`o}, and
+  Hong]{plasma2023}
+Zhiyu Wang, Bingxin Zhou, Jing Wang, Yang Tan, Weishu Zhao, Pietro Li{\`o}, and
+  Liang Hong.
+\newblock Fast and interpretable protein substructure alignment via optimal
+  transport.
+\newblock \emph{arXiv preprint arXiv:2510.07662}, 2025.
+
+\bibitem[Ye et~al.(2024)Ye, Li, Yu, Chang, Chu, and
+  Wertheimer]{flashsinkhorn2024}
+Felix X.-F. Ye, Xingjie Li, An~Yu, Ming-Ching Chang, Linsong Chu, and Davis
+  Wertheimer.
+\newblock Flash{S}inkhorn: {IO}-aware entropic optimal transport.
+\newblock \emph{arXiv preprint arXiv:2406.18362}, 2024.
+
+\end{thebibliography}
