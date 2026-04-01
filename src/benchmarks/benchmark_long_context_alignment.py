@@ -90,6 +90,8 @@ def get_foundation_embeddings(sequences, model_name):
     config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
     if not hasattr(config, 'is_decoder'):
         config.is_decoder = False
+    if not hasattr(config, 'add_cross_attention'):
+        config.add_cross_attention = False
         
     # 2. Instantiate with the patched config
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)

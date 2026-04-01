@@ -48,8 +48,10 @@ Now you are inside the leader TPU machine. To execute standard code across all h
 
 To distribute your code to all hosts in the cluster natively, you must use a GitHub **Personal Access Token (PAT)**. This allows the non-interactive `--worker=all` command to bypass browser authentication.
 
+**CRITICAL SECURITY WARNING:** NEVER hardcode or commit your actual PAT into any scripts or markdown files in this repository. Always use placeholders like `YOUR_PAT_TOKEN` in documentation. 
+
 1. Go to Github.com → Settings → Developer Settings → Personal Access Tokens → Generate new token (classic). Give it the `repo` scope.
-2. Run this command from your Cloud Shell, placing your PAT securely into the cloning URL:
+2. Run this command from your Cloud Shell, placing your PAT securely into the cloning URL (replace `YOUR_GITHUB_USERNAME:YOUR_PAT_TOKEN` with your actual credentials):
 
 ```bash
 gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=us-east5-a --worker=all --command="git clone https://YOUR_GITHUB_USERNAME:YOUR_PAT_TOKEN@github.com/dylanbforde/sinkhorn-aligner.git"
@@ -117,8 +119,19 @@ The second you are done generating the tables and pulling the JSON files off the
 From your local machine or the main GCP Cloud Console Shell:
 ```bash
 # To stop it (keeps the disk data, charges a tiny storage fee)
-gcloud compute tpus tpu-vm stop sinkhorn-benchmark-cluster --zone=europe-west4-a
-
-# To completely delete it forever (stops ALL billing)
-gcloud compute tpus tpu-vm delete sinkhorn-benchmark-cluster --zone=us-central1-a
+gcloud compute tpus tpu-vm stop sinkhorn-benchmark-cluster --zone=us-east5-a
 ```
+
+To delete the cluster entirely (which stops all charges permanently and frees up your internal Google TPU quota):
+```bash
+gcloud compute tpus tpu-vm delete sinkhorn-benchmark-cluster --zone=us-east5-a
+```
+
+## 8. Troubleshooting: Bouncing Capacity (v6e Trillium)
+TPU Trillium models (`v6e`) are in extremely high demand globally. 
+
+If you `stop` your machine, you release the physical hardware. When you attempt to `start` your stopped machine later, Google must find 8 available chips in your exact datacenter. If the zone is currently sold out, you will receive an `Insufficient Capacity` error.
+
+**What to do:**
+1. **Wait and Retry:** Hardware frees up identically to how it gets claimed. Run the `tpu-vm start ...` command repeatedly every 5-10 minutes. A cluster will almost always eventually catch a released pocket of availability.
+2. **Delete and Move:** If you cannot wait, you must completely `delete` the stopped cluster and recreate a fresh one in a different zone that has current capacity (like `us-central1-a` or `us-east1-c`), then strictly re-run the `apt-get` installation block and clone the code again.
