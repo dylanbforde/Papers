@@ -89,7 +89,7 @@ def safe_exp(x):
 # Forward Pass: Banded Sinkhorn Potential Computation
 # ============================================================================
 
-def compute_global_uv(Q, K, n_iters=20, band_width=None):
+def compute_global_uv(Q, K, n_iters=15, band_width=None):
     """Compute Sinkhorn dual potentials u, v via alternating logsumexp."""
     B, H, L, D = Q.shape
     scale = 1.0 / jnp.sqrt(D)
@@ -210,7 +210,7 @@ def tile_sinkhorn_kernel(q_ref, k_ref, v_ref, u_ref, v_pot_ref, o_ref):
     o_ref[...] = jnp.dot(jnp.exp(log_alpha), v)
 
 
-def pallas_sinkhorn_fwd(Q, K, V, n_iters=20, band_width=None):
+def pallas_sinkhorn_fwd(Q, K, V, n_iters=15, band_width=None):
     """Full banded Sinkhorn forward pass with Pallas tile kernels."""
     u_out, v_out = compute_global_uv(Q, K, n_iters, band_width)
     
@@ -761,7 +761,7 @@ def pallas_sinkhorn_bwd_full(n_iters, band_width, res, g):
 # ============================================================================
 
 @partial(jax.custom_vjp, nondiff_argnums=(3, 4))
-def pallas_flash_sinkhorn(Q, K, V, n_iters=20, band_width=None):
+def pallas_flash_sinkhorn(Q, K, V, n_iters=15, band_width=None):
     """Banded Sinkhorn attention with novel multi-transport-plan backward pass."""
     O, _ = pallas_sinkhorn_fwd(Q, K, V, n_iters, band_width)
     return O

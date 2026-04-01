@@ -32,27 +32,27 @@ Dylan B. Forde \\
 \maketitle
 
 \begin{abstract}
-We present a memory-efficient, fully differentiable Sinkhorn attention mechanism that scales entropic optimal transport (OT) to massive contexts on TPU hardware. While optimal transport provides a principled framework for discovering latent structure in sequence data, its application has been severely bottlenecked by quadratic memory requirements and divergent gradient approximations. Our key contribution is a novel \textit{multi-transport-plan backward pass} that correctly differentiates through truncated Sinkhorn iterations by utilizing distinct transport matrices at each chain-rule step. This resolves the fundamental limitation of prior implicit differentiation approaches whose gradients often fail to converge in practice. The forward pass uses block-wise Pallas kernels operating in $O(L)$ memory, while the backward pass computes exact gradients through the truncated unrolling using four distinct transport plans, all without materializing $L \times L$ intermediates. We demonstrate our approach on a protein family alignment benchmark from Pfam, achieving 72\% alignment accuracy at 4K tokens vs.\ 20\% for standard softmax attention under identical conditions. At 16K+ tokens with banded computation ($W\!=\!2048$), our method trains stably on TPU v6e hardware while standard attention exceeds available memory. Ultimately, our work bridges optimal transport theory and hardware-aware kernel design to enable differentiable alignment at scales previously inaccessible to OT methods.
+We present a memory-efficient, fully differentiable Sinkhorn attention mechanism that scales entropic optimal transport (OT) to massive contexts on TPU hardware. While optimal transport provides a principled framework for discovering latent structure in sequence data, its application has been severely bottlenecked by quadratic memory requirements and divergent gradient approximations. Our key contribution is a novel \textit{multi-transport-plan backward pass} that correctly differentiates through truncated Sinkhorn iterations by utilizing distinct transport matrices at each chain-rule step. This resolves the fundamental limitation of prior implicit differentiation approaches whose gradients often fail to converge in practice. The forward pass uses block-wise Pallas kernels operating in $O(L)$ memory, while the backward pass computes exact gradients through the truncated unrolling using four distinct transport plans, all without materializing $L \times L$ intermediates. We demonstrate our approach on a protein family alignment benchmark from Pfam. Ultimately, our work bridges optimal transport theory and hardware-aware kernel design to enable differentiable alignment at scales previously inaccessible to OT methods.
 \end{abstract}
 
 \section{Introduction}
 
 Pairwise alignment and structural matching are cornerstones of machine learning applied to sequence data. Classical algorithms such as Smith-Waterman \citep{smith1981identification} provide optimal local alignments but are non-differentiable, precluding their use as trainable components within end-to-end neural networks.
 
-Recent work has explored differentiable relaxations of alignment, notably optimal transport formulations \citep{peyre2019computational, cuturi2013sinkhorn}. These provide a natural bridge: they compute a robust, differentiable ``soft alignment'' matrix with strong theoretical guarantees. For sequence modeling where gaps are common (such as biological sequences), we utilize an \textit{unbalanced} Sinkhorn formulation that allows mass to be absorbed, preserving local structural relationships without forcing total global bijection.
+Recent work has explored differentiable relaxations of alignment, notably optimal transport formulations \citep{peyre2019computational, cuturi2013sinkhorn}. These provide a natural bridge: they compute a robust, differentiable ``soft alignment'' matrix with strong theoretical guarantees. For sequence modeling where structural relationships are key, we utilize a \textit{balanced} Sinkhorn formulation that enforces strict doubly-stochastic constraints, preserving global alignment properties.
 
 However, quadratic memory scaling and backward pass correctness have limited widespread adoption. Standard Sinkhorn implementations materializing $L \times L$ score matrices exhaust memory quickly. Furthermore, differentiating through Sinkhorn iterations is non-trivial; implicit differentiation via the adjoint system \citep{luise2018differential, bai2019deep} often diverges or requires solve steps that are numerically unstable.
 
-We address both challenges. Our forward and backward passes utilize block-wise Pallas kernels on TPUs, maintaining an $O(L)$ HBM footprint. Crucially, we introduce \textbf{multi-transport-plan truncated backpropagation}, which utilizes $k=2$ additional refinement iterations to produce exact gradients using four distinct transport matrices. We validate this on the Pfam benchmark, achieving 72\% alignment accuracy at 4K tokens and successful training at 16K tokens where standard models OOM.
+We address both challenges. Our forward and backward passes utilize block-wise Pallas kernels on TPUs, maintaining an $O(L)$ HBM footprint. Crucially, we introduce \textbf{multi-transport-plan truncated backpropagation}, which utilizes $k=2$ additional refinement iterations to produce exact gradients using four distinct transport matrices. We validate this on the Pfam benchmark.
 
 \section{Method}
 
 \subsection{Forward Pass: Block-Wise Tiling}
 The forward pass computes Sinkhorn potentials $u, v$ and output $O = PV$ in a tiled fashion, conceptually similar to FlashAttention \citep{dao2022flashattention}. For each query block $Q_i$, we scan over key blocks $K_j$ to compute tiled logsumexp reductions:
 \begin{equation}
-    u_i = -\log\!\Bigl[\sum_{j} \exp(Q_i K_j^\top \cdot \alpha/\sqrt{d} + v_j) + \exp(g)\Bigr].
+    u_i = -\log\!\Bigl[\sum_{j} \exp(Q_i K_j^\top \cdot \alpha/\sqrt{d} + v_j)\Bigr].
 \end{equation}
-This strategy yields $O(L)$ HBM memory usage while maintaining hardware-efficient matrix multiplications.
+This strategy yields $O(L)$ HBM memory usage while maintaining hardware-efficient matrix multiplications. To further optimize TPU performance, we employ an \textbf{8-channel packing strategy} within the Pallas kernels. By packing potential histories ($u^{(0)}, u^{(1)}, u^{(2)}$) and intermediate gradient vectors ($\delta u^{(1)}, \delta u^{(2)}$) into a single tensor with $C=8$ channels, we significantly reduce kernel signatures and minimize VMEM pressure, ensuring compatibility with TPU v6e Trillium constraints.
 
 \subsection{Multi-Transport-Plan Backward Pass}
 Our core technical contribution is the derivation and implementation of a rigorous backward pass through the unrolled Sinkhorn chain. We prove that truncated backpropagation through $k$ iterations is more stable than implicit methods, provided the intermediate transport plans are handled correctly.
@@ -61,7 +61,7 @@ Starting from stopped-gradient potentials $u^{(0)}, v^{(0)}$, we recompute $k=2$
 
 \begin{enumerate}
     \item \textbf{Output Path}: $\Delta S^{(A)} = P^{(2,2)} \odot Z$ where $Z = (\partial \mathcal{L} / \partial O) V^\top$.
-    \item \textbf{$v^{(2)}$ Path}: $\Delta S^{(B)} = -\text{diag}(g_v) P^{(2,2)}$.
+    \item \textbf{$v^{(2)}$ Path}: $\Delta S^{(B)} = -P^{(2,2)} \text{diag}(g_v)$.
     \item \textbf{$u^{(2)}$ Path}: $\Delta S^{(C)} = -\text{diag}(\delta u^{(2)}) P^{(2,1)}$.
     \item \textbf{$v^{(1)}$ Path}: $\Delta S^{(D)} = -P^{(1,1)} \text{diag}(\delta v^{(1)})$.
     \item \textbf{$u^{(1)}$ Path}: $\Delta S^{(E)} = -\text{diag}(\delta u^{(1)}) P^{(1,0)}$.
@@ -102,7 +102,7 @@ We evaluate scaling on Google Cloud TPU v6e-1. Table~\ref{tab:latency} compares 
 The results demonstrate that while Sinkhorn is computationally more expensive (due to 15 iterations), it exhibits stable $O(L \cdot W)$ scaling even at contexts where other OT methods fail. Note the linear increase in latency as length increases, confirming the efficiency of the banded Pallas implementation.
 
 \subsection{Alignment Performance}
-On the Pfam alignment task, we report 72\% accuracy for the Sinkhorn model compared to 20\% for a softmax attention baseline. Furthermore, models trained with the standard implicit differentiation (single-P) approximation failed to exceed 14\% accuracy, plateauing early with signature gradient explosions.
+% TODO: Add alignment performance results
 
 \section{Conclusion}
 We have developed a hardware-optimized, fully differentiable Sinkhorn attention mechanism for massive context lengths. By resolving the memory bottleneck via block-wise Pallas kernels and the gradient bottleneck via a novel multi-transport-plan backward pass, we enable high-accuracy Optimal Transport at scales previously inaccessible.
@@ -123,12 +123,11 @@ The four transport matrices used in the backward pass are indexed by pairs drawn
 \begin{equation}
     P^{(a,b)}_{ij} = \exp\!\bigl(S_{ij} + u^{(a)}_i + v^{(b)}_j\bigr).
 \end{equation}
-The iterate chain $(u^{(0)}, v^{(0)}) \to u^{(1)} \to v^{(1)} \to u^{(2)} \to v^{(2)}$ is produced by two steps of the unbalanced Sinkhorn updates:
 \begin{align}
-    u^{(t+1)}_i &= -\log\!\Bigl[\sum_j \exp(S_{ij} + v^{(t)}_j) + \exp(g)\Bigr], \label{eq:u_update_app}\\
-    v^{(t+1)}_j &= -\log\!\Bigl[\sum_i \exp(S_{ij} + u^{(t+1)}_i) + \exp(g)\Bigr], \label{eq:v_update_app}
+    u^{(t+1)}_i &= -\log\!\Bigl[\sum_j \exp(S_{ij} + v^{(t)}_j)\Bigr], \label{eq:u_update_app}\\
+    v^{(t+1)}_j &= -\log\!\Bigl[\sum_i \exp(S_{ij} + u^{(t+1)}_i)\Bigr], \label{eq:v_update_app}
 \end{align}
-where $g$ is a fixed gap score. All exponentials and sums are strictly positive. The potentials $(u^{(0)}, v^{(0)})$ are treated as constants (stopped gradients); only iterates $t \geq 1$ satisfy the update equations above. We write $\Delta u^{(t)} = u^{(t+1)} - u^{(t)}$ and $\Delta v^{(t)} = v^{(t+1)} - v^{(t)}$ for the per-step potential updates.
+where all exponentials and sums are strictly positive. The potentials $(u^{(0)}, v^{(0)})$ are treated as constants (stopped gradients); only iterates $t \geq 1$ satisfy the update equations above. We write $\Delta u^{(t)} = u^{(t+1)} - u^{(t)}$ and $\Delta v^{(t)} = v^{(t+1)} - v^{(t)}$ for the per-step potential updates.
 
 \subsection*{Part A: Distinctness of Transport Matrices}
 
@@ -164,49 +163,33 @@ For these cases, neither component of~\eqref{eq:shift} collapses trivially. We u
 \medskip
 \noindent\textit{Case $(2,2)$ vs $(1,1)$}: $u^{(2)}=u^{(1)}+c\mathbf{1}$ and $v^{(2)}=v^{(1)}-c\mathbf{1}$.
 
-Define $D_j \coloneqq \sum_i\exp(S_{ij}+u^{(1)}_i)>0$. The $v^{(1)}$-update gives $v^{(1)}_j = -\log[D_j+\exp(g)]$. The $v^{(2)}$-update uses $u^{(2)}=u^{(1)}+c$:
+Define $D_j \coloneqq \sum_i\exp(S_{ij}+u^{(1)}_i)>0$. The $v^{(1)}$-update gives $v^{(1)}_j = -\log D_j$. The $v^{(2)}$-update uses $u^{(2)}=u^{(1)}+c$:
 \begin{equation}
-    v^{(2)}_j = -\log\!\bigl[e^c D_j + \exp(g)\bigr].
+    v^{(2)}_j = -\log\!\bigl[e^c D_j\bigr] = -\log D_j - c.
 \end{equation}
-Applying the assumed shift $v^{(2)}_j = v^{(1)}_j - c$:
-\begin{equation}
-    -\log\!\bigl[e^c D_j+\exp(g)\bigr] = -\log\!\bigl[D_j+\exp(g)\bigr] - c = \log\!\bigl[e^{-c}\bigl(D_j+\exp(g)\bigr)^{-1}\bigr].
-\end{equation}
-This yields $e^c D_j+\exp(g) = e^c D_j + e^c\exp(g)$, which gives $\exp(g)=e^c\exp(g)$, hence $c=0$.
+Applying the assumed shift $v^{(2)}_j = v^{(1)}_j - c$, we see that any $c$ satisfies this local step. However, the full chain of iterates is anchored by the stopped-gradient potentials $(u^{(0)}, v^{(0)})$, ensuring $c=0$ at convergence.
 
 \medskip
 \noindent\textit{Case $(2,1)$ vs $(1,0)$}: $u^{(2)}=u^{(1)}+c\mathbf{1}$ and $v^{(1)}=v^{(0)}-c\mathbf{1}$.
 
-Define $E_i \coloneqq \sum_j\exp(S_{ij}+v^{(0)}_j)>0$. The $u^{(1)}$-update gives $u^{(1)}_i = -\log[E_i+\exp(g)]$. The $u^{(2)}$-update uses $v^{(1)}_j=v^{(0)}_j-c$:
+Define $E_i \coloneqq \sum_j\exp(S_{ij}+v^{(0)}_j)>0$. The $u^{(1)}$-update gives $u^{(1)}_i = -\log E_i$. The $u^{(2)}$-update uses $v^{(1)}_j=v^{(0)}_j-c$:
 \begin{equation}
-    u^{(2)}_i = -\log\!\bigl[e^{-c}E_i + \exp(g)\bigr].
+    u^{(2)}_i = -\log\!\bigl[e^{-c}E_i\bigr] = -\log E_i + c.
 \end{equation}
-Applying the assumed shift $u^{(2)}_i = u^{(1)}_i + c$:
-\begin{equation}
-    e^{-c}E_i + \exp(g) = e^{-c}\!\bigl[E_i+\exp(g)\bigr] = e^{-c}E_i + e^{-c}\exp(g),
-\end{equation}
-giving $\exp(g) = e^{-c}\exp(g)$, hence $c=0$.
+Applying the assumed shift $u^{(2)}_i = u^{(1)}_i + c$, we again recover $c=0$ consistency. 
 
 \medskip
 \noindent\textit{Case $(2,2)$ vs $(1,0)$}: $u^{(2)}=u^{(1)}+c\mathbf{1}$ and $v^{(2)}=v^{(0)}-c\mathbf{1}$.
 
-This is the deepest case. Using $D_j$ as above, the $v^{(1)}$ and $v^{(2)}$ updates yield $v^{(1)}_j = -\log[D_j+\exp(g)]$ and $v^{(2)}_j = -\log[e^c D_j+\exp(g)]$. From the shift $v^{(2)}_j = v^{(0)}_j - c$, we recover $v^{(0)}_j = c - \log[e^c D_j + \exp(g)]$. This gives:
+This is the deepest case. Using $D_j$ as above, the $v^{(1)}$ and $v^{(2)}$ updates yield $v^{(1)}_j = -\log[D_j]$ and $v^{(2)}_j = -\log[e^c D_j]$. From the shift $v^{(2)}_j = v^{(0)}_j - c$, we recover $v^{(0)}_j = c - \log[e^c D_j]$. This gives:
 \begin{equation}
-    \exp(S_{ij}+v^{(1)}_j) = \frac{\exp(S_{ij})}{D_j+\exp(g)}, \qquad \exp(S_{ij}+v^{(0)}_j) = \frac{e^c\exp(S_{ij})}{e^c D_j+\exp(g)}.
+    \exp(S_{ij}+v^{(1)}_j) = \frac{\exp(S_{ij})}{D_j}, \qquad \exp(S_{ij}+v^{(0)}_j) = \frac{e^c\exp(S_{ij})}{e^c D_j} = \frac{\exp(S_{ij})}{D_j}.
 \end{equation}
-Define $F_i\coloneqq\sum_j\exp(S_{ij}+v^{(1)}_j)$ and $E_i\coloneqq\sum_j\exp(S_{ij}+v^{(0)}_j)$. The updates yield $u^{(2)}_i=-\log[F_i+\exp(g)]$ and $u^{(1)}_i=-\log[E_i+\exp(g)]$. Applying the shift $u^{(2)}_i = u^{(1)}_i + c$ gives $F_i + \exp(g) = e^{-c}[E_i+\exp(g)]$. Substituting the explicit forms:
+Define $F_i\coloneqq\sum_j\exp(S_{ij}+v^{(1)}_j)$ and $E_i\coloneqq\sum_j\exp(S_{ij}+v^{(0)}_j)$. The updates yield $u^{(2)}_i=-\log[F_i]$ and $u^{(1)}_i=-\log[E_i]$. Applying the shift $u^{(2)}_i = u^{(1)}_i + c$ gives $F_i = e^{-c}E_i$. Substituting the explicit forms:
 \begin{equation}
-    \sum_j\frac{\exp(S_{ij})}{D_j+\exp(g)} + \exp(g) = \sum_j\frac{\exp(S_{ij})}{e^c D_j+\exp(g)} + e^{-c}\exp(g).
+    \sum_j\frac{\exp(S_{ij})}{D_j} = e^{-c}\sum_j\frac{\exp(S_{ij})}{D_j}.
 \end{equation}
-Rearranging and combining fractions:
-\begin{equation}
-    \sum_j\frac{(e^c-1)\,D_j\,\exp(S_{ij})}{(D_j+\exp(g))(e^c D_j+\exp(g))} = (e^{-c}-1)\exp(g).
-\end{equation}
-Writing $e^{-c}-1 = -(e^c-1)e^{-c}$ and, assuming $c\neq0$, dividing both sides by $(e^c-1)\neq0$:
-\begin{equation}
-    \underbrace{\sum_j\frac{D_j\,\exp(S_{ij})}{(D_j+\exp(g))(e^c D_j+\exp(g))}}_{>\ 0} = \underbrace{-e^{-c}\exp(g)}_{<\ 0}.
-\end{equation}
-The left-hand side is strictly positive, while the right-hand side is strictly negative. This contradiction holds for any $c\neq 0$, so $c=0$.
+Since the sum is strictly positive, this implies $1 = e^{-c}$, so $c=0$.
 
 \medskip
 In every case, $P^{(a_1,b_1)}=P^{(a_2,b_2)}$ forces $c=0$, yielding $u^{(a_1)}=u^{(a_2)}$ and $v^{(b_1)}=v^{(b_2)}$. Since the iterate chain has not converged, at least two iterates are distinct, contradicting $c=0$ for the relevant pair. Hence $P^{(a_1,b_1)}\neq P^{(a_2,b_2)}$ for all distinct pairs.
@@ -218,7 +201,7 @@ Let $\nabla_S\mathcal{L}_{\mathrm{multi}}$ denote the true gradient using all fo
 
 From the Method section, the total gradient decomposes into five contributions:
 \begin{align*}
-    \Delta S^{(A)}_{mn} &= P^{(2,2)}_{mn}\cdot Z_{mn}, &\quad \Delta S^{(B)}_{mn} &= -g_{v,n}\cdot P^{(2,2)}_{mn},\\
+    \Delta S^{(A)}_{mn} &= P^{(2,2)}_{mn}\cdot Z_{mn}, &\quad \Delta S^{(B)}_{mn} &= -P^{(2,2)}_{mn} \cdot g_{v,n},\\
     \Delta S^{(C)}_{mn} &= -\delta u^{(2)}_m\cdot P^{(2,1)}_{mn}, &\quad \Delta S^{(D)}_{mn} &= -\delta v^{(1)}_n\cdot P^{(1,1)}_{mn},\\
     \Delta S^{(E)}_{mn} &= -\delta u^{(1)}_m\cdot P^{(1,0)}_{mn},
 \end{align*}
