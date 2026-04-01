@@ -207,6 +207,15 @@ def run_long_benchmark(model_name, vocab):
             break
 
         if mesh is not None:
+             num_devices = len(mesh.devices.flat)
+             seq_len = emb_q.shape[2]
+             remainder = seq_len % num_devices
+             if remainder != 0:
+                 pad_len = num_devices - remainder
+                 emb_q = jnp.pad(emb_q, ((0,0), (0,0), (0, pad_len), (0,0)))
+                 emb_k = jnp.pad(emb_k, ((0,0), (0,0), (0, pad_len), (0,0)))
+                 emb_v = jnp.pad(emb_v, ((0,0), (0,0), (0, pad_len), (0,0)))
+                 
              sharding = NamedSharding(mesh, PartitionSpec(None, None, 'seq', None))
              emb_q = jax.device_put(emb_q, sharding)
              emb_k = jax.device_put(emb_k, sharding)
