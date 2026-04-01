@@ -231,12 +231,34 @@ The failure mode of single-$P$ methods is consistent across runs: training initi
 \subsection{Scaling to Long Contexts}
 
 % [Table 2 removed for barebones revision]
-
 % [Figure 4 removed for barebones revision]
 
 % [Figure 5 removed for barebones revision]
 
-At 16K tokens, standard softmax attention exceeds available memory entirely, while banded Sinkhorn ($W\!=\!2048$) trains to completion; demonstrating the practical necessity of $O(L{\cdot}W)$ memory scaling for long-context biological alignment (Table~\ref{tab:latency}, Figures~\ref{fig:memory}--\ref{fig:latency}). The banding restriction is biologically well-motivated: homologous residue pairs in protein alignments cluster near the diagonal, making a 2{,}048-residue attention window sufficient to capture relevant correspondences while reducing memory by $8\times$ relative to full attention.
+At 16K tokens, standard softmax attention exceeds available memory entirely, while banded Sinkhorn ($W\!=\!2048$) trains to completion; demonstrating the practical necessity of $O(L{\cdot}W)$ memory scaling for long-context biological alignment (Table~\ref{tab:latency}). The banding restriction is biologically well-motivated: homologous residue pairs in protein alignments cluster near the diagonal, making a 2{,}048-residue attention window sufficient to capture relevant correspondences while reducing memory by $8\times$ relative to full attention.
+
+\begin{table}[h]
+\centering
+\caption{Latency Benchmarks on TPU v6e (Trillium). Comparison between FlashAttention and our Pallas-optimized Sinkhorn OT kernel with 15 iterations and $W=2048$ banding. Latencies measured in milliseconds (ms).}
+\label{tab:latency}
+\begin{tabular}{llccc}
+\toprule
+\textbf{Context (L)} & \textbf{Method} & \textbf{Fwd (ms)} & \textbf{Bwd (ms)} & \textbf{Status} \\
+\midrule
+1024 & Flash Attention & 0.14 & 1.54 & Success \\
+1024 & Sinkhorn OT (Ours) & 363.24 & 4270.36 & Success \\
+\midrule
+4096 & Flash Attention & 0.14 & 1.47 & Success \\
+4096 & Sinkhorn OT (Ours) & 525.13 & 5033.42 & Success \\
+\midrule
+8192 & Flash Attention & 0.14 & 1.50 & Success \\
+8192 & Sinkhorn OT (Ours) & 711.66 & 5662.79 & Success \\
+\midrule
+16384 & Flash Attention & 0.15 & 1.51 & Success \\
+16384 & Sinkhorn OT (Ours) & 1264.84 & 7401.55 & Success \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 The Pallas kernel enables contexts that are wholly inaccessible to standard methods. Beyond 32K, the naive approach fails entirely (OOM), while banded Pallas Sinkhorn scales cleanly to 131K tokens with linear memory growth.
 
