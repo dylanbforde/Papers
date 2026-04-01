@@ -24,12 +24,6 @@ Usage:
 
 import os
 import sys
-
-# [CRITICAL FIX] Trillium single-host TPU VMs will crash inside jax backend initialization 
-# if the global grpc topology environment variables are erroneously left populated by GCP.
-for key in ['TPU_WORKER_ID', 'TPU_WORKER_HOSTNAMES', 'TPU_NAME', 'CLOUD_TPU_TASK_ID', 'TPU_MESH_CONTROLLER_ADDRESS', 'TPU_MESH_CONTROLLER_PORT']:
-    os.environ.pop(key, None)
-
 import time
 import json
 import argparse
