@@ -421,32 +421,33 @@ def dk_dv_kernel_multi(
             del_u1_block = m_data[:, :, 3]
             del_u2_block = m_data[:, :, 4]
 
-            # Score matrix
-            s_block = jnp.einsum("bmd,bnd->bmn", q_block, k_block) * scale
+            # Score matrix (transposed to (B, N, M) to natively support dot_general layout)
+            s_block_T = jnp.einsum("bnd,bmd->bnm", k_block, q_block) * scale
 
-            # 4 transport matrices
-            P22 = safe_exp(s_block + u2_block[:, :, None] + v2_block_n[:, None, :])
-            P21 = safe_exp(s_block + u2_block[:, :, None] + v1_block_n[:, None, :])
-            P11 = safe_exp(s_block + u1_block[:, :, None] + v1_block_n[:, None, :])
-            P10 = safe_exp(s_block + u1_block[:, :, None] + v0_block_n[:, None, :])
+            # 4 transport matrices (transposed)
+            P22_T = safe_exp(s_block_T + v2_block_n[:, :, None] + u2_block[:, None, :])
+            P21_T = safe_exp(s_block_T + v1_block_n[:, :, None] + u2_block[:, None, :])
+            P11_T = safe_exp(s_block_T + v1_block_n[:, :, None] + u1_block[:, None, :])
+            P10_T = safe_exp(s_block_T + v0_block_n[:, :, None] + u1_block[:, None, :])
 
-            # Z = dO @ V^T
-            z_block = jnp.einsum("bme,bne->bmn", do_block, v_mat_block)
+            # Z = V @ dO^T
+            z_block_T = jnp.einsum("bne,bme->bnm", v_mat_block, do_block)
 
-            # Full multi-transport dS
-            ds_block = (
-                P22 * z_block
-                - P22 * g_v_block_n[:, None, :]
-                - P21 * del_u2_block[:, :, None]
-                - P11 * del_v1_block_n[:, None, :]
-                - P10 * del_u1_block[:, :, None]
+            # Full multi-transport dS (transposed)
+            ds_block_T = (
+                P22_T * z_block_T
+                - P22_T * g_v_block_n[:, :, None]
+                - P21_T * del_u2_block[:, None, :]
+                - P11_T * del_v1_block_n[:, :, None]
+                - P10_T * del_u1_block[:, None, :]
             )
 
-            ds_block = jnp.where(mask, ds_block, 0.0)
-            P22 = jnp.where(mask, P22, 0.0)
+            ds_block_T = jnp.where(mask, ds_block_T, 0.0)
+            P22_T = jnp.where(mask, P22_T, 0.0)
 
-            dk_acc = dk_acc + jnp.einsum("bmn,bmd->bnd", ds_block, q_block)
-            dv_acc = dv_acc + jnp.einsum("bmn,bme->bne", P22, do_block)
+            # Standard native dot_general contractions: (B, N, M) @ (B, M, D/E) -> (B, N, D/E)
+            dk_acc = dk_acc + jnp.einsum("bnm,bmd->bnd", ds_block_T, q_block)
+            dv_acc = dv_acc + jnp.einsum("bnm,bme->bne", P22_T, do_block)
         return (dk_acc, dv_acc)
 
     res = jax.lax.fori_loop(start_iter, end_iter, body_fn, init_state)
