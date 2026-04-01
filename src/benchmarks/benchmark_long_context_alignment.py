@@ -1,18 +1,25 @@
 """
-ESM-2 Alignment Benchmark Suite - PRO/SOTA Edition
-==================================================
+Long-Context Alignment Benchmark Suite - PRO Edition
+====================================================
 
 This script evaluates the Multi-Transport-Plan Sinkhorn kernel against SOTA
-baselines (Flash Attention) using rich representations from ESM-2.
+baselines (Flash Attention) using rich representations from Long-Context Foundation Models.
+
+By defaulting to a Nucleotide sequence generator, this benchmark strictly evaluates
+ultra-long context alignment (16K+ tokens), representing tasks like Mega-Protein 
+alignment or Whole Genome / DNA Synteny matching where $O(L^2)$ attention physically fails. 
 
 Features:
 - SOTA Optimizers: MUON (Momentum Orthogonalizer) + AdamW.
 - SOTA Baselines: Flash Attention (JAX native block-wise dot-product attention).
 - Telemetry: JAX HW Profiling (Tensorboard) and comprehensive JSON data dumping.
-- Fairness: Equal parameter tuning and identical representation extraction.
 
 Usage:
-    python benchmark_esm2_alignment.py --model_name "facebook/esm2_t6_8M_UR50D"
+    # DNA / Nucleotide Transformer (e.g. InstaDeep's Multi-Species 100M)
+    python benchmark_long_context_alignment.py --model_name "InstaDeepAI/nucleotide-transformer-v2-100m-multi-species" --vocab dna
+    
+    # Mega-Protein (e.g. ESM-2)
+    python benchmark_long_context_alignment.py --model_name "facebook/esm2_t6_8M_UR50D" --vocab protein
 """
 
 import os
@@ -42,11 +49,6 @@ import ot_kernel
 # MUON OPTIMIZER SEED (Momentum Orthogonalizer via Newton-Schulz)
 # ==============================================================================
 def newton_schulz_orthogonalize(G, steps=5):
-    """
-    Core MUON step: Orthogonalize the gradient matrix G using Newton-Schulz iterations.
-    This operates on 2D matrices (e.g. Linear layer weights).
-    """
-    # Flatten non-2D into 2D if needed, but MUON mathematically targets 2D matrices.
     original_shape = G.shape
     if G.ndim > 2:
         G = G.reshape(G.shape[0], -1)
@@ -63,20 +65,14 @@ def newton_schulz_orthogonalize(G, steps=5):
     return X.reshape(original_shape)
 
 def muon_optimizer(learning_rate):
-    """
-    Optax-compatible MUON transformation.
-    Applies Newton-Schulz orthogonalization to the gradients.
-    """
     def init_fn(params):
         return optax.EmptyState()
 
     def update_fn(updates, state, params=None):
-        # Apply orthogonalization to weight matrices (ndim >= 2)
         new_updates = jax.tree_util.tree_map(
             lambda g: newton_schulz_orthogonalize(g) if g.ndim >= 2 else g,
             updates
         )
-        # Apply learning rate
         new_updates = jax.tree_util.tree_map(lambda g: g * learning_rate, new_updates)
         return new_updates, state
 
@@ -84,12 +80,20 @@ def muon_optimizer(learning_rate):
 
 
 # ==============================================================================
-# ESM-2 FEATURE EXTRACTION
+# FOUNDATION MODEL FEATURE EXTRACTION (DNA or Protein)
 # ==============================================================================
-def get_esm2_embeddings(sequences, model_name="facebook/esm2_t6_8M_UR50D"):
+def get_foundation_embeddings(sequences, model_name):
     print(f"Loading {model_name}...")
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModel.from_pretrained(model_name)
+    from transformers import AutoConfig
+    
+    # 1. Load the config first and patch the HuggingFace v4.40+ bug BEFORE model initialization
+    config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+    if not hasattr(config, 'is_decoder'):
+        config.is_decoder = False
+        
+    # 2. Instantiate with the patched config
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    model = AutoModel.from_pretrained(model_name, config=config, trust_remote_code=True)
     model.eval()
 
     inputs = tokenizer(sequences, return_tensors="pt", padding=True)
@@ -104,9 +108,6 @@ def get_esm2_embeddings(sequences, model_name="facebook/esm2_t6_8M_UR50D"):
 # PROFILING & BENCHMARK CORE
 # ==============================================================================
 def benchmark_attention_kernel(Q, K, V, kernel_fn, name, log_dir, num_iters=5):
-    """
-    Measures forward/backward latency, captures XLA profiles (isolated), and returns stats.
-    """
     # 1. Forward Warmup & Timing (No Profiler)
     for _ in range(2):
         out = kernel_fn(Q, K, V)
@@ -145,8 +146,7 @@ def benchmark_attention_kernel(Q, K, V, kernel_fn, name, log_dir, num_iters=5):
     jax.block_until_ready(grad_fn(Q, K, V))
     jax.profiler.stop_trace()
 
-    # Calculate theoretical memory footprint (Params + Gradients)
-    bytes_per_param = 4 # float32
+    bytes_per_param = 4 
     memory_mb = (Q.size + K.size + V.size) * bytes_per_param * 3 / (1024 * 1024)
 
     return {
@@ -157,21 +157,22 @@ def benchmark_attention_kernel(Q, K, V, kernel_fn, name, log_dir, num_iters=5):
     }
 
 
-def generate_synthetic_aligned_pairs(L):
-    AAs = list("ACDEFGHIKLMNPQRSTVWY")
-    seq1 = "".join(np.random.choice(AAs, size=L))
+def generate_synthetic_aligned_pairs(L, vocab="dna"):
+    vocab_set = list("ACGT") if vocab == "dna" else list("ACDEFGHIKLMNPQRSTVWY")
+    seq1 = "".join(np.random.choice(vocab_set, size=L))
     seq2_list = list(seq1)
     for idx in np.random.choice(L, size=int(0.2 * L), replace=False):
-        seq2_list[idx] = np.random.choice(AAs)
+        seq2_list[idx] = np.random.choice(vocab_set)
     return [seq1, "".join(seq2_list)]
 
 
-def run_esm_benchmark(model_name):
+def run_long_benchmark(model_name, vocab):
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     log_dir = f"/tmp/tensorboard_profiles_{timestamp}"
     os.makedirs(log_dir, exist_ok=True)
     
-    lengths = [1024, 4096, 8192, 16384] # Scaling up to long-context multi-domain proteins
+    # Scaling linearly into regions where FlashAttention and Standard OOM
+    lengths = [1024, 4096, 8192, 16384] 
     results_db = []
     
     try:
@@ -181,17 +182,17 @@ def run_esm_benchmark(model_name):
         mesh = None
 
     print(f"===================================================================")
-    print(f"   ESM-2 SOTA Alignment Benchmark (PRO Edition)")
+    print(f"   Long-Context Foundation Model Alignment Benchmark")
     print(f"   Backbone: {model_name}")
-    print(f"   Profiling Directory: {log_dir}")
+    print(f"   Target: {vocab.upper()} (Testing massive context survival)")
     print(f"===================================================================\n")
     print(f"| {'Context (L)':<12} | {'Method':<20} | {'Fwd (ms)':<10} | {'Bwd (ms)':<10} | {'Status':<15} |")
     print("-" * 80)
     
     for L in lengths:
-        seqs = generate_synthetic_aligned_pairs(L)
+        seqs = generate_synthetic_aligned_pairs(L, vocab=vocab)
         try:
-            embeddings = get_esm2_embeddings(seqs, model_name=model_name)
+            embeddings = get_foundation_embeddings(seqs, model_name=model_name)
             emb_q = embeddings[0:1, :, :][:, None, :, :]
             emb_k = embeddings[1:2, :, :][:, None, :, :]
             emb_v = emb_k
@@ -207,8 +208,7 @@ def run_esm_benchmark(model_name):
 
         dim = emb_q.shape[-1]
         
-        # ---------------------------------------------------------
-        # Baseline: SOTA Flash Attention (jax.nn.dot_product_attention lowers to Flash on TPU)
+        # 1. Baseline: SOTA Flash Attention
         def flash_attn_baseline(q, k, v):
             return jax.nn.dot_product_attention(q, k, v)
 
@@ -220,8 +220,7 @@ def run_esm_benchmark(model_name):
         except Exception as e:
             print(f"| {L:<12} | {'Flash Attention':<20} | {'OOM':<10} | {'OOM':<10} | {'Failed':<15} |")
 
-        # ---------------------------------------------------------
-        # Ours: Sinkhorn OT Block-Wise Attention
+        # 2. Ours: Sinkhorn OT Block-Wise Attention
         band_width = min(2048, L)
         def sinkhorn_attn(q, k, v):
             return ot_kernel.ot_sinkhorn_alignment(q, k, v, n_iters=15, band_width=band_width, mesh=mesh)
@@ -237,8 +236,6 @@ def run_esm_benchmark(model_name):
         print("-" * 80)
         del embeddings, emb_q, emb_k, emb_v
 
-    # ---------------------------------------------------------
-    # Dump comprehensive tuning and metadata configurations
     run_metadata = {
         "timestamp": timestamp,
         "model_name": model_name,
@@ -252,15 +249,12 @@ def run_esm_benchmark(model_name):
     out_file = f"benchmark_results_{timestamp}.json"
     with open(out_file, "w") as f:
         json.dump(run_metadata, f, indent=4)
-        
-    print(f"\n[+] Benchmark complete. All telemetry, parameters, and profiles saved to:")
-    print(f"    -> JSON Metadata: {out_file}")
-    print(f"    -> TensorBoard Profiles: {log_dir}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="ESM-2 Pro Benchmark")
-    parser.add_argument("--model_name", type=str, default="facebook/esm2_t6_8M_UR50D")
+    parser = argparse.ArgumentParser(description="Long Context SOTA Alignment Benchmark")
+    parser.add_argument("--model_name", type=str, default="InstaDeepAI/nucleotide-transformer-v2-100m-multi-species")
+    parser.add_argument("--vocab", type=str, choices=["dna", "protein"], default="dna", help="Type of sequence to generate")
     args = parser.parse_args()
     
-    run_esm_benchmark(args.model_name)
+    run_long_benchmark(args.model_name, args.vocab)
