@@ -24,6 +24,14 @@ Usage:
 
 import os
 import sys
+
+# [CRITICAL FIX] Trillium single-host TPU VMs will crash inside jax backend initialization 
+# if the global grpc topology environment variables are erroneously left populated by GCP.
+if 'TPU_WORKER_HOSTNAMES' in os.environ and len(os.environ['TPU_WORKER_HOSTNAMES'].split(",")) == 1:
+    os.environ.pop('TPU_WORKER_HOSTNAMES', None)
+    os.environ.pop('TPU_WORKER_ID', None)
+    os.environ.pop('TPU_NAME', None)
+
 import time
 import json
 import argparse
@@ -36,10 +44,10 @@ import optax
 from jax.sharding import Mesh, PartitionSpec, NamedSharding
 
 import torch
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoTokenizer, AutoModel, AutoConfig
 
 # Initialize JAX multi-host distributed cluster (only required for Multi-TPU pod slices > 8 chips)
-if "MEGATRON_WORKER" in os.environ or "TPU_WORKER_HOSTNAMES" in os.environ:
+if "MEGATRON_WORKER" in os.environ or ("TPU_WORKER_HOSTNAMES" in os.environ and len(os.environ['TPU_WORKER_HOSTNAMES'].split(",")) > 1):
     try:
         jax.distributed.initialize()
     except Exception:
