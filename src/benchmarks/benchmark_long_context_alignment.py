@@ -38,8 +38,12 @@ from jax.sharding import Mesh, PartitionSpec, NamedSharding
 import torch
 from transformers import AutoTokenizer, AutoModel
 
-# Initialize JAX multi-host distributed cluster (required for Multi-TPU pod slices)
-jax.distributed.initialize()
+# Initialize JAX multi-host distributed cluster (only required for Multi-TPU pod slices > 8 chips)
+if "MEGATRON_WORKER" in os.environ or "TPU_WORKER_HOSTNAMES" in os.environ:
+    try:
+        jax.distributed.initialize()
+    except Exception:
+        pass
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import ot_kernel
