@@ -95,7 +95,7 @@ def get_foundation_embeddings(sequences, model_name):
         
     # 2. Instantiate with the patched config
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    model = AutoModel.from_pretrained(model_name, config=config, trust_remote_code=True)
+    model = AutoModel.from_pretrained(model_name, config=config, trust_remote_code=True, ignore_mismatched_sizes=True)
     model.eval()
 
     inputs = tokenizer(sequences, return_tensors="pt", padding=True)
