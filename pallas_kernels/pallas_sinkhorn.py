@@ -430,7 +430,7 @@ def dk_dv_kernel_multi(
             
             ds_block_T = P11_T * (
                 exp_v2_v1[:, None] * exp_u2_u1[None, :] * (z_block_T - g_v_n[:, None])
-                - exp_v2_v1[:, None] * del_u2_m[None, :]
+                - exp_u2_u1[None, :] * del_u2_m[None, :]
                 - del_v1_n[:, None]
                 - exp_v0_v1[:, None] * del_u1_m[None, :]
             )
