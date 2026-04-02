@@ -293,27 +293,25 @@ def dq_kernel_multi(
     dS_{mn} = P22*Z - P22*g_v - P21*del_u2 - P11*del_v1 - P10*del_u1
     dQ_m = sum_n dS_{mn} * K_n * scale
     """
-    q_block = Q_ref[...]     # (BATCH_BLOCK, BLOCK, D)
-    do_block = dO_ref[...]   # (BATCH_BLOCK, BLOCK, E)
-    m_data = M_data_ref[...] # (BATCH_BLOCK, BLOCK, 8) — m-side packed data
+    q_block = Q_ref[...]     # (BLOCK, D)
+    do_block = dO_ref[...]   # (BLOCK, E)
+    m_data = M_data_ref[...] # (BLOCK, 8)
     W = W_ref[0]
 
-    # Unpack m-side potentials and gradients
-    u0_block = m_data[:, :, 0]   # (BATCH_BLOCK, BLOCK)
-    u1_block = m_data[:, :, 1]
-    u2_block = m_data[:, :, 2]
-    del_u1_block = m_data[:, :, 3]
-    del_u2_block = m_data[:, :, 4]
+    u1_m = m_data[:, 1]
+    u2_m = m_data[:, 2]
+    del_u1_m = m_data[:, 3]
+    del_u2_m = m_data[:, 4]
 
     D = q_block.shape[-1]
     scale = 1.0 / jnp.sqrt(D)
 
-    N = K_ref.shape[1]
+    N = K_ref.shape[0]
     BLOCK_N = 128
     UNROLL = 4
     iters = N // BLOCK_N
 
-    m = pl.program_id(1)
+    m = pl.program_id(0)
     start_block = jnp.maximum(0, m - W)
     end_block = jnp.minimum(iters, m + W + 1)
     start_iter = start_block // UNROLL
@@ -328,44 +326,43 @@ def dq_kernel_multi(
             off = k_idx * BLOCK_N
             mask = (k_idx >= start_block) & (k_idx < end_block)
 
-            k_block = K_ref[:, pl.ds(off, BLOCK_N), :]
-            v_mat_block = V_ref[:, pl.ds(off, BLOCK_N), :]
-            n_data = N_data_ref[:, pl.ds(off, BLOCK_N), :]
+            k_block = K_ref[pl.ds(off, BLOCK_N), :]
+            v_mat_block = V_ref[pl.ds(off, BLOCK_N), :]
+            n_data = N_data_ref[pl.ds(off, BLOCK_N), :]
 
-            # Unpack n-side potentials and gradients
-            v0_block = n_data[:, :, 0]
-            v1_block = n_data[:, :, 1]
-            v2_block = n_data[:, :, 2]
-            g_v_block = n_data[:, :, 3]
-            del_v1_block = n_data[:, :, 4]
+            v0_n = n_data[:, 0]
+            v1_n = n_data[:, 1]
+            v2_n = n_data[:, 2]
+            g_v_n = n_data[:, 3]
+            del_v1_n = n_data[:, 4]
 
-            # Score matrix
-            s_block = jnp.einsum("bmd,bnd->bmn", q_block, k_block) * scale
+            # Core Transport Plan Block P^{(1,1)}
+            s_block = jnp.einsum("md,nd->mn", q_block, k_block) * scale
+            P11 = safe_exp(s_block + u1_m[:, None] + v1_n[None, :])
 
-            # 4 transport matrices (recomputed from packed potentials)
-            P22 = safe_exp(s_block + u2_block[:, :, None] + v2_block[:, None, :])
-            P21 = safe_exp(s_block + u2_block[:, :, None] + v1_block[:, None, :])
-            P11 = safe_exp(s_block + u1_block[:, :, None] + v1_block[:, None, :])
-            P10 = safe_exp(s_block + u1_block[:, :, None] + v0_block[:, None, :])
+            # Multi-Transport Plan Factorization (Proposition 1)
+            # P^{(a,b)} = P^{(1,1)} * exp(u_a - u_1) * exp(v_b - v_1)
+            # This factors out the expensive NxN matrix exponentials.
+            exp_u2_u1 = safe_exp(u2_m - u1_m)
+            exp_v2_v1 = safe_exp(v2_n - v1_n)
+            exp_v0_v1 = safe_exp(v0_n - v1_n)
 
-            # Z = dO @ V^T
-            z_block = jnp.einsum("bme,bne->bmn", do_block, v_mat_block)
+            z_block = jnp.einsum("me,ne->mn", do_block, v_mat_block)
 
-            # Full multi-transport dS (5 terms: A, B, C, D, E)
-            ds_block = (
-                P22 * z_block
-                - P22 * g_v_block[:, None, :]
-                - P21 * del_u2_block[:, :, None]
-                - P11 * del_v1_block[:, None, :]
-                - P10 * del_u1_block[:, :, None]
+            # dS = Term A - Term B - Term C - Term D - Term E
+            # Algebraic reduction: factor out P11
+            ds_block = P11 * (
+                exp_u2_u1[:, None] * exp_v2_v1[None, :] * (z_block - g_v_n[None, :])
+                - exp_u2_u1[:, None] * del_u2_m[:, None]
+                - del_v1_n[None, :]
+                - exp_v0_v1[None, :] * del_u1_m[:, None]
             )
 
             ds_block = jnp.where(mask, ds_block, 0.0)
-            dq_acc = dq_acc + jnp.einsum("bmn,bnd->bmd", ds_block, k_block)
+            dq_acc = dq_acc + jnp.einsum("mn,nd->md", ds_block, k_block)
         return (dq_acc,)
 
-    res = jax.lax.fori_loop(start_iter, end_iter, body_fn, init_state)
-    dq_acc = res[0]
+    dq_acc = jax.lax.fori_loop(start_iter, end_iter, body_fn, init_state)[0]
     dQ_ref[...] = dq_acc * scale
 
 
@@ -376,26 +373,24 @@ def dk_dv_kernel_multi(
     Fused Pallas kernel: compute dK, dV using the multi-transport-plan formula.
     Executes entirely in TPU VMEM with banded iteration.
     """
-    k_block = K_ref[...]       # (BATCH_BLOCK, BLOCK, D)
-    v_mat_block = V_ref[...]   # (BATCH_BLOCK, BLOCK, E)
-    n_data = N_data_ref[...]   # (BATCH_BLOCK, BLOCK, 8) — n-side packed data
+    k_block = K_ref[...]       # (BLOCK, D)
+    v_mat_block = V_ref[...]   # (BLOCK, E)
+    n_data = N_data_ref[...]   # (BLOCK, 8)
     W = W_ref[0]
 
-    # Unpack n-side potentials and gradients
-    v0_block_n = n_data[:, :, 0]
-    v1_block_n = n_data[:, :, 1]
-    v2_block_n = n_data[:, :, 2]
-    g_v_block_n = n_data[:, :, 3]
-    del_v1_block_n = n_data[:, :, 4]
+    v1_n = n_data[:, 1]
+    v2_n = n_data[:, 2]
+    g_v_n = n_data[:, 3]
+    del_v1_n = n_data[:, 4]
 
     D = k_block.shape[-1]
-    M = Q_ref.shape[1]
+    M = Q_ref.shape[0]
     BLOCK_M = 128
     UNROLL = 4
     iters = M // BLOCK_M
     scale = 1.0 / jnp.sqrt(D)
 
-    n = pl.program_id(1)
+    n = pl.program_id(0)
     start_block = jnp.maximum(0, n - W)
     end_block = jnp.minimum(iters, n + W + 1)
     start_iter = start_block // UNROLL
@@ -410,43 +405,41 @@ def dk_dv_kernel_multi(
             off = m_idx * BLOCK_M
             mask = (m_idx >= start_block) & (m_idx < end_block)
 
-            q_block = Q_ref[:, pl.ds(off, BLOCK_M), :]
-            do_block = dO_ref[:, pl.ds(off, BLOCK_M), :]
-            m_data = M_data_ref[:, pl.ds(off, BLOCK_M), :]
+            q_block = Q_ref[pl.ds(off, BLOCK_M), :]
+            do_block = dO_ref[pl.ds(off, BLOCK_M), :]
+            m_data = M_data_ref[pl.ds(off, BLOCK_M), :]
 
-            # Unpack m-side potentials and gradients
-            u0_block = m_data[:, :, 0]
-            u1_block = m_data[:, :, 1]
-            u2_block = m_data[:, :, 2]
-            del_u1_block = m_data[:, :, 3]
-            del_u2_block = m_data[:, :, 4]
+            u0_m = m_data[:, 0]
+            u1_m = m_data[:, 1]
+            u2_m = m_data[:, 2]
+            del_u1_m = m_data[:, 3]
+            del_u2_m = m_data[:, 4]
 
-            # Score matrix
-            s_block = jnp.einsum("bmd,bnd->bmn", q_block, k_block) * scale
+            # Core Transport Plan Block P^{(1,1)} (transposed)
+            s_block_T = jnp.einsum("nd,md->nm", k_block, q_block) * scale
+            P11_T = safe_exp(s_block_T + v1_n[:, None] + u1_m[None, :])
 
-            # 4 transport matrices
-            P22 = safe_exp(s_block + u2_block[:, :, None] + v2_block_n[:, None, :])
-            P21 = safe_exp(s_block + u2_block[:, :, None] + v1_block_n[:, None, :])
-            P11 = safe_exp(s_block + u1_block[:, :, None] + v1_block_n[:, None, :])
-            P10 = safe_exp(s_block + u1_block[:, :, None] + v0_block_n[:, None, :])
+            # Multi-Transport Plan Factorization
+            exp_u2_u1 = safe_exp(u2_m - u1_m)
+            exp_u0_u1 = safe_exp(u0_m - u1_m)
+            exp_v2_v1 = safe_exp(v2_n - v1_n)
 
-            # Z = dO @ V^T
-            z_block = jnp.einsum("bme,bne->bmn", do_block, v_mat_block)
-
-            # Full multi-transport dS
-            ds_block = (
-                P22 * z_block
-                - P22 * g_v_block_n[:, None, :]
-                - P21 * del_u2_block[:, :, None]
-                - P11 * del_v1_block_n[:, None, :]
-                - P10 * del_u1_block[:, :, None]
+            # dS_T = Term A - Term B - Term C - Term D - Term E
+            # (Note: Z_T = V @ dO^T)
+            z_block_T = jnp.einsum("ne,me->nm", v_mat_block, do_block)
+            
+            ds_block_T = P11_T * (
+                exp_v2_v1[:, None] * exp_u2_u1[None, :] * (z_block_T - g_v_n[:, None])
+                - exp_v2_v1[:, None] * del_u2_m[None, :]
+                - del_v1_n[:, None]
+                - exp_u0_u1[None, :] * del_u1_m[None, :]
             )
 
-            ds_block = jnp.where(mask, ds_block, 0.0)
-            P22 = jnp.where(mask, P22, 0.0)
+            ds_block_T = jnp.where(mask, ds_block_T, 0.0)
+            P22_T = jnp.where(mask, P11_T * exp_v2_v1[:, None] * exp_u2_u1[None, :], 0.0)
 
-            dk_acc = dk_acc + jnp.einsum("bnm,bmd->bnd", ds_block.transpose(0, 2, 1), q_block)
-            dv_acc = dv_acc + jnp.einsum("bnm,bme->bne", P22.transpose(0, 2, 1), do_block)
+            dk_acc = dk_acc + jnp.einsum("nm,md->nd", ds_block_T, q_block)
+            dv_acc = dv_acc + jnp.einsum("nm,me->ne", P22_T, do_block)
         return (dk_acc, dv_acc)
 
     res = jax.lax.fori_loop(start_iter, end_iter, body_fn, init_state)
@@ -456,304 +449,118 @@ def dk_dv_kernel_multi(
 
 
 def pallas_sinkhorn_bwd_fused(Q, K, V, dO, M_data, N_data, band_width):
-    """
-    Launch fused Pallas multi-transport backward kernels on TPU.
-    
-    Args:
-        Q, K, V: (B, H, M, D) / (B, H, N, D) / (B, H, N, E)
-        dO: (B, H, M, E) upstream gradient
-        M_data: (B, H, M, 8) packed [u0, u1, u2, del_u1, del_u2, 0, 0, 0]
-        N_data: (B, H, N, 8) packed [v0, v1, v2, g_v, del_v1, 0, 0, 0]
-        band_width: int or None
-    """
-    B, H, M, D = Q.shape
-    _, _, N, E = V.shape
-    C = 8  # packed channel dim (mod 8 for v6e)
-
-    Batch = B * H
-    Q_f = Q.reshape(Batch, M, D)
-    K_f = K.reshape(Batch, N, D)
-    V_f = V.reshape(Batch, N, E)
-    dO_f = dO.reshape(Batch, M, E)
-    M_data_f = M_data.reshape(Batch, M, C)
-    N_data_f = N_data.reshape(Batch, N, C)
+    """Launch fused Pallas kernels over Batch/Head sequentially."""
+    M, D = Q.shape
+    N, E = V.shape
+    C = 8
 
     BLOCK = 128
-    # Adapt BATCH_BLOCK to actual batch: must divide Batch and be mod-8 for v6e
-    BATCH_BLOCK = min(8, Batch)
-    while Batch % BATCH_BLOCK != 0 and BATCH_BLOCK > 1:
-        BATCH_BLOCK -= 1
-
     W_val = band_width // BLOCK if band_width is not None else M // BLOCK
     W_arr = jnp.array([W_val], dtype=jnp.int32)
 
     is_cpu = jax.devices()[0].platform == "cpu"
-    kw = (
-        {"interpret": True}
-        if is_cpu
-        else {"compiler_params": resolve_compiler_params(("parallel", "parallel"))}
-    )
+    kw = {"interpret": True} if is_cpu else {}
 
-    # --- dQ kernel ---
-    grid_dq = (Batch // BATCH_BLOCK, M // BLOCK)
+    grid_dq = (M // BLOCK,)
     dQ_f = pl.pallas_call(
         dq_kernel_multi,
-        out_shape=jax.ShapeDtypeStruct(Q_f.shape, Q_f.dtype),
+        out_shape=jax.ShapeDtypeStruct(Q.shape, Q.dtype),
         grid=grid_dq,
         in_specs=[
-            pl.BlockSpec(index_map=lambda b, m: (b, m, 0), block_shape=(BATCH_BLOCK, BLOCK, D)),      # Q
-            pl.BlockSpec(index_map=lambda b, m: (b, 0, 0), block_shape=(BATCH_BLOCK, N, D)),          # K
-            pl.BlockSpec(index_map=lambda b, m: (b, 0, 0), block_shape=(BATCH_BLOCK, N, E)),          # V
-            pl.BlockSpec(index_map=lambda b, m: (b, m, 0), block_shape=(BATCH_BLOCK, BLOCK, C)),      # M_data
-            pl.BlockSpec(index_map=lambda b, m: (b, 0, 0), block_shape=(BATCH_BLOCK, N, C)),          # N_data
-            pl.BlockSpec(index_map=lambda b, m: (b, m, 0), block_shape=(BATCH_BLOCK, BLOCK, E)),      # dO
-            pl.BlockSpec(index_map=lambda b, m: (0,), block_shape=(1,)),                              # W
+            pl.BlockSpec(index_map=lambda m: (m, 0), block_shape=(BLOCK, D)),
+            pl.BlockSpec(index_map=lambda m: (0, 0), block_shape=(N, D)),
+            pl.BlockSpec(index_map=lambda m: (0, 0), block_shape=(N, E)),
+            pl.BlockSpec(index_map=lambda m: (m, 0), block_shape=(BLOCK, C)),
+            pl.BlockSpec(index_map=lambda m: (0, 0), block_shape=(N, C)),
+            pl.BlockSpec(index_map=lambda m: (m, 0), block_shape=(BLOCK, E)),
+            pl.BlockSpec(index_map=lambda m: (0,), block_shape=(1,)),
         ],
-        out_specs=pl.BlockSpec(index_map=lambda b, m: (b, m, 0), block_shape=(BATCH_BLOCK, BLOCK, D)),
+        out_specs=pl.BlockSpec(index_map=lambda m: (m, 0), block_shape=(BLOCK, D)),
         **kw,
-    )(Q_f, K_f, V_f, M_data_f, N_data_f, dO_f, W_arr)
+    )(Q, K, V, M_data, N_data, dO, W_arr)
 
-    # --- dK, dV kernel ---
-    grid_dk_dv = (Batch // BATCH_BLOCK, N // BLOCK)
-    out_shape_k = jax.ShapeDtypeStruct(K_f.shape, K_f.dtype)
-    out_shape_v = jax.ShapeDtypeStruct(V_f.shape, V_f.dtype)
-
+    grid_dk_dv = (N // BLOCK,)
     dK_f, dV_f = pl.pallas_call(
         dk_dv_kernel_multi,
-        out_shape=(out_shape_k, out_shape_v),
+        out_shape=(jax.ShapeDtypeStruct(K.shape, K.dtype), jax.ShapeDtypeStruct(V.shape, V.dtype)),
         grid=grid_dk_dv,
         in_specs=[
-            pl.BlockSpec(index_map=lambda b, n: (b, 0, 0), block_shape=(BATCH_BLOCK, M, D)),          # Q
-            pl.BlockSpec(index_map=lambda b, n: (b, n, 0), block_shape=(BATCH_BLOCK, BLOCK, D)),      # K
-            pl.BlockSpec(index_map=lambda b, n: (b, n, 0), block_shape=(BATCH_BLOCK, BLOCK, E)),      # V
-            pl.BlockSpec(index_map=lambda b, n: (b, 0, 0), block_shape=(BATCH_BLOCK, M, C)),          # M_data
-            pl.BlockSpec(index_map=lambda b, n: (b, n, 0), block_shape=(BATCH_BLOCK, BLOCK, C)),      # N_data
-            pl.BlockSpec(index_map=lambda b, n: (b, 0, 0), block_shape=(BATCH_BLOCK, M, E)),          # dO
-            pl.BlockSpec(index_map=lambda b, n: (0,), block_shape=(1,)),                              # W
+            pl.BlockSpec(index_map=lambda n: (0, 0), block_shape=(M, D)),
+            pl.BlockSpec(index_map=lambda n: (n, 0), block_shape=(BLOCK, D)),
+            pl.BlockSpec(index_map=lambda n: (n, 0), block_shape=(BLOCK, E)),
+            pl.BlockSpec(index_map=lambda n: (0, 0), block_shape=(M, C)),
+            pl.BlockSpec(index_map=lambda n: (n, 0), block_shape=(BLOCK, C)),
+            pl.BlockSpec(index_map=lambda n: (0, 0), block_shape=(M, E)),
+            pl.BlockSpec(index_map=lambda n: (0,), block_shape=(1,)),
         ],
         out_specs=[
-            pl.BlockSpec(index_map=lambda b, n: (b, n, 0), block_shape=(BATCH_BLOCK, BLOCK, D)),
-            pl.BlockSpec(index_map=lambda b, n: (b, n, 0), block_shape=(BATCH_BLOCK, BLOCK, E)),
+            pl.BlockSpec(index_map=lambda n: (n, 0), block_shape=(BLOCK, D)),
+            pl.BlockSpec(index_map=lambda n: (n, 0), block_shape=(BLOCK, E)),
         ],
         **kw,
-    )(Q_f, K_f, V_f, M_data_f, N_data_f, dO_f, W_arr)
+    )(Q, K, V, M_data, N_data, dO, W_arr)
 
-    return dQ_f.reshape(Q.shape), dK_f.reshape(K.shape), dV_f.reshape(V.shape)
-
-
-# ============================================================================
-# Backward Pass: Novel Multi-Transport-Plan (Proposition 1)
-# ============================================================================
-# Instead of the divergent Richardson/Gauss-Seidel adjoint, we explicitly
-# unroll 2 Sinkhorn backward steps using 4 distinct transport matrices.
-# This eliminates the multiplicative gradient bias proven in Theorem 1.
-
-def _banded_compute_next_uv(Q, K, u_in, v_in, scale, BLOCK, num_blocks, W, slice_size):
-    """Compute one Sinkhorn half-step (u_new, v_new) with banding."""
-    # Row update: u_new_m = -log sum_n exp(S_mn + v_in_n)
-    def scan_u(carry, i):
-        q_block = jax.lax.dynamic_slice_in_dim(Q, i * BLOCK, BLOCK, axis=-2)
-        start_idx = jnp.minimum(jnp.maximum(0, i - W), num_blocks - slice_size)
-        k_band = jax.lax.dynamic_slice_in_dim(K, start_idx * BLOCK, slice_size * BLOCK, axis=-2)
-        v_band = jax.lax.dynamic_slice_in_dim(v_in, start_idx * BLOCK, slice_size * BLOCK, axis=-1)
-
-        S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block, k_band) * scale
-        logits = S_block + v_band[..., None, :]
-
-        abs_indices = start_idx + jnp.arange(slice_size * BLOCK) // BLOCK
-        mask = jnp.abs(abs_indices - i) <= W
-        logits = jnp.where(mask[None, None, None, :], logits, -jnp.inf)
-
-        u_new_block = -jax.scipy.special.logsumexp(logits, axis=-1)
-        return carry, u_new_block
-
-    _, u_blocks = jax.lax.scan(scan_u, None, jnp.arange(num_blocks))
-    u_new = jnp.concatenate(u_blocks, axis=-1)
-
-    # Col update: v_new_n = -log sum_m exp(S_mn + u_new_m)
-    def scan_v(carry, j):
-        k_block = jax.lax.dynamic_slice_in_dim(K, j * BLOCK, BLOCK, axis=-2)
-        start_idx = jnp.minimum(jnp.maximum(0, j - W), num_blocks - slice_size)
-        q_band = jax.lax.dynamic_slice_in_dim(Q, start_idx * BLOCK, slice_size * BLOCK, axis=-2)
-        u_band = jax.lax.dynamic_slice_in_dim(u_new, start_idx * BLOCK, slice_size * BLOCK, axis=-1)
-
-        S_block = jnp.einsum("bhmd,bhnd->bhmn", q_band, k_block) * scale
-        logits = S_block + u_band[..., :, None]
-
-        abs_indices = start_idx + jnp.arange(slice_size * BLOCK) // BLOCK
-        mask = jnp.abs(abs_indices - j) <= W
-        logits = jnp.where(mask[None, None, :, None], logits, -jnp.inf)
-
-        v_new_block = -jax.scipy.special.logsumexp(logits, axis=-2)
-        return carry, v_new_block
-
-    _, v_blocks = jax.lax.scan(scan_v, None, jnp.arange(num_blocks))
-    v_new = jnp.concatenate(v_blocks, axis=-1)
-
-    return u_new, v_new
-
-
-def _banded_matvec_P(Q, K, u_a, v_b, vec, scale, BLOCK, num_blocks, W, slice_size, direction="row"):
-    """
-    Compute P^{(a,b)} @ vec (direction='row') or P^{(a,b)}^T @ vec (direction='col')
-    using banded block-wise computation. Never materialises the full L×L matrix.
-    
-    P^{(a,b)}_{mn} = exp(S_{mn} + u^{(a)}_m + v^{(b)}_n)
-    
-    direction='row': result_m = sum_n P_{mn} * vec_n   (output size M)
-    direction='col': result_n = sum_m P_{mn} * vec_m   (output size N)
-    """
-    if direction == "row":
-        # For each query block m, sum over key blocks n in band
-        def scan_body(carry, i):
-            q_block = jax.lax.dynamic_slice_in_dim(Q, i * BLOCK, BLOCK, axis=-2)
-            u_block = jax.lax.dynamic_slice_in_dim(u_a, i * BLOCK, BLOCK, axis=-1)
-            
-            start_idx = jnp.minimum(jnp.maximum(0, i - W), num_blocks - slice_size)
-            k_band = jax.lax.dynamic_slice_in_dim(K, start_idx * BLOCK, slice_size * BLOCK, axis=-2)
-            v_band = jax.lax.dynamic_slice_in_dim(v_b, start_idx * BLOCK, slice_size * BLOCK, axis=-1)
-            vec_band = jax.lax.dynamic_slice_in_dim(vec, start_idx * BLOCK, slice_size * BLOCK, axis=-1)
-            
-            S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block, k_band) * scale
-            A_block = safe_exp(S_block + u_block[..., :, None] + v_band[..., None, :])
-            
-            abs_indices = start_idx + jnp.arange(slice_size * BLOCK) // BLOCK
-            mask = jnp.abs(abs_indices - i) <= W
-            A_block = jnp.where(mask[None, None, None, :], A_block, 0.0)
-            
-            # result_m = sum_n A_{mn} * vec_n
-            res_block = jnp.sum(A_block * vec_band[..., None, :], axis=-1)
-            return carry, res_block
-
-        _, res_blocks = jax.lax.scan(scan_body, None, jnp.arange(num_blocks))
-        return jnp.concatenate(res_blocks, axis=-1)
-    else:
-        # direction='col': for each key block n, sum over query blocks m in band
-        result = jnp.zeros_like(v_b)
-        
-        def scan_body(acc, i):
-            q_block = jax.lax.dynamic_slice_in_dim(Q, i * BLOCK, BLOCK, axis=-2)
-            u_block = jax.lax.dynamic_slice_in_dim(u_a, i * BLOCK, BLOCK, axis=-1)
-            vec_block = jax.lax.dynamic_slice_in_dim(vec, i * BLOCK, BLOCK, axis=-1)
-            
-            start_idx = jnp.minimum(jnp.maximum(0, i - W), num_blocks - slice_size)
-            k_band = jax.lax.dynamic_slice_in_dim(K, start_idx * BLOCK, slice_size * BLOCK, axis=-2)
-            v_band = jax.lax.dynamic_slice_in_dim(v_b, start_idx * BLOCK, slice_size * BLOCK, axis=-1)
-            
-            S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block, k_band) * scale
-            A_block = safe_exp(S_block + u_block[..., :, None] + v_band[..., None, :])
-            
-            abs_indices = start_idx + jnp.arange(slice_size * BLOCK) // BLOCK
-            mask = jnp.abs(abs_indices - i) <= W
-            A_block = jnp.where(mask[None, None, None, :], A_block, 0.0)
-            
-            # result_n = sum_m A_{mn} * vec_m
-            contrib = jnp.sum(A_block * vec_block[..., :, None], axis=-2)
-            contrib_padded = jnp.zeros_like(v_b)
-            contrib_padded = jax.lax.dynamic_update_slice_in_dim(
-                contrib_padded, contrib, start_idx * BLOCK, axis=-1
-            )
-            return acc + contrib_padded, None
-
-        result, _ = jax.lax.scan(scan_body, result, jnp.arange(num_blocks))
-        return result
+    return dQ_f, dK_f, dV_f
 
 
 def pallas_sinkhorn_bwd_full(n_iters, band_width, res, g):
-    """
-    Multi-Transport-Plan backward pass (Proposition 1).
-    
-    Phase 1-3: Compute potential histories and intermediate gradient vectors
-               using banded jax.lax.scan (JAX-native, O(L*W) memory).
-    Phase 4:   Pack all intermediates into M_data/N_data tensors and dispatch
-               to fused Pallas kernels for hardware-accelerated dQ/dK/dV.
-    """
+    """Multi-Transport-Plan backward with sequential Batch mapping."""
     u0, v0, Q, K, V = res
     dO = g
 
     scale = 1.0 / jnp.sqrt(Q.shape[-1])
-    B, H = Q.shape[:2]
     BLOCK = 128
-    M, N = Q.shape[-2], K.shape[-2]
+    M = Q.shape[-2]
     num_blocks = M // BLOCK
     W = band_width // BLOCK if band_width is not None else num_blocks
     slice_size = min(W * 2 + 1, num_blocks)
 
-    # ------------------------------------------------------------------
-    # Phase 1: Forward (for backward) Potential Extraction
-    # ------------------------------------------------------------------
     u1, v1 = _banded_compute_next_uv(Q, K, u0, v0, scale, BLOCK, num_blocks, W, slice_size)
     u2, v2 = _banded_compute_next_uv(Q, K, u1, v1, scale, BLOCK, num_blocks, W, slice_size)
 
     def matvec_row(u_a, v_b, vec):
         return _banded_matvec_P(Q, K, u_a, v_b, vec, scale, BLOCK, num_blocks, W, slice_size, "row")
-
     def matvec_col(u_a, v_b, vec):
         return _banded_matvec_P(Q, K, u_a, v_b, vec, scale, BLOCK, num_blocks, W, slice_size, "col")
 
-    # ------------------------------------------------------------------
-    # Phase 2: Compute g_u, g_v using P^{(2,2)}
-    # ------------------------------------------------------------------
     g_u_init = jnp.zeros_like(u0)
     g_v_init = jnp.zeros_like(v0)
-
     def pass1_body(carry, i):
         g_u, g_v = carry
         q_block = jax.lax.dynamic_slice_in_dim(Q, i * BLOCK, BLOCK, axis=-2)
         u_block = jax.lax.dynamic_slice_in_dim(u2, i * BLOCK, BLOCK, axis=-1)
         do_block = jax.lax.dynamic_slice_in_dim(dO, i * BLOCK, BLOCK, axis=-2)
-
         start_idx = jnp.minimum(jnp.maximum(0, i - W), num_blocks - slice_size)
         k_band = jax.lax.dynamic_slice_in_dim(K, start_idx * BLOCK, slice_size * BLOCK, axis=-2)
         v_band = jax.lax.dynamic_slice_in_dim(v2, start_idx * BLOCK, slice_size * BLOCK, axis=-1)
         V_mat_band = jax.lax.dynamic_slice_in_dim(V, start_idx * BLOCK, slice_size * BLOCK, axis=-2)
-
         Z_block = jnp.matmul(do_block, V_mat_band.transpose(0, 1, 3, 2))
         S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block, k_band) * scale
         A_block = safe_exp(S_block + u_block[..., :, None] + v_band[..., None, :])
         T_block = A_block * Z_block
-
         abs_indices = start_idx + jnp.arange(slice_size * BLOCK) // BLOCK
         mask = jnp.abs(abs_indices - i) <= W
         T_block = jnp.where(mask[None, None, None, :], T_block, 0.0)
-
         gu_contrib = jnp.sum(T_block, axis=-1)
         gv_contrib = jnp.sum(T_block, axis=-2)
-
         g_u = jax.lax.dynamic_update_slice_in_dim(g_u, gu_contrib, i * BLOCK, axis=-1)
-        gv_padded = jnp.zeros_like(v0)
-        gv_padded = jax.lax.dynamic_update_slice_in_dim(gv_padded, gv_contrib, start_idx * BLOCK, axis=-1)
-        g_v = g_v + gv_padded
+        gv_padded = jnp.zeros_like(v0); gv_padded = jax.lax.dynamic_update_slice_in_dim(gv_padded, gv_contrib, start_idx * BLOCK, axis=-1)
+        return (g_u, g_v + gv_padded), None
+    (g_u, g_v), _ = jax.lax.scan(pass1_body, (g_u_init, g_v_init), jnp.arange(num_blocks))
 
-        return (g_u, g_v), None
-
-    (g_u, g_v), _ = jax.lax.scan(
-        pass1_body, (g_u_init, g_v_init), jnp.arange(num_blocks)
-    )
-
-    # ------------------------------------------------------------------
-    # Phase 3: Compute intermediate gradient vectors (terms C, D, E)
-    # ------------------------------------------------------------------
     del_u2 = g_u - matvec_row(u2, v2, g_v)
     del_v1 = -matvec_col(u2, v1, del_u2)
     del_u1 = -matvec_row(u1, v1, del_v1)
 
-    # ------------------------------------------------------------------
-    # Phase 4: Pack into M_data/N_data and dispatch fused Pallas kernels
-    #   M_data: (B, H, M, 8) = [u0, u1, u2, del_u1, del_u2, 0, 0, 0]
-    #   N_data: (B, H, N, 8) = [v0, v1, v2, g_v, del_v1, 0, 0, 0]
-    # ------------------------------------------------------------------
-    M_data = jnp.stack([
-        u0, u1, u2, del_u1, del_u2,
-        jnp.zeros_like(u0), jnp.zeros_like(u0), jnp.zeros_like(u0)
-    ], axis=-1)  # (B, H, M, 8)
+    M_data = jnp.stack([u0, u1, u2, del_u1, del_u2, jnp.zeros_like(u0), jnp.zeros_like(u0), jnp.zeros_like(u0)], axis=-1)
+    N_data = jnp.stack([v0, v1, v2, g_v, del_v1, jnp.zeros_like(v0), jnp.zeros_like(v0), jnp.zeros_like(v0)], axis=-1)
 
-    N_data = jnp.stack([
-        v0, v1, v2, g_v, del_v1,
-        jnp.zeros_like(v0), jnp.zeros_like(v0), jnp.zeros_like(v0)
-    ], axis=-1)  # (B, H, N, 8)
-
-    return pallas_sinkhorn_bwd_fused(Q, K, V, dO, M_data, N_data, band_width)
+    def h_map_fn(inputs):
+        return jax.lax.map(lambda x: pallas_sinkhorn_bwd_fused(x[0], x[1], x[2], x[3], x[4], x[5], band_width), 
+                           inputs)
+    
+    dQ, dK, dV = jax.lax.map(h_map_fn, (Q, K, V, dO, M_data, N_data))
+    return dQ, dK, dV
 
 
 # ============================================================================
