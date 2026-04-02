@@ -49,8 +49,16 @@ def test_math_equiv():
 
     dQ_pallas, dK_pallas, dV_pallas = pallas_sinkhorn_bwd_fused(Q, K, V, dO, M_data, N_data, None)
 
-    print("dQ max diff:", jnp.max(jnp.abs(dQ_ref - dQ_pallas)))
-    print("dK max diff:", jnp.max(jnp.abs(dK_ref - dK_pallas)))
-    print("dV max diff:", jnp.max(jnp.abs(dV_ref - dV_pallas)))
 
-test_math_equiv()
+    dq_diff = jnp.max(jnp.abs(dQ_ref - dQ_pallas))
+    dk_diff = jnp.max(jnp.abs(dK_ref - dK_pallas))
+    dv_diff = jnp.max(jnp.abs(dV_ref - dV_pallas))
+
+    print(f"dQ max diff: {dq_diff}")
+    print(f"dK max diff: {dk_diff}")
+    print(f"dV max diff: {dv_diff}")
+
+    # Assert gradients are extremely close to the reference float32 unoptimized JAX path
+    assert dq_diff < 1e-4, f"dQ diff too large: {dq_diff}"
+    assert dk_diff < 1e-4, f"dK diff too large: {dk_diff}"
+    assert dv_diff < 1e-4, f"dV diff too large: {dv_diff}"
