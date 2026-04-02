@@ -342,22 +342,28 @@ def dq_kernel_multi(
             # Score matrix
             s_block = jnp.einsum("bmd,bnd->bmn", q_block, k_block) * scale
 
-            # 4 transport matrices (recomputed from packed potentials)
+            # MACH ⚡: [Algebraic simplification of multi-transport dS]
+            # P_ab = exp(S + u_a + v_b). We can factor out P22:
+            # P21 = P22 * exp(v1 - v2)
+            # P11 = P22 * exp(u1 - u2) * exp(v1 - v2)
+            # P10 = P22 * exp(u1 - u2) * exp(v0 - v2)
+            # This avoids 3 expensive safe_exp on full MxN blocks.
             P22 = safe_exp(s_block + u2_block[:, :, None] + v2_block[:, None, :])
-            P21 = safe_exp(s_block + u2_block[:, :, None] + v1_block[:, None, :])
-            P11 = safe_exp(s_block + u1_block[:, :, None] + v1_block[:, None, :])
-            P10 = safe_exp(s_block + u1_block[:, :, None] + v0_block[:, None, :])
+
+            E_v12 = safe_exp(v1_block - v2_block)
+            E_u12 = safe_exp(u1_block - u2_block)
+            E_v02 = safe_exp(v0_block - v2_block)
 
             # Z = dO @ V^T
             z_block = jnp.einsum("bme,bne->bmn", do_block, v_mat_block)
 
             # Full multi-transport dS (5 terms: A, B, C, D, E)
-            ds_block = (
-                P22 * z_block
-                - P22 * g_v_block[:, None, :]
-                - P21 * del_u2_block[:, :, None]
-                - P11 * del_v1_block[:, None, :]
-                - P10 * del_u1_block[:, :, None]
+            ds_block = P22 * (
+                z_block
+                - g_v_block[:, None, :]
+                - E_v12[:, None, :] * del_u2_block[:, :, None]
+                - E_u12[:, :, None] * (E_v12 * del_v1_block)[:, None, :]
+                - (E_u12 * del_u1_block)[:, :, None] * E_v02[:, None, :]
             )
 
             ds_block = jnp.where(mask, ds_block, 0.0)
@@ -424,22 +430,28 @@ def dk_dv_kernel_multi(
             # Score matrix
             s_block = jnp.einsum("bmd,bnd->bmn", q_block, k_block) * scale
 
-            # 4 transport matrices
+            # MACH ⚡: [Algebraic simplification of multi-transport dS]
+            # P_ab = exp(S + u_a + v_b). We can factor out P22:
+            # P21 = P22 * exp(v1 - v2)
+            # P11 = P22 * exp(u1 - u2) * exp(v1 - v2)
+            # P10 = P22 * exp(u1 - u2) * exp(v0 - v2)
+            # This avoids 3 expensive safe_exp on full MxN blocks.
             P22 = safe_exp(s_block + u2_block[:, :, None] + v2_block_n[:, None, :])
-            P21 = safe_exp(s_block + u2_block[:, :, None] + v1_block_n[:, None, :])
-            P11 = safe_exp(s_block + u1_block[:, :, None] + v1_block_n[:, None, :])
-            P10 = safe_exp(s_block + u1_block[:, :, None] + v0_block_n[:, None, :])
+
+            E_v12 = safe_exp(v1_block_n - v2_block_n)
+            E_u12 = safe_exp(u1_block - u2_block)
+            E_v02 = safe_exp(v0_block_n - v2_block_n)
 
             # Z = dO @ V^T
             z_block = jnp.einsum("bme,bne->bmn", do_block, v_mat_block)
 
             # Full multi-transport dS
-            ds_block = (
-                P22 * z_block
-                - P22 * g_v_block_n[:, None, :]
-                - P21 * del_u2_block[:, :, None]
-                - P11 * del_v1_block_n[:, None, :]
-                - P10 * del_u1_block[:, :, None]
+            ds_block = P22 * (
+                z_block
+                - g_v_block_n[:, None, :]
+                - E_v12[:, None, :] * del_u2_block[:, :, None]
+                - E_u12[:, :, None] * (E_v12 * del_v1_block_n)[:, None, :]
+                - (E_u12 * del_u1_block)[:, :, None] * E_v02[:, None, :]
             )
 
             ds_block = jnp.where(mask, ds_block, 0.0)

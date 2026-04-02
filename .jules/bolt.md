@@ -1,0 +1,3 @@
+## 2024-05-24 - Sinkhorn Backprop Exp Bottleneck
+**Learning:** Computing backward passes for Flash Sinkhorn Attention explicitly instantiated multiple full $M \times N$ transport matrices ($P_{22}, P_{21}, P_{11}, P_{10}$), which required $O(L \times W)$ exponential operations inside inner loops (`safe_exp`). The structure of the matrices $P_{ab} = \exp(S + u_a + v_b)$ allows algebraic factorization of the differences in potentials into 1D scalings of a single full matrix $P_{22}$.
+**Action:** When computing multi-transport derivatives, factor out a base transport matrix (e.g. $P_{22}$) and apply 1D exponentiated potential differences instead of recalculating full matrices. This drastically reduces the number of MUFU instructions and SRAM accesses in Pallas kernels.

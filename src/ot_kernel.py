@@ -795,25 +795,38 @@ def jax_ref_sinkhorn_bwd(n_iters, res, g):
     u1, v1 = _jax_ref_compute_next_uv(S, u0, v0)
     u2, v2 = _jax_ref_compute_next_uv(S, u1, v1)
 
+    # MACH ⚡: [Algebraic simplification of multi-transport dS]
+    # P_ab = exp(S + u_a + v_b). We can factor out P22:
+    # P21 = P22 * exp(v1 - v2)
+    # P11 = P22 * exp(u1 - u2) * exp(v1 - v2)
+    # P10 = P22 * exp(u1 - u2) * exp(v0 - v2)
+    # This avoids 3 expensive jnp.exp on full M×N blocks.
     P22 = jnp.exp(S + u2[..., :, None] + v2[..., None, :])
-    P21 = jnp.exp(S + u2[..., :, None] + v1[..., None, :])
-    P11 = jnp.exp(S + u1[..., :, None] + v1[..., None, :])
-    P10 = jnp.exp(S + u1[..., :, None] + v0[..., None, :])
+
+    E_v12 = jnp.exp(v1 - v2)
+    E_u12 = jnp.exp(u1 - u2)
+    E_v02 = jnp.exp(v0 - v2)
 
     T_Z = P22 * Z
     g_u = jnp.sum(T_Z, axis=-1)
     g_v = jnp.sum(T_Z, axis=-2)
 
     del_u2 = g_u - jnp.einsum("bhmn,bhn->bhm", P22, g_v)
-    del_v1 = -jnp.einsum("bhmn,bhm->bhn", P21, del_u2)
-    del_u1 = -jnp.einsum("bhmn,bhn->bhm", P11, del_v1)
 
-    dS = (
-        P22 * Z
-        - P22 * g_v[..., None, :]
-        - P21 * del_u2[..., :, None]
-        - P11 * del_v1[..., None, :]
-        - P10 * del_u1[..., :, None]
+    # Using P21^T = (P22 * E_v12)^T
+    P21_del_u2 = jnp.einsum("bhmn,bhm->bhn", P22, del_u2) * E_v12
+    del_v1 = -P21_del_u2
+
+    # Using P11 = P22 * E_u12 * E_v12
+    P11_del_v1 = jnp.einsum("bhmn,bhn->bhm", P22, E_v12 * del_v1) * E_u12
+    del_u1 = -P11_del_v1
+
+    dS = P22 * (
+        Z
+        - g_v[..., None, :]
+        - E_v12[..., None, :] * del_u2[..., :, None]
+        - E_u12[..., :, None] * (E_v12 * del_v1)[..., None, :]
+        - (E_u12 * del_u1)[..., :, None] * E_v02[..., None, :]
     )
 
     dQ = jnp.matmul(dS, K) * scale
