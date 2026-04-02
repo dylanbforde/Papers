@@ -342,22 +342,28 @@ def dq_kernel_multi(
             # Score matrix
             s_block = jnp.einsum("bmd,bnd->bmn", q_block, k_block) * scale
 
-            # 4 transport matrices (recomputed from packed potentials)
-            P22 = safe_exp(s_block + u2_block[:, :, None] + v2_block[:, None, :])
-            P21 = safe_exp(s_block + u2_block[:, :, None] + v1_block[:, None, :])
-            P11 = safe_exp(s_block + u1_block[:, :, None] + v1_block[:, None, :])
-            P10 = safe_exp(s_block + u1_block[:, :, None] + v0_block[:, None, :])
-
             # Z = dO @ V^T
             z_block = jnp.einsum("bme,bne->bmn", do_block, v_mat_block)
 
+            # MACH ⚡: Factorized the 4 transport matrix exponentials into a single safe_exp(s_block + u1 + v1).
+            # The differences (u2-u1), (v2-v1), and (v0-v1) are computed as 1D vector exponentials outside the main MxN block logic,
+            # saving 3 expensive matrix-sized safe_exp evaluations per loop. Readability sacrificed for raw FMA throughput.
+            P11 = safe_exp(s_block + u1_block[:, :, None] + v1_block[:, None, :])
+            exp_du21 = jnp.exp(u2_block - u1_block)[:, :, None]
+            exp_dv21 = jnp.exp(v2_block - v1_block)[:, None, :]
+            exp_dv01 = jnp.exp(v0_block - v1_block)[:, None, :]
+
+            term_P22 = exp_du21 * exp_dv21
+            term_P21 = exp_du21
+            term_P10 = exp_dv01
+
             # Full multi-transport dS (5 terms: A, B, C, D, E)
-            ds_block = (
-                P22 * z_block
-                - P22 * g_v_block[:, None, :]
-                - P21 * del_u2_block[:, :, None]
-                - P11 * del_v1_block[:, None, :]
-                - P10 * del_u1_block[:, :, None]
+            ds_block = P11 * (
+                term_P22 * z_block
+                - term_P22 * g_v_block[:, None, :]
+                - term_P21 * del_u2_block[:, :, None]
+                - del_v1_block[:, None, :]
+                - term_P10 * del_u1_block[:, :, None]
             )
 
             ds_block = jnp.where(mask, ds_block, 0.0)
@@ -424,23 +430,31 @@ def dk_dv_kernel_multi(
             # Score matrix
             s_block = jnp.einsum("bmd,bnd->bmn", q_block, k_block) * scale
 
-            # 4 transport matrices
-            P22 = safe_exp(s_block + u2_block[:, :, None] + v2_block_n[:, None, :])
-            P21 = safe_exp(s_block + u2_block[:, :, None] + v1_block_n[:, None, :])
-            P11 = safe_exp(s_block + u1_block[:, :, None] + v1_block_n[:, None, :])
-            P10 = safe_exp(s_block + u1_block[:, :, None] + v0_block_n[:, None, :])
-
             # Z = dO @ V^T
             z_block = jnp.einsum("bme,bne->bmn", do_block, v_mat_block)
 
+            # MACH ⚡: Factorized the 4 transport matrix exponentials into a single safe_exp(s_block + u1 + v1).
+            # The differences (u2-u1), (v2-v1), and (v0-v1) are computed as 1D vector exponentials outside the main MxN block logic,
+            # saving 3 expensive matrix-sized safe_exp evaluations per loop. Readability sacrificed for raw FMA throughput.
+            P11 = safe_exp(s_block + u1_block[:, :, None] + v1_block_n[:, None, :])
+            exp_du21 = jnp.exp(u2_block - u1_block)[:, :, None]
+            exp_dv21_n = jnp.exp(v2_block_n - v1_block_n)[:, None, :]
+            exp_dv01_n = jnp.exp(v0_block_n - v1_block_n)[:, None, :]
+
+            term_P22 = exp_du21 * exp_dv21_n
+            term_P21 = exp_du21
+            term_P10 = exp_dv01_n
+
             # Full multi-transport dS
-            ds_block = (
-                P22 * z_block
-                - P22 * g_v_block_n[:, None, :]
-                - P21 * del_u2_block[:, :, None]
-                - P11 * del_v1_block_n[:, None, :]
-                - P10 * del_u1_block[:, :, None]
+            ds_block = P11 * (
+                term_P22 * z_block
+                - term_P22 * g_v_block_n[:, None, :]
+                - term_P21 * del_u2_block[:, :, None]
+                - del_v1_block_n[:, None, :]
+                - term_P10 * del_u1_block[:, :, None]
             )
+
+            P22 = P11 * term_P22
 
             ds_block = jnp.where(mask, ds_block, 0.0)
             P22 = jnp.where(mask, P22, 0.0)
