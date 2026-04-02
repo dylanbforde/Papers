@@ -432,7 +432,7 @@ def dk_dv_kernel_multi(
                 exp_v2_v1[:, None] * exp_u2_u1[None, :] * (z_block_T - g_v_n[:, None])
                 - exp_v2_v1[:, None] * del_u2_m[None, :]
                 - del_v1_n[:, None]
-                - exp_u0_u1[None, :] * del_u1_m[None, :]
+                - exp_v0_v1[:, None] * del_u1_m[None, :]
             )
 
             ds_block_T = jnp.where(mask, ds_block_T, 0.0)
@@ -502,6 +502,79 @@ def pallas_sinkhorn_bwd_fused(Q, K, V, dO, M_data, N_data, band_width):
 
     return dQ_f, dK_f, dV_f
 
+def _banded_compute_next_uv(Q, K, u_in, v_in, scale, BLOCK, num_blocks, W, slice_size):
+    """Compute one Sinkhorn half-step (u_new, v_new) with banding."""
+    def scan_u(carry, i):
+        q_block = jax.lax.dynamic_slice_in_dim(Q, i * BLOCK, BLOCK, axis=-2)
+        start_idx = jnp.minimum(jnp.maximum(0, i - W), num_blocks - slice_size)
+        k_band = jax.lax.dynamic_slice_in_dim(K, start_idx * BLOCK, slice_size * BLOCK, axis=-2)
+        v_band = jax.lax.dynamic_slice_in_dim(v_in, start_idx * BLOCK, slice_size * BLOCK, axis=-1)
+        S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block, k_band) * scale
+        logits = S_block + v_band[..., None, :]
+        abs_indices = start_idx + jnp.arange(slice_size * BLOCK) // BLOCK
+        mask = jnp.abs(abs_indices - i) <= W
+        logits = jnp.where(mask[None, None, None, :], logits, -jnp.inf)
+        u_new_block = -jax.scipy.special.logsumexp(logits, axis=-1)
+        return carry, u_new_block
+    _, u_blocks = jax.lax.scan(scan_u, None, jnp.arange(num_blocks))
+    u_new = jnp.concatenate(u_blocks, axis=-1)
+
+    def scan_v(carry, j):
+        k_block = jax.lax.dynamic_slice_in_dim(K, j * BLOCK, BLOCK, axis=-2)
+        start_idx = jnp.minimum(jnp.maximum(0, j - W), num_blocks - slice_size)
+        q_band = jax.lax.dynamic_slice_in_dim(Q, start_idx * BLOCK, slice_size * BLOCK, axis=-2)
+        u_band = jax.lax.dynamic_slice_in_dim(u_new, start_idx * BLOCK, slice_size * BLOCK, axis=-1)
+        S_block = jnp.einsum("bhmd,bhnd->bhmn", q_band, k_block) * scale
+        logits = S_block + u_band[..., :, None]
+        abs_indices = start_idx + jnp.arange(slice_size * BLOCK) // BLOCK
+        mask = jnp.abs(abs_indices - j) <= W
+        logits = jnp.where(mask[None, None, :, None], logits, -jnp.inf)
+        v_new_block = -jax.scipy.special.logsumexp(logits, axis=-2)
+        return carry, v_new_block
+    _, v_blocks = jax.lax.scan(scan_v, None, jnp.arange(num_blocks))
+    v_new = jnp.concatenate(v_blocks, axis=-1)
+    return u_new, v_new
+
+
+def _banded_matvec_P(Q, K, u_a, v_b, vec, scale, BLOCK, num_blocks, W, slice_size, direction="row"):
+    """Banded matvec P^(a,b) @ vec or P^(a,b)^T @ vec."""
+    if direction == "row":
+        def scan_body(carry, i):
+            q_block = jax.lax.dynamic_slice_in_dim(Q, i * BLOCK, BLOCK, axis=-2)
+            u_block = jax.lax.dynamic_slice_in_dim(u_a, i * BLOCK, BLOCK, axis=-1)
+            start_idx = jnp.minimum(jnp.maximum(0, i - W), num_blocks - slice_size)
+            k_band = jax.lax.dynamic_slice_in_dim(K, start_idx * BLOCK, slice_size * BLOCK, axis=-2)
+            v_band = jax.lax.dynamic_slice_in_dim(v_b, start_idx * BLOCK, slice_size * BLOCK, axis=-1)
+            vec_band = jax.lax.dynamic_slice_in_dim(vec, start_idx * BLOCK, slice_size * BLOCK, axis=-1)
+            S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block, k_band) * scale
+            A_block = safe_exp(S_block + u_block[..., :, None] + v_band[..., None, :])
+            abs_indices = start_idx + jnp.arange(slice_size * BLOCK) // BLOCK
+            mask = jnp.abs(abs_indices - i) <= W
+            A_block = jnp.where(mask[None, None, None, :], A_block, 0.0)
+            res_block = jnp.sum(A_block * vec_band[..., None, :], axis=-1)
+            return carry, res_block
+        _, res_blocks = jax.lax.scan(scan_body, None, jnp.arange(num_blocks))
+        return jnp.concatenate(res_blocks, axis=-1)
+    else:
+        result = jnp.zeros_like(v_b)
+        def scan_body(acc, i):
+            q_block = jax.lax.dynamic_slice_in_dim(Q, i * BLOCK, BLOCK, axis=-2)
+            u_block = jax.lax.dynamic_slice_in_dim(u_a, i * BLOCK, BLOCK, axis=-1)
+            vec_block = jax.lax.dynamic_slice_in_dim(vec, i * BLOCK, BLOCK, axis=-1)
+            start_idx = jnp.minimum(jnp.maximum(0, i - W), num_blocks - slice_size)
+            k_band = jax.lax.dynamic_slice_in_dim(K, start_idx * BLOCK, slice_size * BLOCK, axis=-2)
+            v_band = jax.lax.dynamic_slice_in_dim(v_b, start_idx * BLOCK, slice_size * BLOCK, axis=-1)
+            S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block, k_band) * scale
+            A_block = safe_exp(S_block + u_block[..., :, None] + v_band[..., None, :])
+            abs_indices = start_idx + jnp.arange(slice_size * BLOCK) // BLOCK
+            mask = jnp.abs(abs_indices - i) <= W
+            A_block = jnp.where(mask[None, None, None, :], A_block, 0.0)
+            contrib = jnp.sum(A_block * vec_block[..., :, None], axis=-2)
+            contrib_padded = jnp.zeros_like(v_b)
+            contrib_padded = jax.lax.dynamic_update_slice_in_dim(contrib_padded, contrib, start_idx * BLOCK, axis=-1)
+            return acc + contrib_padded, None
+        result, _ = jax.lax.scan(scan_body, result, jnp.arange(num_blocks))
+        return result
 
 def pallas_sinkhorn_bwd_full(n_iters, band_width, res, g):
     """Multi-Transport-Plan backward with sequential Batch mapping."""

@@ -432,7 +432,7 @@ def dk_dv_kernel_multi(
                 exp_v2_v1[:, None] * exp_u2_u1[None, :] * (z_block_T - g_v_n[:, None])
                 - exp_v2_v1[:, None] * del_u2_m[None, :]
                 - del_v1_n[:, None]
-                - exp_u0_u1[None, :] * del_u1_m[None, :]
+                - exp_v0_v1[:, None] * del_u1_m[None, :]
             )
 
             ds_block_T = jnp.where(mask, ds_block_T, 0.0)
@@ -789,6 +789,14 @@ def jax_ref_sinkhorn_bwd(n_iters, res, g):
 
     u1, v1 = _jax_ref_compute_next_uv(S, u0, v0)
     u2, v2 = _jax_ref_compute_next_uv(S, u1, v1)
+
+    P11 = jnp.exp(S + u1[..., :, None] + v1[..., None, :])
+    T_Z = jnp.exp(S + u2[..., :, None] + v2[..., None, :]) * Z
+    g_v = jnp.sum(T_Z, axis=-2)
+    
+    del_u2 = jnp.sum(T_Z, axis=-1) - jnp.einsum("bhmn,bhn->bhm", jnp.exp(S + u2[..., :, None] + v2[..., None, :]), g_v)
+    del_v1 = -jnp.einsum("bhmn,bhm->bhn", jnp.exp(S + u2[..., :, None] + v1[..., None, :]), del_u2)
+    del_u1 = -jnp.einsum("bhmn,bhn->bhm", P11, del_v1)
 
     # Multi-Transport Plan Factorization
     exp_u2_u1 = jnp.exp(u2[..., :, None] - u1[..., :, None])
