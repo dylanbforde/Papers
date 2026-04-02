@@ -57,17 +57,17 @@ This strategy yields $O(L)$ HBM memory usage while maintaining hardware-efficien
 \subsection{Multi-Transport-Plan Backward Pass}
 Our core technical contribution is the derivation and implementation of a rigorous backward pass through the unrolled Sinkhorn chain. We prove that truncated backpropagation through $k$ iterations is more stable than implicit methods, provided the intermediate transport plans are handled correctly.
 
-Starting from stopped-gradient potentials $u^{(0)}, v^{(0)}$, we recompute $k=2$ refinement iterations to obtain the chain $(u^{(1)}, v^{(1)}) \to (u^{(2)}, v^{(2)})$. The gradient $\partial \mathcal{L} / \partial S$ then receives contributions from five distinct sources, utilizing four distinct transport matrices $P^{(a,b)} = \exp(S + u^{(a)} + v^{(b)})$:
+Starting from stopped-gradient potentials $u^{(0)}, v^{(0)}$, we recompute $k=2$ refinement iterations to obtain the chain $(u^{(1)}, v^{(1)}) \to (u^{(2)}, v^{(2)})$. 
 
-\begin{enumerate}
-    \item \textbf{Output Path}: $\Delta S^{(A)} = P^{(2,2)} \odot Z$ where $Z = (\partial \mathcal{L} / \partial O) V^\top$.
-    \item \textbf{$v^{(2)}$ Path}: $\Delta S^{(B)} = -P^{(2,2)} \text{diag}(g_v)$.
-    \item \textbf{$u^{(2)}$ Path}: $\Delta S^{(C)} = -\text{diag}(\delta u^{(2)}) P^{(2,1)}$.
-    \item \textbf{$v^{(1)}$ Path}: $\Delta S^{(D)} = -P^{(1,1)} \text{diag}(\delta v^{(1)})$.
-    \item \textbf{$u^{(1)}$ Path}: $\Delta S^{(E)} = -\text{diag}(\delta u^{(1)}) P^{(1,0)}$.
-\end{enumerate}
+\begin{proposition}[Multi-Transport-Plan Gradient]\label{prop:multi_plan}
+The gradient $\partial \mathcal{L} / \partial S$ for $k=2$ unrolled Sinkhorn iterations receives contributions from five distinct sources, utilizing four distinct transport matrices $P^{(a,b)} = \exp(S + u^{(a)} + v^{(b)})$. 
+\end{proposition}
 
-Replacing these with a single transport matrix (the standard implicit approximation) introduces a non-vanishing directional bias that prevents convergence at high-accuracies. We provide a full proof in Appendix~\ref{app:proof}.
+\paragraph{Hardware-Efficient Factorization.} While the formulation involves four matrices, we observe that for fixed $S$, any $P^{(a,b)}$ can be recovered from a base plan $P^{(1,1)}$ via element-wise vector scaling: 
+\begin{equation}
+    P^{(a,b)} = P^{(1,1)} \odot \exp(u^{(a)} - u^{(1)}) \odot \exp(v^{(b)} - v^{(1)}).
+\end{equation}
+This factorization allows our Pallas kernels to compute the core $N^2$ transport coefficients only once, deriving the other terms through $O(N)$ operations. This reduces the computational overhead of the multi-transport pass from $4N^2$ to $\sim 1N^2$, matching the complexity of biased approximations while maintaining mathematical exactness. We provide a proof of this factorization and the resultant gradient bias in Appendix~\ref{app:proof}.
 
 \section{Experiments}
 
@@ -128,6 +128,17 @@ The four transport matrices used in the backward pass are indexed by pairs drawn
     v^{(t+1)}_j &= -\log\!\Bigl[\sum_i \exp(S_{ij} + u^{(t+1)}_i)\Bigr], \label{eq:v_update_app}
 \end{align}
 where all exponentials and sums are strictly positive. The potentials $(u^{(0)}, v^{(0)})$ are treated as constants (stopped gradients); only iterates $t \geq 1$ satisfy the update equations above. We write $\Delta u^{(t)} = u^{(t+1)} - u^{(t)}$ and $\Delta v^{(t)} = v^{(t+1)} - v^{(t)}$ for the per-step potential updates.
+
+\paragraph{Derivation of Algebraic Factorization.}
+For any two transport matrices $P^{(a,b)}$ and $P^{(c,d)}$, the ratio of their entries at $(i,j)$ is:
+\begin{equation}
+    \frac{P^{(a,b)}_{ij}}{P^{(c,d)}_{ij}} = \frac{\exp(S_{ij} + u^{(a)}_i + v^{(b)}_j)}{\exp(S_{ij} + u^{(c)}_i + v^{(d)}_j)} = \exp(u^{(a)}_i - u^{(c)}_i + v^{(b)}_j - v^{(d)}_j).
+\end{equation}
+Setting the reference indices $(c,d) = (1,1)$, we obtain the element-wise scaling relation used in our hardware implementation:
+\begin{equation}
+    P^{(a,b)}_{ij} = P^{(1,1)}_{ij} \cdot \exp(u^{(a)}_i - u^{(1)}_i) \cdot \exp(v^{(b)}_j - v^{(1)}_j).
+\end{equation}
+This factorization is exact for any $S, u, v$ and does not depend on convergence, ensuring that the optimized kernel computes gradients identical to the full unrolled unrolling.
 
 \subsection*{Part A: Distinctness of Transport Matrices}
 

@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.27 (TeX Live 2025/nixos.org) (preloaded format=pdflatex 1980.1.1)  2 APR 2026 00:47
+This is pdfTeX, Version 3.141592653-2.6-1.40.27 (TeX Live 2025/nixos.org) (preloaded format=pdflatex 1980.1.1)  2 APR 2026 20:13
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
@@ -565,122 +565,50 @@ LaTeX Font Info:    Trying to load font information for U+msb on input line 33.
 File: umsb.fd 2013/01/14 v3.01 AMS symbols B
 )
 
-Package natbib Warning: Citation `smith1981identification' on page 1 undefined 
-on input line 40.
-
-
-Package natbib Warning: Citation `peyre2019computational' on page 1 undefined o
-n input line 42.
-
-
-Package natbib Warning: Citation `cuturi2013sinkhorn' on page 1 undefined on in
-put line 42.
-
-
-Package natbib Warning: Citation `luise2018differential' on page 1 undefined on
- input line 44.
-
-
-Package natbib Warning: Citation `bai2019deep' on page 1 undefined on input lin
-e 44.
-
-
-Package natbib Warning: Citation `dao2022flashattention' on page 1 undefined on
- input line 51.
-
-
-
 [1
 
 {/nix/store/lp1cxw5lrb0w8lmkha6hawim1xkj3qd7-texlive-combined-medium-2025.20250
 703/share/texmf-var/fonts/map/pdftex/updmap/pdftex.map}]
-
-LaTeX Warning: Reference `app:proof' on page 2 undefined on input line 70.
-
-
-Package natbib Warning: Citation `mistry2021pfam' on page 2 undefined on input 
-line 74.
-
-
-LaTeX Warning: Reference `tab:latency' on page 2 undefined on input line 77.
+Overfull \hbox (102.60817pt too wide) in paragraph at lines 74--75
+\OT1/cmr/m/n/10 (\OT1/cmtt/m/n/10 InstaDeepAI/nucleotide-transformer-v2-100m-mu
+lti-species\OT1/cmr/m/n/10 ) for DNA se-quences and ESM-2 (\OT1/cmtt/m/n/10 fac
+ebook/esm2[]t6[]8M[]UR50D\OT1/cmr/m/n/10 )
+ []
 
 
 
 [2] (./main.bbl)
 
 [3]
-Overfull \hbox (0.50784pt too wide) in paragraph at lines 135--136
+Overfull \hbox (1.3256pt too wide) in paragraph at lines 135--136
 [][]\OT1/cmr/bx/n/10 Lemma 1 \OT1/cmr/m/n/10 (Dis-tinct-ness)\OT1/cmr/bx/n/10 .
- []\OT1/cmr/m/it/10 If the it-er-ate chain has not con-verged, i.e., at least o
+ []\OT1/cmr/m/it/10 If the it-er-ate chain has not con-verged (i.e., at least o
 ne of $\OT1/cmr/m/n/10 ^^A\OML/cmm/m/it/10 u[]; \OT1/cmr/m/n/10 ^^A\OML/cmm/m/i
 t/10 v[]; \OT1/cmr/m/n/10 ^^A\OML/cmm/m/it/10 u[]; \OT1/cmr/m/n/10 ^^A\OML/cmm/
 m/it/10 v[]$
  []
 
 
-LaTeX Warning: Reference `eq:shift' on page 4 undefined on input line 161.
-
-
-LaTeX Warning: Reference `eq:u_update_app' on page 4 undefined on input line 16
-1.
-
-
-LaTeX Warning: Reference `eq:v_update_app' on page 4 undefined on input line 16
-1.
-
-
 
 [4{/nix/store/gxh1rlblsxfx6v2450hykw8nbn6j8n93-texlive-combined-medium-2025.202
 50703-texmfdist/fonts/enc/dvips/cm-super/cm-super-ts1.enc}]
 
-LaTeX Warning: Reference `eq:biasC_app' on page 5 undefined on input line 227.
-
-
-LaTeX Warning: Reference `eq:biasD_app' on page 5 undefined on input line 231.
-
-
-LaTeX Warning: Reference `eq:biasE_app' on page 5 undefined on input line 235.
-
-
-
 [5]
 
-Package natbib Warning: There were undefined citations.
-
-
-
-[6] (./main.aux
-
-Package natbib Warning: Citation(s) may have changed.
-(natbib)                Rerun to get citations correct.
-
-)
+[6] (./main.aux)
  ***********
 LaTeX2e <2025-06-01> patch level 1
 L3 programming layer <2025-06-09>
  ***********
-
-
-LaTeX Warning: There were undefined references.
-
-
-LaTeX Warning: Label(s) may have changed. Rerun to get cross-references right.
-
-
-Package rerunfilecheck Warning: File `main.out' has changed.
-(rerunfilecheck)                Rerun to get outlines right
-(rerunfilecheck)                or use package `bookmark'.
-
-Package rerunfilecheck Info: Checksums for `main.out':
-(rerunfilecheck)             Before: D41D8CD98F00B204E9800998ECF8427E;0
-(rerunfilecheck)             After:  5F7E2A34AFC3C0719255D25EA47E7D31;1307.
+Package rerunfilecheck Info: File `main.out' has not changed.
+(rerunfilecheck)             Checksum: 5F7E2A34AFC3C0719255D25EA47E7D31;1307.
  ) 
 Here is how much of TeX's memory you used:
- 12202 strings out of 469012
- 194499 string characters out of 5435860
- 618541 words of memory out of 5000000
- 40355 multiletter control sequences out of 15000+600000
- 639674 words of font info for 88 fonts, out of 8000000 for 9000
+ 12211 strings out of 469012
+ 194575 string characters out of 5435860
+ 619456 words of memory out of 5000000
+ 40364 multiletter control sequences out of 15000+600000
+ 639842 words of font info for 89 fonts, out of 8000000 for 9000
  430 hyphenation exceptions out of 8191
  75i,12n,79p,1263b,516s stack positions out of 10000i,1000n,20000p,200000b,200000s
 </nix/store/gxh1rlblsxfx6v2450hykw8nbn6j8n93-texlive-combined-medium-2025.202
@@ -720,13 +648,14 @@ bined-medium-2025.20250703-texmfdist/fonts/type1/public/amsfonts/cm/cmti10.pfb>
 </nix/store/gxh1rlblsxfx6v2450hykw8nbn6j8n93-texlive-combined-medium-2025.20250
 703-texmfdist/fonts/type1/public/amsfonts/cm/cmti9.pfb></nix/store/gxh1rlblsxfx
 6v2450hykw8nbn6j8n93-texlive-combined-medium-2025.20250703-texmfdist/fonts/type
-1/public/amsfonts/cm/cmtt12.pfb></nix/store/gxh1rlblsxfx6v2450hykw8nbn6j8n93-te
-xlive-combined-medium-2025.20250703-texmfdist/fonts/type1/public/cm-super/sfrm1
-000.pfb>
-Output written on main.pdf (6 pages, 294132 bytes).
+1/public/amsfonts/cm/cmtt10.pfb></nix/store/gxh1rlblsxfx6v2450hykw8nbn6j8n93-te
+xlive-combined-medium-2025.20250703-texmfdist/fonts/type1/public/amsfonts/cm/cm
+tt12.pfb></nix/store/gxh1rlblsxfx6v2450hykw8nbn6j8n93-texlive-combined-medium-2
+025.20250703-texmfdist/fonts/type1/public/cm-super/sfrm1000.pfb>
+Output written on main.pdf (6 pages, 308450 bytes).
 PDF statistics:
- 211 PDF objects out of 1000 (max. 8388607)
- 155 compressed objects within 2 object streams
- 56 named destinations out of 1000 (max. 500000)
- 1 words of extra memory for PDF output out of 10000 (max. 10000000)
+ 264 PDF objects out of 1000 (max. 8388607)
+ 205 compressed objects within 3 object streams
+ 55 named destinations out of 1000 (max. 500000)
+ 73 words of extra memory for PDF output out of 10000 (max. 10000000)
 
