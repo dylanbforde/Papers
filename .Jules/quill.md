@@ -1,1 +1,4 @@
 ## 2024-05-24 - [Outdated Architecture] **Learning:** The paper had an outdated architecture description, referring to ResNet models instead of the Foundation models used in benchmarks. **Action:** Next time, check if the benchmark configurations match the architectures described in the Experiments section.
+## 2026-04-03 - [Variable Mappings between Code and Math]
+**Learning:** Greek letters in math shouldn't falsely translate from intermediate code variable names unless they act as real hyperparameters (e.g. `log_alpha` is not an `alpha` scaling term, but the attention logit, scale is just `1.0 / sqrt(D)`).
+**Action:** Double-check whether variables like `alpha`, `beta`, or `gamma` in the paper's equations actually correspond to mathematical constants/hyperparameters, or if they are misinterpretations of temporary code variables.
