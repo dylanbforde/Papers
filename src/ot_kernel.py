@@ -342,22 +342,29 @@ def dq_kernel_multi(
             # Score matrix
             s_block = jnp.einsum("bmd,bnd->bmn", q_block, k_block) * scale
 
-            # 4 transport matrices (recomputed from packed potentials)
-            P22 = safe_exp(s_block + u2_block[:, :, None] + v2_block[:, None, :])
-            P21 = safe_exp(s_block + u2_block[:, :, None] + v1_block[:, None, :])
-            P11 = safe_exp(s_block + u1_block[:, :, None] + v1_block[:, None, :])
-            P10 = safe_exp(s_block + u1_block[:, :, None] + v0_block[:, None, :])
-
             # Z = dO @ V^T
             z_block = jnp.einsum("bme,bne->bmn", do_block, v_mat_block)
 
-            # Full multi-transport dS (5 terms: A, B, C, D, E)
-            ds_block = (
-                P22 * z_block
-                - P22 * g_v_block[:, None, :]
-                - P21 * del_u2_block[:, :, None]
-                - P11 * del_v1_block[:, None, :]
-                - P10 * del_u1_block[:, :, None]
+            # MACH ⚡: Factored P22 out of the multi-transport matrix computations.
+            # Instead of computing safe_exp 4 times on the heavy (B, M, N) s_block,
+            # we compute it once for P22 and use cheap 1D marginal differences for the rest,
+            # drastically cutting SRAM allocation and VPU usage.
+            P22 = safe_exp(s_block + u2_block[:, :, None] + v2_block[:, None, :])
+
+            exp_v1_v2 = safe_exp(v1_block - v2_block)
+            exp_u1_u2 = safe_exp(u1_block - u2_block)
+            exp_v0_v1 = safe_exp(v0_block - v1_block)
+
+            ds_block = P22 * (
+                z_block
+                - g_v_block[:, None, :]
+                - exp_v1_v2[:, None, :] * (
+                    del_u2_block[:, :, None]
+                    + exp_u1_u2[:, :, None] * (
+                        del_v1_block[:, None, :]
+                        + exp_v0_v1[:, None, :] * del_u1_block[:, :, None]
+                    )
+                )
             )
 
             ds_block = jnp.where(mask, ds_block, 0.0)
@@ -424,22 +431,30 @@ def dk_dv_kernel_multi(
             # Score matrix (transposed to (B, N, M) to natively support dot_general layout)
             s_block_T = jnp.einsum("bnd,bmd->bnm", k_block, q_block) * scale
 
-            # 4 transport matrices (transposed)
-            P22_T = safe_exp(s_block_T + v2_block_n[:, :, None] + u2_block[:, None, :])
-            P21_T = safe_exp(s_block_T + v1_block_n[:, :, None] + u2_block[:, None, :])
-            P11_T = safe_exp(s_block_T + v1_block_n[:, :, None] + u1_block[:, None, :])
-            P10_T = safe_exp(s_block_T + v0_block_n[:, :, None] + u1_block[:, None, :])
-
             # Z = V @ dO^T
             z_block_T = jnp.einsum("bne,bme->bnm", v_mat_block, do_block)
 
+            # MACH ⚡: Factored P22 out of the multi-transport matrix computations.
+            # Instead of computing safe_exp 4 times on the heavy (B, M, N) s_block,
+            # we compute it once for P22 and use cheap 1D marginal differences for the rest,
+            # drastically cutting SRAM allocation and VPU usage.
+            P22_T = safe_exp(s_block_T + v2_block_n[:, :, None] + u2_block[:, None, :])
+
+            exp_v1_v2 = safe_exp(v1_block_n - v2_block_n)
+            exp_u1_u2 = safe_exp(u1_block - u2_block)
+            exp_v0_v1 = safe_exp(v0_block_n - v1_block_n)
+
             # Full multi-transport dS (transposed)
-            ds_block_T = (
-                P22_T * z_block_T
-                - P22_T * g_v_block_n[:, :, None]
-                - P21_T * del_u2_block[:, None, :]
-                - P11_T * del_v1_block_n[:, :, None]
-                - P10_T * del_u1_block[:, None, :]
+            ds_block_T = P22_T * (
+                z_block_T
+                - g_v_block_n[:, :, None]
+                - exp_v1_v2[:, :, None] * (
+                    del_u2_block[:, None, :]
+                    + exp_u1_u2[:, None, :] * (
+                        del_v1_block_n[:, :, None]
+                        + exp_v0_v1[:, :, None] * del_u1_block[:, None, :]
+                    )
+                )
             )
 
             ds_block_T = jnp.where(mask, ds_block_T, 0.0)
