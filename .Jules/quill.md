@@ -1,1 +1,4 @@
 ## 2024-05-24 - [Outdated Architecture] **Learning:** The paper had an outdated architecture description, referring to ResNet models instead of the Foundation models used in benchmarks. **Action:** Next time, check if the benchmark configurations match the architectures described in the Experiments section.
+## 2024-10-24 - [Overfull \hbox with long Hugging Face Models]
+**Learning:** The document template has a very narrow line width, and long continuous `\texttt` blocks for URLs (such as `InstaDeepAI/nucleotide-transformer-v2-100m-multi-species`) will always overflow the \hbox margin. Standard `\url{}` doesn't break automatically in this template without the `xurl` package.
+**Action:** Use `\usepackage{xurl}` and wrap model identifiers or URLs in `\url{...}` rather than manually trying to break lines with `\\` which corrupts LaTeX paragraph justification.
