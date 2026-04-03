@@ -1,1 +1,5 @@
 ## 2024-05-24 - [Outdated Architecture] **Learning:** The paper had an outdated architecture description, referring to ResNet models instead of the Foundation models used in benchmarks. **Action:** Next time, check if the benchmark configurations match the architectures described in the Experiments section.
+
+## 2025-02-19 - [Tensor Packing Strategy Drift]
+**Learning:** TPU VMEM limitations and kernel signature limits often force implementations to split theoretically "unified" data structures (like a single packed tensor) into multiple distinct tensors (e.g., `M_data` and `N_data` in `src/ot_kernel.py`). Architectural descriptions in LaTeX frequently drift by describing the mathematically simpler unified concept rather than the required hardware-specific splitting.
+**Action:** Always verify hardware-specific tensor counts and argument signatures in the actual Pallas/CUDA kernel definitions (`pl.pallas_call`) rather than relying on the high-level conceptual description when updating LaTeX methods sections.
