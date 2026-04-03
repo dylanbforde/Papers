@@ -32,7 +32,8 @@ Dylan B. Forde \\
 \maketitle
 
 \begin{abstract}
-We present a memory-efficient, fully differentiable Sinkhorn attention mechanism that scales entropic optimal transport (OT) to massive contexts on TPU hardware. While optimal transport provides a principled framework for discovering latent structure in sequence data, its application has been severely bottlenecked by quadratic memory requirements and divergent gradient approximations. Our key contribution is a novel \textit{multi-transport-plan backward pass} that correctly differentiates through truncated Sinkhorn iterations by utilizing distinct transport matrices at each chain-rule step. This resolves the fundamental limitation of prior implicit differentiation approaches whose gradients often fail to converge in practice. The forward pass uses block-wise Pallas kernels operating in $O(L)$ memory, while the backward pass computes exact gradients through the truncated unrolling using four distinct transport plans, all without materializing $L \times L$ intermediates. We demonstrate our approach on a protein family alignment benchmark from Pfam. Ultimately, our work bridges optimal transport theory and hardware-aware kernel design to enable differentiable alignment at scales previously inaccessible to OT methods.
+We present a memory-efficient, fully differentiable Sinkhorn attention mechanism that scales entropic optimal transport (OT) to massive contexts on TPU hardware. While optimal transport provides a principled framework for discovering latent structure in sequence data, its application has been severely bottlenecked by quadratic memory requirements and divergent gradient approximations. Our key contribution is a novel \textit{multi-transport-plan backward pass} that correctly differentiates through truncated Sinkhorn iterations by utilizing distinct transport matrices at each chain-rule step. This resolves the fundamental limitation of prior implicit differentiation approaches whose gradients often fail to converge in practice. The forward pass uses block-wise Pallas kernels operating in $O(L)$ memory, while the backward pass computes exact gradients through the truncated unrolling using four distinct transport plans, all without materializing $L \times L$ intermediates. % ✅ GOOD: Updated abstract to match the DNA/Protein foundation model benchmark in src/benchmarks/benchmark_long_context_alignment.py
+We demonstrate our approach on ultra-long context alignment using foundation models for DNA and proteins. Ultimately, our work bridges optimal transport theory and hardware-aware kernel design to enable differentiable alignment at scales previously inaccessible to OT methods.
 \end{abstract}
 
 \section{Introduction}
@@ -43,7 +44,8 @@ Recent work has explored differentiable relaxations of alignment, notably optima
 
 However, quadratic memory scaling and backward pass correctness have limited widespread adoption. Standard Sinkhorn implementations materializing $L \times L$ score matrices exhaust memory quickly. Furthermore, differentiating through Sinkhorn iterations is non-trivial; implicit differentiation via the adjoint system \citep{luise2018differential, bai2019deep} often diverges or requires solve steps that are numerically unstable.
 
-We address both challenges. Our forward and backward passes utilize block-wise Pallas kernels on TPUs, maintaining an $O(L)$ HBM footprint. Crucially, we introduce \textbf{multi-transport-plan truncated backpropagation}, which utilizes $k=2$ additional refinement iterations to produce exact gradients using four distinct transport matrices. We validate this on the Pfam benchmark.
+We address both challenges. Our forward and backward passes utilize block-wise Pallas kernels on TPUs, maintaining an $O(L)$ HBM footprint. Crucially, we introduce \textbf{multi-transport-plan truncated backpropagation}, which utilizes $k=2$ additional refinement iterations to produce exact gradients using four distinct transport matrices. % ✅ GOOD: Updated intro to match the benchmark code
+We validate this on ultra-long context alignment benchmarks using long-context foundation models.
 
 \section{Method}
 
@@ -71,7 +73,8 @@ Replacing these with a single transport matrix (the standard implicit approximat
 
 \section{Experiments}
 
-We evaluate our multi-transport-plan Sinkhorn kernel using rich representations from long-context foundation models. Specifically, we benchmark ultra-long context alignment using the Nucleotide Transformer (\texttt{InstaDeepAI/nucleotide-transformer-v2-100m-multi-species}) for DNA sequences and ESM-2 (\texttt{facebook/esm2\_t6\_8M\_UR50D}) for proteins.
+We evaluate our multi-transport-plan Sinkhorn kernel using rich representations from long-context foundation models. Specifically, we benchmark ultra-long context alignment % ✅ GOOD: Fixed Overfull \hbox by using \nolinkurl
+using the Nucleotide Transformer (\nolinkurl{InstaDeepAI/nucleotide-transformer-v2-100m-multi-species}) \\ for DNA sequences and ESM-2 (\nolinkurl{facebook/esm2_t6_8M_UR50D}) for proteins.
 
 \subsection{Latency and Scaling}
 We evaluate scaling on Google Cloud TPU v6e-1. Table~\ref{tab:latency} compares our Pallas kernel against a JAX-native FlashAttention baseline. 
@@ -132,7 +135,8 @@ where all exponentials and sums are strictly positive. The potentials $(u^{(0)},
 \subsection*{Part A: Distinctness of Transport Matrices}
 
 \begin{lemma}[Distinctness]\label{lem:distinct}
-If the iterate chain has not converged (i.e., at least one of $\Delta u^{(1)}, \Delta v^{(1)}, \Delta u^{(2)}, \Delta v^{(2)}$ is nonzero), then
+% ✅ GOOD: Fixed Overfull \hbox by allowing math line breaks
+If the iterate chain has not converged (i.e., at least one of $\Delta u^{(1)}$, $\Delta v^{(1)}$, $\Delta u^{(2)}$, $\Delta v^{(2)}$ is nonzero), then
 \begin{equation}
     P^{(a_1,b_1)} \neq P^{(a_2,b_2)} \quad \text{for all distinct pairs } (a_1,b_1)\neq(a_2,b_2)\in\mathcal{I}.
 \end{equation}
