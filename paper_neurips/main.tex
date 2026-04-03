@@ -50,9 +50,9 @@ We address both challenges. Our forward and backward passes utilize block-wise P
 \subsection{Forward Pass: Block-Wise Tiling}
 The forward pass computes Sinkhorn potentials $u, v$ and output $O = PV$ in a tiled fashion, conceptually similar to FlashAttention \citep{dao2022flashattention}. For each query block $Q_i$, we scan over key blocks $K_j$ to compute tiled logsumexp reductions:
 \begin{equation}
-    u_i = -\log\!\Bigl[\sum_{j} \exp(Q_i K_j^\top \cdot \alpha/\sqrt{d} + v_j)\Bigr].
+    u_i = -\log\!\Bigl[\sum_{j} \exp(Q_i K_j^\top / \sqrt{d} + v_j)\Bigr].
 \end{equation}
-This strategy yields $O(L)$ HBM memory usage while maintaining hardware-efficient matrix multiplications. To further optimize TPU performance, we employ an \textbf{8-channel packing strategy} within the Pallas kernels. By packing potential histories ($u^{(0)}, u^{(1)}, u^{(2)}$) and intermediate gradient vectors ($\delta u^{(1)}, \delta u^{(2)}$) into a single tensor with $C=8$ channels, we significantly reduce kernel signatures and minimize VMEM pressure, ensuring compatibility with TPU v6e Trillium constraints.
+This strategy yields $O(L)$ HBM memory usage while maintaining hardware-efficient matrix multiplications. To further optimize TPU performance, we employ an \textbf{8-channel packing strategy} within the Pallas kernels. By packing potential histories and intermediate gradient vectors into two distinct tensors with $C=8$ channels (e.g., $u^{(0)}, u^{(1)}, u^{(2)}, \delta u^{(1)}, \delta u^{(2)}$ for queries, and corresponding $v$ histories with $g_v, \delta v^{(1)}$ for keys), we significantly reduce kernel signatures and minimize VMEM pressure, ensuring compatibility with TPU v6e Trillium constraints.
 
 \subsection{Multi-Transport-Plan Backward Pass}
 Our core technical contribution is the derivation and implementation of a rigorous backward pass through the unrolled Sinkhorn chain. We prove that truncated backpropagation through $k$ iterations is more stable than implicit methods, provided the intermediate transport plans are handled correctly.

@@ -1,1 +1,8 @@
 .env
+paper_neurips/*.aux
+paper_neurips/*.bbl
+paper_neurips/*.blg
+paper_neurips/*.fdb_latexmk
+paper_neurips/*.fls
+paper_neurips/*.log
+paper_neurips/*.pdf
