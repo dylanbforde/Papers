@@ -1,4 +1,4 @@
-\begin{thebibliography}{7}
+\begin{thebibliography}{6}
 \providecommand{\natexlab}[1]{#1}
 \providecommand{\url}[1]{\texttt{#1}}
 \expandafter\ifx\csname urlstyle\endcsname\relax
@@ -32,14 +32,6 @@ Giulia Luise, Alessandro Rudi, Massimiliano Pontil, and Carlo Ciliberto.
   {W}asserstein distance.
 \newblock In \emph{Advances in Neural Information Processing Systems},
   volume~31, 2018.
-
-\bibitem[Mistry et~al.(2021)Mistry, Chuguransky, Williams, Qureshi, Salazar,
-  et~al.]{mistry2021pfam}
-Jaina Mistry, Sara Chuguransky, Lowri Williams, Matloob Qureshi, Gustavo~A
-  Salazar, et~al.
-\newblock Pfam: The protein families database in 2021.
-\newblock \emph{Nucleic Acids Research}, 49\penalty0 (D1):\penalty0 D99--D105,
-  2021.
 
 \bibitem[Peyr{\'e} and Cuturi(2019)]{peyre2019computational}
 Gabriel Peyr{\'e} and Marco Cuturi.
