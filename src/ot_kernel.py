@@ -342,19 +342,22 @@ def dq_kernel_multi(
             # Score matrix
             s_block = jnp.einsum("bmd,bnd->bmn", q_block, k_block) * scale
 
+            # MACH ⚡: Precomputed s+u combinations and factored P22 to save matrix-sized additions and multiplications per loop unroll. Readability sacrificed for memory bandwidth and cycles.
+            s_u2 = s_block + u2_block[:, :, None]
+            s_u1 = s_block + u1_block[:, :, None]
+
             # 4 transport matrices (recomputed from packed potentials)
-            P22 = safe_exp(s_block + u2_block[:, :, None] + v2_block[:, None, :])
-            P21 = safe_exp(s_block + u2_block[:, :, None] + v1_block[:, None, :])
-            P11 = safe_exp(s_block + u1_block[:, :, None] + v1_block[:, None, :])
-            P10 = safe_exp(s_block + u1_block[:, :, None] + v0_block[:, None, :])
+            P22 = safe_exp(s_u2 + v2_block[:, None, :])
+            P21 = safe_exp(s_u2 + v1_block[:, None, :])
+            P11 = safe_exp(s_u1 + v1_block[:, None, :])
+            P10 = safe_exp(s_u1 + v0_block[:, None, :])
 
             # Z = dO @ V^T
             z_block = jnp.einsum("bme,bne->bmn", do_block, v_mat_block)
 
             # Full multi-transport dS (5 terms: A, B, C, D, E)
             ds_block = (
-                P22 * z_block
-                - P22 * g_v_block[:, None, :]
+                P22 * (z_block - g_v_block[:, None, :])
                 - P21 * del_u2_block[:, :, None]
                 - P11 * del_v1_block[:, None, :]
                 - P10 * del_u1_block[:, :, None]
@@ -424,19 +427,22 @@ def dk_dv_kernel_multi(
             # Score matrix (transposed to (B, N, M) to natively support dot_general layout)
             s_block_T = jnp.einsum("bnd,bmd->bnm", k_block, q_block) * scale
 
+            # MACH ⚡: Precomputed s_T+u combinations and factored P22_T to save matrix-sized additions and multiplications per loop unroll. Readability sacrificed for memory bandwidth and cycles.
+            s_u2_T = s_block_T + u2_block[:, None, :]
+            s_u1_T = s_block_T + u1_block[:, None, :]
+
             # 4 transport matrices (transposed)
-            P22_T = safe_exp(s_block_T + v2_block_n[:, :, None] + u2_block[:, None, :])
-            P21_T = safe_exp(s_block_T + v1_block_n[:, :, None] + u2_block[:, None, :])
-            P11_T = safe_exp(s_block_T + v1_block_n[:, :, None] + u1_block[:, None, :])
-            P10_T = safe_exp(s_block_T + v0_block_n[:, :, None] + u1_block[:, None, :])
+            P22_T = safe_exp(s_u2_T + v2_block_n[:, :, None])
+            P21_T = safe_exp(s_u2_T + v1_block_n[:, :, None])
+            P11_T = safe_exp(s_u1_T + v1_block_n[:, :, None])
+            P10_T = safe_exp(s_u1_T + v0_block_n[:, :, None])
 
             # Z = V @ dO^T
             z_block_T = jnp.einsum("bne,bme->bnm", v_mat_block, do_block)
 
             # Full multi-transport dS (transposed)
             ds_block_T = (
-                P22_T * z_block_T
-                - P22_T * g_v_block_n[:, :, None]
+                P22_T * (z_block_T - g_v_block_n[:, :, None])
                 - P21_T * del_u2_block[:, None, :]
                 - P11_T * del_v1_block_n[:, :, None]
                 - P10_T * del_u1_block[:, None, :]
