@@ -1,0 +1,3 @@
+## 2024-04-05 - [Pallas Sinkhorn Backward Factorization]
+**Learning:** In the multi-transport-plan backward pass, calculating 4 separate transport matrices naively requires 4 independent `safe_exp` operations on large `(BATCH_BLOCK, BLOCK, BLOCK)` score matrices, hammering SRAM bandwidth and ALU cycles. Since the underlying score matrix $S_{mn}$ is identical, we can compute $P^{(1,1)}$ once, and derive the other matrices via cheap broadcast multiplication with `safe_exp(\Delta u)` and `safe_exp(\Delta v)`.
+**Action:** When computing multiple transport matrices or attention masks with shared structures, always factor out the differences. Vector operations are practically free compared to full-block operations.

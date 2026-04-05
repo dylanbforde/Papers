@@ -343,10 +343,11 @@ def dq_kernel_multi(
             s_block = jnp.einsum("bmd,bnd->bmn", q_block, k_block) * scale
 
             # 4 transport matrices (recomputed from packed potentials)
-            P22 = safe_exp(s_block + u2_block[:, :, None] + v2_block[:, None, :])
-            P21 = safe_exp(s_block + u2_block[:, :, None] + v1_block[:, None, :])
+            # MACH ⚡: Factored out potential differences to reduce 4 full-block safe_exp calls to 1. Saves ALU cycles and SRAM throughput.
             P11 = safe_exp(s_block + u1_block[:, :, None] + v1_block[:, None, :])
-            P10 = safe_exp(s_block + u1_block[:, :, None] + v0_block[:, None, :])
+            P21 = P11 * safe_exp(u2_block - u1_block)[:, :, None]
+            P22 = P21 * safe_exp(v2_block - v1_block)[:, None, :]
+            P10 = P11 * safe_exp(v0_block - v1_block)[:, None, :]
 
             # Z = dO @ V^T
             z_block = jnp.einsum("bme,bne->bmn", do_block, v_mat_block)
@@ -425,10 +426,11 @@ def dk_dv_kernel_multi(
             s_block_T = jnp.einsum("bnd,bmd->bnm", k_block, q_block) * scale
 
             # 4 transport matrices (transposed)
-            P22_T = safe_exp(s_block_T + v2_block_n[:, :, None] + u2_block[:, None, :])
-            P21_T = safe_exp(s_block_T + v1_block_n[:, :, None] + u2_block[:, None, :])
+            # MACH ⚡: Factored out potential differences to reduce 4 full-block safe_exp calls to 1. Saves ALU cycles and SRAM throughput.
             P11_T = safe_exp(s_block_T + v1_block_n[:, :, None] + u1_block[:, None, :])
-            P10_T = safe_exp(s_block_T + v0_block_n[:, :, None] + u1_block[:, None, :])
+            P21_T = P11_T * safe_exp(u2_block - u1_block)[:, None, :]
+            P22_T = P21_T * safe_exp(v2_block_n - v1_block_n)[:, :, None]
+            P10_T = P11_T * safe_exp(v0_block_n - v1_block_n)[:, :, None]
 
             # Z = V @ dO^T
             z_block_T = jnp.einsum("bne,bme->bnm", v_mat_block, do_block)
