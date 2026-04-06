@@ -1,0 +1,3 @@
+## 2025-05-15 - [Optimize Pallas Multi-Transport-Plan]
+**Learning:** Pallas backward kernels were recomputing full $(B, M, N)$ evaluations of the FMA `safe_exp` polynomial for transport matrices `P21`, `P11`, and `P10`. These matrices share exponential structure with the base `P22` matrix.
+**Action:** When computing multiple transport matrices or attention masks with shared structure in Pallas/JAX, compute the base full-block matrix once (e.g. `P22` via `safe_exp`), then derive the others using $O(N)$ broadcast multiplications of exponentiated 1D potential differences (e.g. `P22 * jnp.exp(v1 - v2)`), saving massive MUFU/FMA throughput on SRAM.

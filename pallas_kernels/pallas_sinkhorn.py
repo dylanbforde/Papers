@@ -343,10 +343,11 @@ def dq_kernel_multi(
             s_block = jnp.einsum("bmd,bnd->bmn", q_block, k_block) * scale
 
             # 4 transport matrices (recomputed from packed potentials)
+            # MACH ⚡: Optimize P10-P21 via broadcast exp differences from P22
             P22 = safe_exp(s_block + u2_block[:, :, None] + v2_block[:, None, :])
-            P21 = safe_exp(s_block + u2_block[:, :, None] + v1_block[:, None, :])
-            P11 = safe_exp(s_block + u1_block[:, :, None] + v1_block[:, None, :])
-            P10 = safe_exp(s_block + u1_block[:, :, None] + v0_block[:, None, :])
+            P21 = P22 * jnp.exp(v1_block[:, None, :] - v2_block[:, None, :])
+            P11 = P21 * jnp.exp(u1_block[:, :, None] - u2_block[:, :, None])
+            P10 = P11 * jnp.exp(v0_block[:, None, :] - v1_block[:, None, :])
 
             # Z = dO @ V^T
             z_block = jnp.einsum("bme,bne->bmn", do_block, v_mat_block)
@@ -425,10 +426,11 @@ def dk_dv_kernel_multi(
             s_block = jnp.einsum("bmd,bnd->bmn", q_block, k_block) * scale
 
             # 4 transport matrices
+            # MACH ⚡: Optimize P10-P21 via broadcast exp differences from P22
             P22 = safe_exp(s_block + u2_block[:, :, None] + v2_block_n[:, None, :])
-            P21 = safe_exp(s_block + u2_block[:, :, None] + v1_block_n[:, None, :])
-            P11 = safe_exp(s_block + u1_block[:, :, None] + v1_block_n[:, None, :])
-            P10 = safe_exp(s_block + u1_block[:, :, None] + v0_block_n[:, None, :])
+            P21 = P22 * jnp.exp(v1_block_n[:, None, :] - v2_block_n[:, None, :])
+            P11 = P21 * jnp.exp(u1_block[:, :, None] - u2_block[:, :, None])
+            P10 = P11 * jnp.exp(v0_block_n[:, None, :] - v1_block_n[:, None, :])
 
             # Z = dO @ V^T
             z_block = jnp.einsum("bme,bne->bmn", do_block, v_mat_block)
@@ -794,10 +796,11 @@ def jax_ref_sinkhorn_bwd(n_iters, res, g):
     u1, v1 = _jax_ref_compute_next_uv(S, u0, v0)
     u2, v2 = _jax_ref_compute_next_uv(S, u1, v1)
 
+    # MACH ⚡: Optimize P10-P21 via broadcast exp differences from P22
     P22 = jnp.exp(S + u2[..., :, None] + v2[..., None, :])
-    P21 = jnp.exp(S + u2[..., :, None] + v1[..., None, :])
-    P11 = jnp.exp(S + u1[..., :, None] + v1[..., None, :])
-    P10 = jnp.exp(S + u1[..., :, None] + v0[..., None, :])
+    P21 = P22 * jnp.exp(v1[..., None, :] - v2[..., None, :])
+    P11 = P21 * jnp.exp(u1[..., :, None] - u2[..., :, None])
+    P10 = P11 * jnp.exp(v0[..., None, :] - v1[..., None, :])
 
     T_Z = P22 * Z
     g_u = jnp.sum(T_Z, axis=-1)
