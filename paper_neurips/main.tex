@@ -8,6 +8,7 @@
 \usepackage{natbib}
 \usepackage[margin=1in]{geometry}
 \usepackage{xcolor}
+\usepackage{xurl}
 
 \DeclareMathOperator{\argmin}{arg\,min}
 \DeclareMathOperator{\argmax}{arg\,max}
@@ -52,7 +53,7 @@ The forward pass computes Sinkhorn potentials $u, v$ and output $O = PV$ in a ti
 \begin{equation}
     u_i = -\log\!\Bigl[\sum_{j} \exp(Q_i K_j^\top / \sqrt{d} + v_j)\Bigr]. % Updated to match code [2024-05-24]
 \end{equation}
-This strategy yields $O(L)$ HBM memory usage while maintaining hardware-efficient matrix multiplications. To further optimize TPU performance, we employ an \textbf{8-channel packing strategy} within the Pallas kernels. By packing potential histories ($u^{(0)}, u^{(1)}, u^{(2)}$) and intermediate gradient vectors ($\delta u^{(1)}, \delta u^{(2)}$) into a single tensor with $C=8$ channels, we significantly reduce kernel signatures and minimize VMEM pressure, ensuring compatibility with TPU v6e Trillium constraints.
+This strategy yields $O(L)$ HBM memory usage while maintaining hardware-efficient matrix multiplications. To further optimize TPU performance, we employ an \textbf{8-channel packing strategy} within the Pallas kernels. By packing potential histories ($u^{(0)}, u^{(1)}, u^{(2)}$) and intermediate gradient vectors ($\delta u^{(1)}, \delta u^{(2)}$) into two distinct tensors (one for the query-side and one for the key-side), each with $C=8$ channels, we significantly reduce kernel signatures and minimize VMEM pressure, ensuring compatibility with TPU v6e Trillium constraints.
 
 \subsection{Multi-Transport-Plan Backward Pass}
 Our core technical contribution is the derivation and implementation of a rigorous backward pass through the unrolled Sinkhorn chain. We prove that truncated backpropagation through $k$ iterations is more stable than implicit methods, provided the intermediate transport plans are handled correctly.
@@ -71,7 +72,7 @@ Replacing these with a single transport matrix (the standard implicit approximat
 
 \section{Experiments}
 
-We evaluate our multi-transport-plan Sinkhorn kernel using rich representations from long-context foundation models. Specifically, we benchmark ultra-long context alignment using the Nucleotide Transformer (\texttt{InstaDeepAI/nucleotide-transformer-v2-100m-multi-species}) for DNA sequences and ESM-2 (\texttt{facebook/esm2\_t6\_8M\_UR50D}) for proteins.
+We evaluate our multi-transport-plan Sinkhorn kernel using rich representations from long-context foundation models. Specifically, we benchmark ultra-long context alignment using the Nucleotide Transformer (\url{InstaDeepAI/nucleotide-transformer-v2-100m-multi-species}) for DNA sequences and ESM-2 (\url{facebook/esm2_t6_8M_UR50D}) for proteins.
 
 \subsection{Latency and Scaling}
 We evaluate scaling on Google Cloud TPU v6e-1. Table~\ref{tab:latency} compares our Pallas kernel against a JAX-native FlashAttention baseline. 
@@ -132,7 +133,7 @@ where all exponentials and sums are strictly positive. The potentials $(u^{(0)},
 \subsection*{Part A: Distinctness of Transport Matrices}
 
 \begin{lemma}[Distinctness]\label{lem:distinct}
-If the iterate chain has not converged (i.e., at least one of $\Delta u^{(1)}, \Delta v^{(1)}, \Delta u^{(2)}, \Delta v^{(2)}$ is nonzero), then
+If the iterate chain has not converged (i.e., at least one of $\Delta u^{(1)}$, $\Delta v^{(1)}$, $\Delta u^{(2)}$, $\Delta v^{(2)}$ is nonzero), then
 \begin{equation}
     P^{(a_1,b_1)} \neq P^{(a_2,b_2)} \quad \text{for all distinct pairs } (a_1,b_1)\neq(a_2,b_2)\in\mathcal{I}.
 \end{equation}
