@@ -27,10 +27,15 @@ gcloud compute tpus queued-resources describe sinkhorn-queue --zone=us-east5-a -
 gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=us-east5-a --worker=all --command="sudo apt-get update && sudo apt-get install python3-pip -y && pip install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html && pip install optax transformers torch"
 ```
 
-## 4. Clone repo
+## 4. SSH in and clone repo
 
 ```bash
-gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=us-east5-a --worker=all --command="git clone https://YOUR_GITHUB_USERNAME:YOUR_PAT_TOKEN@github.com/dylanbforde/sinkhorn-aligner.git"
+gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=us-east5-a
+```
+
+Then from inside the TPU VM:
+```bash
+git clone git@github.com:dylanbforde/sinkhorn-aligner.git
 ```
 
 ## 5. Run Sinkhorn OT (2.5 hours, auto-shutdown after)
