@@ -1,8 +1,37 @@
 # Wall-Clock Training Deployment Runbook
 
-Copy-paste each step in order from **Cloud Shell**.
+You have two options:
+1. **🚀 One-Click Automated Run** (Recommended) — Run one script and go to sleep. It waits for capacity, installs everything, runs the full 5-hour experiment, and shuts down.
+2. **Step-by-Step Manual Run** — Copy-paste each command manually.
 
 ---
+
+## 🚀 Option 1: One-Click Automated Run
+
+Use this if you don't want to wait around for the TPU to become active.
+
+1. **Prepare your SSH agent** (so the script can clone via SSH):
+   ```bash
+   eval `ssh-agent -s`
+   ssh-add ~/.ssh/id_ed25519  # replace with your key path
+   ```
+
+2. **Run the master script**:
+   ```bash
+   # Clone the repo locally first (if you haven't)
+   git clone git@github.com:dylanbforde/sinkhorn-aligner.git
+   cd sinkhorn-aligner
+
+   # Run the automated deployment script
+   chmod +x scripts/tpu_auto_run.sh
+   ./scripts/tpu_auto_run.sh
+   ```
+
+3. **Go to sleep.** The script will block until capacity is available, run the 5-hour experiment, and shut the TPU down when finished.
+
+---
+
+## Option 2: Step-by-Step Manual Run
 
 ## 0. Initial Setup (Run Once)
 
