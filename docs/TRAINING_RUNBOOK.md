@@ -8,8 +8,8 @@ Copy-paste each step in order from **Cloud Shell**.
 
 Set your project context and ensure the bucket exists:
 ```bash
-# Set your project (replace with your actual project ID)
-gcloud config set project [YOUR_PROJECT_ID]
+# Set your project
+gcloud config set project sinkhorn-neurips
 
 # Create the bucket (if not already created)
 gcloud storage buckets create gs://sinkhorn-neurips-data --location=us-east5
@@ -26,10 +26,17 @@ gcloud compute tpus queued-resources create sinkhorn-queue \
   --spot
 ```
 
-## 2. Check status (repeat until ACTIVE)
+## 2. Wait until ACTIVE (Copy-paste this loop)
+
+This script will block and check every 30 seconds. Once it says "ACTIVE", you can proceed to Step 3.
 
 ```bash
-gcloud compute tpus queued-resources describe sinkhorn-queue --zone=us-east5-a --format="value(state.state)"
+while true; do
+  STATUS=$(gcloud compute tpus queued-resources describe sinkhorn-queue --zone=us-east5-a --format="value(state.state)")
+  echo "[$(date)] TPU Status: $STATUS"
+  [[ "$STATUS" == "ACTIVE" ]] && echo "✓ TPU is ACTIVE!" && break
+  sleep 30
+done
 ```
 
 ## 3. Install dependencies
