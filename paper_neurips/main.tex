@@ -104,7 +104,19 @@ We evaluate scaling on Google Cloud TPU v6e-1. Table~\ref{tab:latency} compares 
 The results demonstrate that while Sinkhorn is computationally more expensive (due to 15 iterations), it exhibits stable $O(L \cdot W)$ scaling even at contexts where other OT methods fail. Note the linear increase in latency as length increases, confirming the efficiency of the banded Pallas implementation.
 
 \subsection{Alignment Performance}
-% TODO: Add alignment performance results
+
+We evaluate alignment quality on the Pfam seed alignment benchmark \citep{mistry2021pfam}. We extract pairwise training pairs from curated multiple sequence alignments, embed sequences using ESM-2 (\nolinkurl{facebook/esm2_t6_8M_UR50D}), and train learnable Q/K/V projection heads to minimize cross-entropy between the attention/transport matrix and the ground-truth alignment derived from MSA columns.
+
+Crucially, the ground-truth alignment is a permutation matrix (doubly-stochastic). Sinkhorn's transport plan is doubly-stochastic by construction and can represent this target. Flash Attention produces row-stochastic matrices (rows sum to 1, columns do not) and structurally cannot represent a permutation.
+
+Both methods are trained for 2.5 wall-clock hours on a TPU v6e-1 (8 chips) with identical MUON optimizers, learning rates, and batch sizes. Checkpoints are saved every 100 steps.
+
+% TODO: Add loss-vs-wallclock figure after TPU experiments
+% \begin{figure}[h]
+% \centering
+% \includegraphics[width=0.8\textwidth]{loss_curve.pdf}
+% \caption{Training loss vs wall-clock time on Pfam alignment.}
+% \end{figure}
 
 \section{Conclusion}
 We have developed a hardware-optimized, fully differentiable Sinkhorn attention mechanism for massive context lengths. By resolving the memory bottleneck via block-wise Pallas kernels and the gradient bottleneck via a novel multi-transport-plan backward pass, we enable high-accuracy Optimal Transport at scales previously inaccessible.
