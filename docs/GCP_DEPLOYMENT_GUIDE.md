@@ -168,11 +168,94 @@ To delete the cluster entirely (which stops all charges permanently and frees up
 gcloud compute tpus tpu-vm delete sinkhorn-benchmark-cluster --zone=us-east5-a
 ```
 
-## 8. Troubleshooting: Bouncing Capacity (v6e Trillium)
-TPU Trillium models (`v6e`) are in extremely high demand globally. 
+## 8. Handling Capacity Issues (v6e Trillium)
+TPU Trillium models (`v6e`) are in extremely high demand globally. If you get an `Insufficient Capacity` or `RESOURCE_EXHAUSTED` error, you have three options:
 
-If you `stop` your machine, you release the physical hardware. When you attempt to `start` your stopped machine later, Google must find 8 available chips in your exact datacenter. If the zone is currently sold out, you will receive an `Insufficient Capacity` error.
+### Option A: Queued Resources (Recommended — "Set it and forget it")
+GCP's **Queued Resources** API lets you submit a TPU request that sits in a queue until capacity frees up. GCP automatically provisions your TPU the moment chips become available — no manual retrying needed.
 
-**What to do:**
-1. **Wait and Retry:** Hardware frees up identically to how it gets claimed. Run the `tpu-vm start ...` command repeatedly every 5-10 minutes. A cluster will almost always eventually catch a released pocket of availability.
-2. **Delete and Move:** If you cannot wait, you must completely `delete` the stopped cluster and recreate a fresh one in a different zone that has current capacity (like `us-central1-a` or `us-east1-c`), then strictly re-run the `apt-get` installation block and clone the code again.
+```bash
+# Submit a queued request — GCP will auto-provision when capacity is available
+gcloud compute tpus queued-resources create sinkhorn-queue \
+  --node-id=sinkhorn-benchmark-cluster \
+  --zone=us-east5-a \
+  --accelerator-type=v6e-8 \
+  --runtime-version=tpu-ubuntu2204-base
+
+# Check status (will show WAITING_FOR_RESOURCES → PROVISIONING → ACTIVE)
+gcloud compute tpus queued-resources describe sinkhorn-queue --zone=us-east5-a
+
+# Once ACTIVE, SSH in as normal
+gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=us-east5-a
+```
+
+To clean up the queued resource after you're done:
+```bash
+gcloud compute tpus queued-resources delete sinkhorn-queue --zone=us-east5-a --force
+```
+
+**Tip:** You can submit queued requests to multiple zones simultaneously — whichever fills first wins:
+```bash
+for ZONE in us-east5-a us-central1-a us-east1-c europe-west4-b; do
+  gcloud compute tpus queued-resources create sinkhorn-queue-${ZONE} \
+    --node-id=sinkhorn-cluster-${ZONE} \
+    --zone=${ZONE} \
+    --accelerator-type=v6e-8 \
+    --runtime-version=tpu-ubuntu2204-base
+done
+```
+
+### Option B: Spot VMs (60–70% cheaper, better availability)
+Spot TPU VMs are heavily discounted and often have better availability since they draw from a separate capacity pool. The tradeoff: Google can preempt (shut down) your VM at any time if they need the chips back.
+
+For a 2.5-hour training run, this is usually fine — preemptions are uncommon for short jobs, and our script checkpoints every 100 steps to GCS.
+
+```bash
+# Queued + Spot (cheapest option that auto-provisions)
+gcloud compute tpus queued-resources create sinkhorn-spot-queue \
+  --node-id=sinkhorn-benchmark-cluster \
+  --zone=us-east5-a \
+  --accelerator-type=v6e-8 \
+  --runtime-version=tpu-ubuntu2204-base \
+  --spot
+```
+
+Or create directly (if capacity is available right now):
+```bash
+gcloud compute tpus tpu-vm create sinkhorn-benchmark-cluster \
+  --zone=us-east5-a \
+  --accelerator-type=v6e-8 \
+  --version=tpu-ubuntu2204-base \
+  --spot
+```
+
+### Option C: Auto-retry script (brute force)
+If you prefer not to use the queued API, save this as `provision_tpu.sh` and run it — it tries every zone in a loop until one succeeds:
+
+```bash
+#!/bin/bash
+ZONES=("us-east5-a" "us-central1-a" "us-east1-c" "europe-west4-b" "us-central2-b")
+
+while true; do
+  for ZONE in "${ZONES[@]}"; do
+    echo "[$(date)] Trying $ZONE..."
+    gcloud compute tpus tpu-vm create sinkhorn-benchmark-cluster \
+      --zone=$ZONE \
+      --accelerator-type=v6e-8 \
+      --version=tpu-ubuntu2204-base \
+      --spot 2>&1
+
+    if [ $? -eq 0 ]; then
+      echo "✓ SUCCESS in $ZONE!"
+      exit 0
+    fi
+  done
+  echo "All zones full. Retrying in 5 minutes..."
+  sleep 300
+done
+```
+
+Run it in the background from Cloud Shell:
+```bash
+chmod +x provision_tpu.sh && nohup ./provision_tpu.sh > provision.log 2>&1 &
+```
