@@ -130,6 +130,34 @@ gcloud storage cp -r gs://sinkhorn-neurips-data/checkpoints/ ./checkpoints/
 | `--checkpoint_every` | `100` | Steps between GCS checkpoints |
 | `--no_gcs` | off | Disable GCS upload (local only, for testing) |
 
+### ⚠️ Billing Safety: Auto-shutdown on completion/failure
+If the Python script crashes, the TPU VM **stays running** and you keep paying ~$10-12/hr. To protect against this (especially for overnight runs), wrap the command so the **TPU auto-deletes itself** when the script finishes or fails:
+
+```bash
+# Safe overnight run: auto-deletes TPU after script completes (success OR failure)
+ZONE=us-east5-a
+gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=$ZONE --worker=all --command="\
+  cd sinkhorn-aligner && \
+  python src/benchmarks/benchmark_wallclock_training.py --method sinkhorn_ot --max_hours 2.5; \
+  sudo shutdown -h now"
+# The VM shuts down after the script exits (success or crash).
+# Then delete from your local machine / Cloud Shell:
+# gcloud compute tpus tpu-vm delete sinkhorn-benchmark-cluster --zone=$ZONE --quiet
+```
+
+Alternatively, set a **hard timeout** from Cloud Shell that kills the VM after a max duration (e.g., 3 hours for a 2.5hr run):
+```bash
+# Start the training in the background, then schedule deletion after 3 hours
+gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=us-east5-a --worker=all --command="\
+  cd sinkhorn-aligner && \
+  nohup python src/benchmarks/benchmark_wallclock_training.py --method sinkhorn_ot --max_hours 2.5 > training.log 2>&1 &"
+
+# Schedule auto-delete from Cloud Shell (10800s = 3 hours)
+sleep 10800 && gcloud compute tpus tpu-vm delete sinkhorn-benchmark-cluster --zone=us-east5-a --quiet &
+```
+
+**Also recommended:** Set a [GCP Budget Alert](https://console.cloud.google.com/billing/budgets) for your project (e.g., $100) so you get an email if spending exceeds your threshold.
+
 ## 6.5 Real-World Training: Epochs & Checkpointing
 When you transition from running the benchmark profiling script to doing an actual full-scale training run over Pfam or Nucleotide datasets, you must implement **Checkpointing** to protect against TPU preemptions.
 
