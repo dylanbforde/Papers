@@ -8,6 +8,8 @@
 \usepackage{natbib}
 \usepackage[margin=1in]{geometry}
 \usepackage{xcolor}
+\usepackage{microtype}
+\usepackage{xurl}
 
 \DeclareMathOperator{\argmin}{arg\,min}
 \DeclareMathOperator{\argmax}{arg\,max}
@@ -71,7 +73,7 @@ Replacing these with a single transport matrix (the standard implicit approximat
 
 \section{Experiments}
 
-We evaluate our multi-transport-plan Sinkhorn kernel using rich representations from long-context foundation models. Specifically, we benchmark ultra-long context alignment using the Nucleotide Transformer (\texttt{InstaDeepAI/nucleotide-transformer-v2-100m-multi-species}) for DNA sequences and ESM-2 (\texttt{facebook/esm2\_t6\_8M\_UR50D}) for proteins.
+We evaluate our multi-transport-plan Sinkhorn kernel using rich representations from long-context foundation models. Specifically, we benchmark ultra-long context alignment using the Nucleotide Transformer (\nolinkurl{InstaDeepAI/nucleotide-transformer-v2-100m-multi-species}) for DNA sequences and ESM-2 (\nolinkurl{facebook/esm2_t6_8M_UR50D}) for proteins.
 
 \subsection{Latency and Scaling}
 We evaluate scaling on Google Cloud TPU v6e-1. Table~\ref{tab:latency} compares our Pallas kernel against a JAX-native FlashAttention baseline. 
@@ -132,7 +134,7 @@ where all exponentials and sums are strictly positive. The potentials $(u^{(0)},
 \subsection*{Part A: Distinctness of Transport Matrices}
 
 \begin{lemma}[Distinctness]\label{lem:distinct}
-If the iterate chain has not converged (i.e., at least one of $\Delta u^{(1)}, \Delta v^{(1)}, \Delta u^{(2)}, \Delta v^{(2)}$ is nonzero), then
+If the iterate chain has not converged (i.e., at least one of $\Delta u^{(1)}$, $\Delta v^{(1)}$, $\Delta u^{(2)}$, $\Delta v^{(2)}$ is nonzero), then
 \begin{equation}
     P^{(a_1,b_1)} \neq P^{(a_2,b_2)} \quad \text{for all distinct pairs } (a_1,b_1)\neq(a_2,b_2)\in\mathcal{I}.
 \end{equation}
