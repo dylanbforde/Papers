@@ -342,11 +342,12 @@ def dq_kernel_multi(
             # Score matrix
             s_block = jnp.einsum("bmd,bnd->bmn", q_block, k_block) * scale
 
+            # MACH ⚡: Computed base P22 full-block matrix once via safe_exp, then derived P21, P11, P10 using O(N) broadcast multiplications of potential differences. This eliminates 3 redundant full-block MUFU/FMA operations per iteration, saving SRAM throughput.
             # 4 transport matrices (recomputed from packed potentials)
             P22 = safe_exp(s_block + u2_block[:, :, None] + v2_block[:, None, :])
-            P21 = safe_exp(s_block + u2_block[:, :, None] + v1_block[:, None, :])
-            P11 = safe_exp(s_block + u1_block[:, :, None] + v1_block[:, None, :])
-            P10 = safe_exp(s_block + u1_block[:, :, None] + v0_block[:, None, :])
+            P21 = P22 * jnp.exp(v1_block[:, None, :] - v2_block[:, None, :])
+            P11 = P21 * jnp.exp(u1_block[:, :, None] - u2_block[:, :, None])
+            P10 = P11 * jnp.exp(v0_block[:, None, :] - v1_block[:, None, :])
 
             # Z = dO @ V^T
             z_block = jnp.einsum("bme,bne->bmn", do_block, v_mat_block)
@@ -424,11 +425,12 @@ def dk_dv_kernel_multi(
             # Score matrix (transposed to (B, N, M) to natively support dot_general layout)
             s_block_T = jnp.einsum("bnd,bmd->bnm", k_block, q_block) * scale
 
+            # MACH ⚡: Computed base P22_T full-block matrix once via safe_exp, then derived P21_T, P11_T, P10_T using O(N) broadcast multiplications of potential differences. This eliminates 3 redundant full-block MUFU/FMA operations per iteration, saving SRAM throughput.
             # 4 transport matrices (transposed)
             P22_T = safe_exp(s_block_T + v2_block_n[:, :, None] + u2_block[:, None, :])
-            P21_T = safe_exp(s_block_T + v1_block_n[:, :, None] + u2_block[:, None, :])
-            P11_T = safe_exp(s_block_T + v1_block_n[:, :, None] + u1_block[:, None, :])
-            P10_T = safe_exp(s_block_T + v0_block_n[:, :, None] + u1_block[:, None, :])
+            P21_T = P22_T * jnp.exp(v1_block_n[:, :, None] - v2_block_n[:, :, None])
+            P11_T = P21_T * jnp.exp(u1_block[:, None, :] - u2_block[:, None, :])
+            P10_T = P11_T * jnp.exp(v0_block_n[:, :, None] - v1_block_n[:, :, None])
 
             # Z = V @ dO^T
             z_block_T = jnp.einsum("bne,bme->bnm", v_mat_block, do_block)
