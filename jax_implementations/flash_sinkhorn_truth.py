@@ -808,8 +808,7 @@ def jax_ref_sinkhorn_bwd(n_iters, res, g):
     del_u1 = -jnp.einsum("bhmn,bhn->bhm", P11, del_v1)
 
     dS = (
-        P22 * Z
-        - P22 * g_v[..., None, :]
+        P22 * (Z - g_v[..., None, :])
         - P21 * del_u2[..., :, None]
         - P11 * del_v1[..., None, :]
         - P10 * del_u1[..., :, None]

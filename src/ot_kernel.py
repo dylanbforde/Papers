@@ -354,8 +354,7 @@ def dq_kernel_multi(
 
             # Full multi-transport dS (5 terms: A, B, C, D, E)
             ds_block = (
-                P22 * z_block
-                - P22 * g_v_block[:, None, :]
+                P22 * (z_block - g_v_block[:, None, :])
                 - P21 * del_u2_block[:, :, None]
                 - P11 * del_v1_block[:, None, :]
                 - P10 * del_u1_block[:, :, None]
@@ -437,8 +436,7 @@ def dk_dv_kernel_multi(
 
             # Full multi-transport dS (transposed)
             ds_block_T = (
-                P22_T * z_block_T
-                - P22_T * g_v_block_n[:, :, None]
+                P22_T * (z_block_T - g_v_block_n[:, :, None])
                 - P21_T * del_u2_block[:, None, :]
                 - P11_T * del_v1_block_n[:, :, None]
                 - P10_T * del_u1_block[:, None, :]
@@ -813,8 +811,7 @@ def jax_ref_sinkhorn_bwd(n_iters, res, g):
     del_u1 = -jnp.einsum("bhmn,bhn->bhm", P11, del_v1)
 
     dS = (
-        P22 * Z
-        - P22 * g_v[..., None, :]
+        P22 * (Z - g_v[..., None, :])
         - P21 * del_u2[..., :, None]
         - P11 * del_v1[..., None, :]
         - P10 * del_u1[..., :, None]
