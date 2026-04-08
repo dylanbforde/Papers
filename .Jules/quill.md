@@ -7,3 +7,7 @@
 ## 2024-05-24 - [Dual-Tensor Packing Strategy]
 **Learning:** The paper claimed a "single tensor" with $C=8$ channels for the packing strategy, but the codebase actually utilizes two distinct tensors (`M_data` for query-side and `N_data` for key-side), each with 8 channels, to pack potential histories and gradient intermediates without overloading a single tensor.
 **Action:** Always verify memory mapping architecture claims in the text against the actual JAX Pallas kernel inputs, specifically looking for split query/key state representations.
+
+## 2024-05-24 - [Variable Mapping Discrepancy]
+**Learning:** The scale variable in the paper's math block for the score matrix incorrectly used `\sqrt{d}`, while the codebase variables define the embedding dimension as upper-case `D` (e.g., `scale = 1.0 / jnp.sqrt(D)`).
+**Action:** When updating mathematical equations to sync with the codebase, ensure case sensitivity for variable mappings (e.g., using `D` instead of `d` for dimension variables) accurately reflects the actual implementation.
