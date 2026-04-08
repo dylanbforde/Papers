@@ -321,6 +321,9 @@ def dq_kernel_multi(
 
     init_state = (jnp.zeros_like(q_block),)
 
+    exp_du12 = jnp.exp(u1_block - u2_block)
+    exp_du01 = jnp.exp(u0_block - u1_block)
+
     def body_fn(i, state):
         (dq_acc,) = state
         for u_i in range(UNROLL):
@@ -339,25 +342,28 @@ def dq_kernel_multi(
             g_v_block = n_data[:, :, 3]
             del_v1_block = n_data[:, :, 4]
 
+            exp_dv12 = jnp.exp(v1_block - v2_block)
+            exp_dv01 = jnp.exp(v0_block - v1_block)
+
             # Score matrix
             s_block = jnp.einsum("bmd,bnd->bmn", q_block, k_block) * scale
 
-            # MACH ⚡: Computed base P22 full-block matrix once via safe_exp, then derived P21, P11, P10 using O(N) broadcast multiplications of potential differences. This eliminates 3 redundant full-block MUFU/FMA operations per iteration, saving SRAM throughput.
-            # 4 transport matrices (recomputed from packed potentials)
+            # MACH ⚡: Factored the multi-transport dS equation using distributive properties to eliminate explicit materialization of P21, P11, and P10 matrices. By hoisting loop-invariant exp(u1-u2) and using nested broadcasting, we fuse 4 transport terms into a single P22 multiplication, saving massive SRAM bandwidth.
             P22 = safe_exp(s_block + u2_block[:, :, None] + v2_block[:, None, :])
-            P21 = P22 * jnp.exp(v1_block[:, None, :] - v2_block[:, None, :])
-            P11 = P21 * jnp.exp(u1_block[:, :, None] - u2_block[:, :, None])
-            P10 = P11 * jnp.exp(v0_block[:, None, :] - v1_block[:, None, :])
 
             # Z = dO @ V^T
             z_block = jnp.einsum("bme,bne->bmn", do_block, v_mat_block)
 
-            # Full multi-transport dS (5 terms: A, B, C, D, E)
-            ds_block = (
-                P22 * (z_block - g_v_block[:, None, :])
-                - P21 * del_u2_block[:, :, None]
-                - P11 * del_v1_block[:, None, :]
-                - P10 * del_u1_block[:, :, None]
+            # Full multi-transport dS (factored)
+            ds_block = P22 * (
+                z_block - g_v_block[:, None, :]
+                - exp_dv12[:, None, :] * (
+                    del_u2_block[:, :, None]
+                    + exp_du12[:, :, None] * (
+                        del_v1_block[:, None, :]
+                        + exp_dv01[:, None, :] * del_u1_block[:, :, None]
+                    )
+                )
             )
 
             ds_block = jnp.where(mask, ds_block, 0.0)
@@ -403,6 +409,9 @@ def dk_dv_kernel_multi(
 
     init_state = (jnp.zeros_like(k_block), jnp.zeros_like(v_mat_block))
 
+    exp_dv12_n = jnp.exp(v1_block_n - v2_block_n)
+    exp_dv01_n = jnp.exp(v0_block_n - v1_block_n)
+
     def body_fn(i, state):
         dk_acc, dv_acc = state
         for u_i in range(UNROLL):
@@ -421,25 +430,28 @@ def dk_dv_kernel_multi(
             del_u1_block = m_data[:, :, 3]
             del_u2_block = m_data[:, :, 4]
 
+            exp_du12 = jnp.exp(u1_block - u2_block)
+            exp_du01 = jnp.exp(u0_block - u1_block)
+
             # Score matrix (transposed to (B, N, M) to natively support dot_general layout)
             s_block_T = jnp.einsum("bnd,bmd->bnm", k_block, q_block) * scale
 
-            # MACH ⚡: Computed base P22_T full-block matrix once via safe_exp, then derived P21_T, P11_T, P10_T using O(N) broadcast multiplications of potential differences. This eliminates 3 redundant full-block MUFU/FMA operations per iteration, saving SRAM throughput.
-            # 4 transport matrices (transposed)
+            # MACH ⚡: Factored the multi-transport dS equation using distributive properties to eliminate explicit materialization of P21_T, P11_T, and P10_T matrices. By hoisting loop-invariant exp(v1-v2) and using nested broadcasting, we fuse 4 transport terms into a single P22_T multiplication, saving massive SRAM bandwidth.
             P22_T = safe_exp(s_block_T + v2_block_n[:, :, None] + u2_block[:, None, :])
-            P21_T = P22_T * jnp.exp(v1_block_n[:, :, None] - v2_block_n[:, :, None])
-            P11_T = P21_T * jnp.exp(u1_block[:, None, :] - u2_block[:, None, :])
-            P10_T = P11_T * jnp.exp(v0_block_n[:, :, None] - v1_block_n[:, :, None])
 
             # Z = V @ dO^T
             z_block_T = jnp.einsum("bne,bme->bnm", v_mat_block, do_block)
 
-            # Full multi-transport dS (transposed)
-            ds_block_T = (
-                P22_T * (z_block_T - g_v_block_n[:, :, None])
-                - P21_T * del_u2_block[:, None, :]
-                - P11_T * del_v1_block_n[:, :, None]
-                - P10_T * del_u1_block[:, None, :]
+            # Full multi-transport dS (factored)
+            ds_block_T = P22_T * (
+                z_block_T - g_v_block_n[:, :, None]
+                - exp_dv12_n[:, :, None] * (
+                    del_u2_block[:, None, :]
+                    + exp_du12[:, None, :] * (
+                        del_v1_block_n[:, :, None]
+                        + exp_dv01_n[:, :, None] * del_u1_block[:, None, :]
+                    )
+                )
             )
 
             ds_block_T = jnp.where(mask, ds_block_T, 0.0)
