@@ -415,16 +415,67 @@ def alignment_loss_flash(params, emb_q, emb_k, targets, band_width):
 # Checkpointing (GCS)
 # ==============================================================================
 
-def save_checkpoint(params, step, method, gcs_bucket, local_dir="/tmp/checkpoints"):
+def save_checkpoint(params, step, method, gcs_bucket, elapsed_time, local_dir="/tmp/checkpoints"):
+    """Save model checkpoint + elapsed time to local disk and optionally GCS."""
     ckpt_dir = os.path.join(local_dir, method, f"step_{step:06d}")
     os.makedirs(ckpt_dir, exist_ok=True)
-    np_params = {k: np.array(v) for k, v in params.items()}
+    
+    # Save params + metadata as .npz
+    data = {k: np.array(v) for k, v in params.items()}
+    data['metadata_step'] = np.array(step)
+    data['metadata_elapsed'] = np.array(elapsed_time)
+    
     ckpt_path = os.path.join(ckpt_dir, "params.npz")
-    np.savez(ckpt_path, **np_params)
+    np.savez(ckpt_path, **data)
+    
     if gcs_bucket:
         gcs_path = f"gs://{gcs_bucket}/checkpoints/{method}/step_{step:06d}/params.npz"
         os.system(f"gsutil -q cp {ckpt_path} {gcs_path}")
+    
     return ckpt_path
+
+
+def load_latest_checkpoint(method, gcs_bucket, local_dir="/tmp/checkpoints"):
+    """Check GCS for the latest checkpoint and load it if it exists."""
+    if not gcs_bucket:
+        return None, 0, 0
+    
+    print(f"Checking for existing checkpoints in gs://{gcs_bucket}/checkpoints/{method}/...")
+    
+    # List all params.npz files in the method's checkpoint dir
+    cmd = f"gsutil ls gs://{gcs_bucket}/checkpoints/{method}/*/params.npz"
+    try:
+        output = os.popen(cmd).read().splitlines()
+    except Exception:
+        output = []
+    
+    if not output:
+        print("  No checkpoints found. Starting fresh.")
+        return None, 0, 0
+    
+    # Sort by step number (embedded in path)
+    output.sort()
+    latest_gcs_path = output[-1]
+    
+    print(f"  ✓ Found latest checkpoint: {latest_gcs_path}")
+    
+    # Download locally
+    local_path = os.path.join(local_dir, "resume_latest.npz")
+    os.makedirs(local_dir, exist_ok=True)
+    os.system(f"gsutil -q cp {latest_gcs_path} {local_path}")
+    
+    # Load
+    try:
+        with np.load(local_path, allow_pickle=True) as data:
+            params = {k: jnp.array(data[k]) for k in data.files if not k.startswith('metadata_')}
+            step = int(data['metadata_step'])
+            elapsed = float(data['metadata_elapsed'])
+        
+        print(f"  ✓ Resuming from Step {step} (Elapsed time: {elapsed/3600:.2f}h)")
+        return params, step, elapsed
+    except Exception as e:
+        print(f"  ⚠ Failed to load checkpoint: {e}. Starting fresh.")
+        return None, 0, 0
 
 
 def save_results(results, method, gcs_bucket, local_dir="/tmp/results"):
@@ -483,14 +534,21 @@ def train(method, emb_q, emb_k, targets, seq_len, max_hours, gcs_bucket,
 
     loss_fn = alignment_loss_sinkhorn if method == "sinkhorn_ot" else alignment_loss_flash
 
-    key = jax.random.PRNGKey(seed)
-    params = init_projection_heads(key, D_in, D_proj)
-
+    # Initialize model or resume
+    params, start_step, start_elapsed = load_latest_checkpoint(method, gcs_bucket)
+    
+    if params is None:
+        key = jax.random.PRNGKey(seed)
+        params = init_projection_heads(key, D_in, D_proj)
+    
+    # Initialize optimizer
     optimizer = muon_optimizer(lr)
     opt_state = optimizer.init(params)
-
+    
+    # Auto-detect batch size
     batch_size = auto_detect_batch_size(params, emb_q, emb_k, targets, loss_fn, band_width)
-
+    
+    # JIT-compile training step
     @jax.jit
     def train_step(params, opt_state, batch_q, batch_k, batch_t):
         loss, grads = jax.value_and_grad(loss_fn)(params, batch_q, batch_k, batch_t, band_width)
@@ -500,21 +558,25 @@ def train(method, emb_q, emb_k, targets, seq_len, max_hours, gcs_bucket,
 
     max_seconds = max_hours * 3600
     loss_curve = []
-    step = 0
-    start_time = time.time()
+    step = start_step
+    cumulative_elapsed = start_elapsed
+    session_start_time = time.time()
 
     print(f"\n{'=' * 70}")
     print(f"  Training: {method}")
-    print(f"  Budget: {max_hours}h | Dataset: {N} pairs | L={seq_len} | D={D_in}")
+    print(f"  Budget: {max_hours}h | Current Cumulative: {cumulative_elapsed/3600:.2f}h")
+    print(f"  Dataset: {N} pairs | L={seq_len} | D={D_in}")
     print(f"  Batch: {batch_size} | Band: {band_width} | LR: {lr}")
     print(f"{'=' * 70}\n")
     print(f"{'Step':>8} | {'Loss':>12} | {'Wall (s)':>10} | {'Steps/s':>10}")
     print("-" * 50)
 
     while True:
-        elapsed = time.time() - start_time
-        if elapsed >= max_seconds:
-            print(f"\n⏱ Budget exhausted ({elapsed / 3600:.2f}h)")
+        current_session_time = time.time() - session_start_time
+        total_elapsed = cumulative_elapsed + current_session_time
+        
+        if total_elapsed >= max_seconds:
+            print(f"\n⏱ Total cumulative budget exhausted ({total_elapsed / 3600:.2f}h)")
             break
 
         idx = np.random.choice(N, size=batch_size, replace=(batch_size > N))
@@ -529,28 +591,29 @@ def train(method, emb_q, emb_k, targets, seq_len, max_hours, gcs_bucket,
 
         loss_curve.append({
             "step": step,
-            "wallclock_sec": round(time.time() - start_time, 2),
+            "wallclock_sec": round(total_elapsed, 2),
             "loss": round(loss_val, 6),
             "throughput": round(throughput, 2),
         })
 
         if step % 10 == 0:
-            print(f"{step:>8} | {loss_val:>12.6f} | {elapsed:>10.1f} | {throughput:>10.2f}")
+            print(f"{step:>8} | {loss_val:>12.6f} | {total_elapsed:>10.1f} | {throughput:>10.2f}")
 
         if step > 0 and step % checkpoint_every == 0:
-            ckpt = save_checkpoint(params, step, method, gcs_bucket)
+            ckpt = save_checkpoint(params, step, method, gcs_bucket, total_elapsed)
             print(f"  💾 Checkpoint → {ckpt}")
 
         step += 1
 
     # Final checkpoint
-    save_checkpoint(params, step, method, gcs_bucket)
+    save_checkpoint(params, step, method, gcs_bucket, total_elapsed)
 
-    total_time = time.time() - start_time
+    session_time = time.time() - session_start_time
+    total_time_final = cumulative_elapsed + session_time
     results = {
         "method": method,
         "total_steps": step,
-        "total_time_sec": round(total_time, 2),
+        "total_time_sec": round(total_time_final, 2),
         "final_loss": loss_curve[-1]["loss"] if loss_curve else None,
         "batch_size": batch_size,
         "seq_len": seq_len,
