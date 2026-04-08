@@ -38,17 +38,12 @@ import time
 import json
 import csv
 import argparse
-import datetime
-import functools
-import hashlib
-from pathlib import Path
 
 import numpy as np
 
 import jax
 import jax.numpy as jnp
 import optax
-from jax.sharding import Mesh, PartitionSpec, NamedSharding
 
 # Initialize JAX distributed for multi-TPU
 if "TPU_WORKER_HOSTNAMES" in os.environ:
@@ -295,7 +290,7 @@ def prepare_dataset(data_dir, model_name, seq_len, pad_granularity=128):
         seq_len = seq_len + (pad_granularity - remainder)
 
     # 2. Compute ground-truth alignment matrices (Needleman-Wunsch)
-    print(f"\nComputing pairwise alignments (Needleman-Wunsch)...")
+    print("\nComputing pairwise alignments (Needleman-Wunsch)...")
     targets_list = []
     valid_pairs = []
 
