@@ -526,7 +526,7 @@ def auto_detect_batch_size(params, emb_q, emb_k, targets, loss_fn, band_width, m
 # ==============================================================================
 
 def train(method, emb_q, emb_k, targets, seq_len, max_hours, gcs_bucket,
-          checkpoint_every=100, lr=1e-3, D_proj=64, seed=42):
+          checkpoint_every=10, lr=1e-3, D_proj=64, seed=42):
 
     D_in = emb_q.shape[-1]
     N = emb_q.shape[0]
@@ -650,7 +650,7 @@ if __name__ == "__main__":
                         default="InstaDeepAI/nucleotide-transformer-v2-100m-multi-species")
     parser.add_argument("--gcs_bucket", type=str, default="sinkhorn-neurips-data")
     parser.add_argument("--no_gcs", action="store_true")
-    parser.add_argument("--checkpoint_every", type=int, default=100)
+    parser.add_argument("--checkpoint_every", type=int, default=10)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--D_proj", type=int, default=64)
     parser.add_argument("--seed", type=int, default=42)
