@@ -29,6 +29,9 @@ Use this if you don't want to wait around for the TPU to become active.
 
 3. **Go to sleep.** The script will block until capacity is available, run the 5-hour experiment, and shut the TPU down when finished.
 
+   > [!TIP]
+   > **Preemption-Proof**: I have updated the benchmark script to be **auto-resuming**. If Google preempts your Spot TPU (takes it back) after 2 hours, simply run the script again tomorrow. It will automatically load your latest GCS checkpoint, restore your weights, and resume exactly where it left off (accounting for the already-spent 2 hours of budget).
+
 ---
 
 ## Option 2: Step-by-Step Manual Run
