@@ -319,8 +319,6 @@ def dq_kernel_multi(
 
     init_state = (jnp.zeros_like(q_block),)
 
-    exp_du12 = jnp.exp(u1_block - u2_block)
-    exp_du01 = jnp.exp(u0_block - u1_block)
 
     def body_fn(i, state):
         (dq_acc,) = state
@@ -382,6 +380,7 @@ def dk_dv_kernel_multi(
     n_data = N_data_ref[...]   # (BLOCK, 8)
     W = W_ref[0]
 
+    v0_n = n_data[:, 0]
     v1_n = n_data[:, 1]
     v2_n = n_data[:, 2]
     g_v_n = n_data[:, 3]
@@ -414,7 +413,6 @@ def dk_dv_kernel_multi(
             do_block = dO_ref[pl.ds(off, BLOCK_M), :]
             m_data = M_data_ref[pl.ds(off, BLOCK_M), :]
 
-            u0_m = m_data[:, 0]
             u1_m = m_data[:, 1]
             u2_m = m_data[:, 2]
             del_u1_m = m_data[:, 3]
@@ -443,7 +441,7 @@ def dk_dv_kernel_multi(
             )
 
             ds_block_T = jnp.where(mask, ds_block_T, 0.0)
-            P22_T = jnp.where(mask, P11_T * exp_v2_v1[:, None] * exp_u2_u1[None, :], 0.0)
+            P22_T = jnp.where(mask, P22_T, 0.0)
 
             dk_acc = dk_acc + jnp.einsum("nm,md->nd", ds_block_T, q_block)
             dv_acc = dv_acc + jnp.einsum("nm,me->ne", P22_T, do_block)
@@ -626,7 +624,8 @@ def pallas_sinkhorn_bwd_full(n_iters, band_width, res, g):
         gu_contrib = jnp.sum(T_block, axis=-1)
         gv_contrib = jnp.sum(T_block, axis=-2)
         g_u = jax.lax.dynamic_update_slice_in_dim(g_u, gu_contrib, i * BLOCK, axis=-1)
-        gv_padded = jnp.zeros_like(v0); gv_padded = jax.lax.dynamic_update_slice_in_dim(gv_padded, gv_contrib, start_idx * BLOCK, axis=-1)
+        gv_padded = jnp.zeros_like(v0)
+        gv_padded = jax.lax.dynamic_update_slice_in_dim(gv_padded, gv_contrib, start_idx * BLOCK, axis=-1)
         return (g_u, g_v + gv_padded), None
     (g_u, g_v), _ = jax.lax.scan(pass1_body, (g_u_init, g_v_init), jnp.arange(num_blocks))
 
@@ -660,8 +659,8 @@ def pallas_sinkhorn_bwd_full(n_iters, band_width, res, g):
 @partial(jax.custom_vjp, nondiff_argnums=(3, 4))
 def pallas_flash_sinkhorn(Q, K, V, n_iters=15, band_width=None):
     """Banded Sinkhorn attention with novel multi-transport-plan backward pass."""
-    O, _ = pallas_sinkhorn_fwd(Q, K, V, n_iters, band_width)
-    return O
+    out_O, _ = pallas_sinkhorn_fwd(Q, K, V, n_iters, band_width)
+    return out_O
 
 pallas_flash_sinkhorn.defvjp(pallas_sinkhorn_fwd, pallas_sinkhorn_bwd_full)
 
