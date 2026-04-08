@@ -1,6 +1,6 @@
 # Google Cloud Platform (GCP) TPU Deployment Guide
 
-This guide covers everything you need to run the `benchmark_esm2_alignment.py` script on a Google Cloud TPU v6e (Trillium) instance, which you referenced in your NeurIPS paper. 
+This guide covers everything you need to run both the **latency benchmark** (`benchmark_long_context_alignment.py`) and the **wall-clock training experiment** (`benchmark_wallclock_training.py`) on a Google Cloud TPU v6e (Trillium) instance for the NeurIPS paper.
 
 Because you have never used GCP before, this guide assumes zero prior cloud experience.
 
@@ -69,25 +69,94 @@ Run these exact commands in your local Cloud Shell (not SSH'd inside a single ho
 
 ```bash
 # Combine the entire installation block into one multi-worker execution command
-gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=us-central1-a --worker=all --command="sudo apt-get update && sudo apt-get install python3-pip -y && pip install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html && pip install optax transformers torch"
+gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=us-east5-a --worker=all --command="sudo apt-get update && sudo apt-get install python3-pip -y && pip install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html && pip install optax transformers torch"
 ```
 
-## 6. Running the Distributed Benchmark
-Everything is ready! We baked `jax.distributed.initialize()` into the `benchmark_esm2_alignment.py` script so it automatically synchronizes the JAX mesh across the entire TPU pod slice. Because it executes via SPMD (Single Program, Multiple Data), you just run the standard Python command across all workers simultaneously.
+## 6. Running the Latency Benchmark
+Everything is ready! We baked `jax.distributed.initialize()` into the benchmark scripts so JAX automatically synchronizes across the entire TPU pod slice.
 
 ```bash
-gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=us-central1-a --worker=all --command="cd sinkhorn-aligner && python src/benchmarks/benchmark_long_context_alignment.py --model_name 'InstaDeepAI/nucleotide-transformer-v2-100m-multi-species' --vocab dna"
+gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=us-east5-a --worker=all --command="cd sinkhorn-aligner && python src/benchmarks/benchmark_long_context_alignment.py --model_name 'InstaDeepAI/nucleotide-transformer-v2-100m-multi-species' --vocab dna"
 ```
 
 ### What to expect:
-- **Time to run**: The whole script takes about **5-10 minutes**. The longest part is JAX spending ~3 minutes on "XLA Compilation" to physically compile your Pallas kernels to the TPU architecture; the actual tensor math finishes in seconds.
-- **Cost**: A `v6e-8` Trillium pod costs roughly **~$10 - $12 per hour** on demand. Because the benchmark finishes in 10 minutes, your actual cost to generate the NeurIPS tables will be barely **~$2.00**, which Google's $300 free tier will easily cover.
-- All TPU hosts will independently spin up and coordinate their device ranks to form a global mesh (e.g., 8 chips globally).
-- The ESM-2 weights will download, and JAX will collectively shard the protein context layers across the chip memories, allowing scaling that is physically impossible on a single chip.
-- The logs will unify, printing out your benchmark matrix and dumping the hardware telemetry to `/tmp/tensorboard_profiles_DATE/`. To pull the logs back to your computer:
-  ```bash
-  gcloud compute tpus tpu-vm scp sinkhorn-benchmark-cluster:/tmp/tensorboard_profiles_DATE/ ./local_profiles/ --zone=us-central1-a
-  ```
+- **Time to run**: ~5–10 minutes. JAX spends ~3 min on XLA compilation; the tensor math finishes in seconds.
+- **Cost**: A `v6e-8` pod costs ~$10–12/hr. The latency benchmark costs roughly **~$2.00**.
+- Outputs Table 1 data (Flash Attention vs Sinkhorn OT latency at 1K/4K/8K/16K). Hardware telemetry goes to `/tmp/tensorboard_profiles_DATE/`.
+
+## 6.1 Running the Wall-Clock Training Experiment
+This is the full 2.5-hour training comparison: Flash Attention vs Sinkhorn OT on real human/mouse orthologous DNA sequences. Both methods train for equal wall-clock time; we compare loss curves.
+
+### Step 1: Pull the latest code
+```bash
+gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=us-east5-a --worker=all --command="cd sinkhorn-aligner && git pull"
+```
+
+### Step 2: Run Sinkhorn OT training (2.5 hours)
+```bash
+gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=us-east5-a --worker=all --command="cd sinkhorn-aligner && python src/benchmarks/benchmark_wallclock_training.py --method sinkhorn_ot --max_hours 2.5"
+```
+
+### Step 3: Run Flash Attention training (2.5 hours)
+```bash
+gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=us-east5-a --worker=all --command="cd sinkhorn-aligner && python src/benchmarks/benchmark_wallclock_training.py --method flash_attention --max_hours 2.5"
+```
+
+### What to expect:
+- **First run**: The script auto-downloads 30 orthologous gene CDS pairs from the Ensembl REST API (~2 min), embeds them with the Nucleotide Transformer, then begins training. Subsequent runs use cached data from `./data/dna_orthologs/`.
+- **Batch size**: Auto-detected via binary search to maximize TPU memory utilization.
+- **Sequence length**: 8,192bp by default (padded to mod-128 for Pallas).
+- **Checkpoints**: Saved every 100 steps to `gs://sinkhorn-neurips-data/checkpoints/{method}/`.
+- **Results**: Loss curve CSV and JSON summary saved to `gs://sinkhorn-neurips-data/results/`.
+- **Total time**: ~5 hours for both methods (2.5h each, run sequentially).
+- **Cost**: At ~$10–12/hr for v6e-8, expect roughly **~$50–60** for the full experiment.
+
+### Step 4: Retrieve results
+Pull the loss curves and checkpoints to your local machine:
+```bash
+# Loss curves and summaries
+gcloud storage cp -r gs://sinkhorn-neurips-data/results/ ./results/
+
+# Model checkpoints (optional — can be large)
+gcloud storage cp -r gs://sinkhorn-neurips-data/checkpoints/ ./checkpoints/
+```
+
+### Optional flags:
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--seq_len` | `8192` | Sequence length (will be padded to mod-128) |
+| `--lr` | `1e-3` | Learning rate |
+| `--D_proj` | `64` | Projection dimension for Q/K/V heads |
+| `--checkpoint_every` | `100` | Steps between GCS checkpoints |
+| `--no_gcs` | off | Disable GCS upload (local only, for testing) |
+
+### ⚠️ Billing Safety: Auto-shutdown on completion/failure
+If the Python script crashes, the TPU VM **stays running** and you keep paying ~$10-12/hr. To protect against this (especially for overnight runs), wrap the command so the **TPU auto-deletes itself** when the script finishes or fails:
+
+```bash
+# Safe overnight run: auto-deletes TPU after script completes (success OR failure)
+ZONE=us-east5-a
+gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=$ZONE --worker=all --command="\
+  cd sinkhorn-aligner && \
+  python src/benchmarks/benchmark_wallclock_training.py --method sinkhorn_ot --max_hours 2.5; \
+  sudo shutdown -h now"
+# The VM shuts down after the script exits (success or crash).
+# Then delete from your local machine / Cloud Shell:
+# gcloud compute tpus tpu-vm delete sinkhorn-benchmark-cluster --zone=$ZONE --quiet
+```
+
+Alternatively, set a **hard timeout** from Cloud Shell that kills the VM after a max duration (e.g., 3 hours for a 2.5hr run):
+```bash
+# Start the training in the background, then schedule deletion after 3 hours
+gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=us-east5-a --worker=all --command="\
+  cd sinkhorn-aligner && \
+  nohup python src/benchmarks/benchmark_wallclock_training.py --method sinkhorn_ot --max_hours 2.5 > training.log 2>&1 &"
+
+# Schedule auto-delete from Cloud Shell (10800s = 3 hours)
+sleep 10800 && gcloud compute tpus tpu-vm delete sinkhorn-benchmark-cluster --zone=us-east5-a --quiet &
+```
+
+**Also recommended:** Set a [GCP Budget Alert](https://console.cloud.google.com/billing/budgets) for your project (e.g., $100) so you get an email if spending exceeds your threshold.
 
 ## 6.5 Real-World Training: Epochs & Checkpointing
 When you transition from running the benchmark profiling script to doing an actual full-scale training run over Pfam or Nucleotide datasets, you must implement **Checkpointing** to protect against TPU preemptions.
@@ -127,11 +196,94 @@ To delete the cluster entirely (which stops all charges permanently and frees up
 gcloud compute tpus tpu-vm delete sinkhorn-benchmark-cluster --zone=us-east5-a
 ```
 
-## 8. Troubleshooting: Bouncing Capacity (v6e Trillium)
-TPU Trillium models (`v6e`) are in extremely high demand globally. 
+## 8. Handling Capacity Issues (v6e Trillium)
+TPU Trillium models (`v6e`) are in extremely high demand globally. If you get an `Insufficient Capacity` or `RESOURCE_EXHAUSTED` error, you have three options:
 
-If you `stop` your machine, you release the physical hardware. When you attempt to `start` your stopped machine later, Google must find 8 available chips in your exact datacenter. If the zone is currently sold out, you will receive an `Insufficient Capacity` error.
+### Option A: Queued Resources (Recommended — "Set it and forget it")
+GCP's **Queued Resources** API lets you submit a TPU request that sits in a queue until capacity frees up. GCP automatically provisions your TPU the moment chips become available — no manual retrying needed.
 
-**What to do:**
-1. **Wait and Retry:** Hardware frees up identically to how it gets claimed. Run the `tpu-vm start ...` command repeatedly every 5-10 minutes. A cluster will almost always eventually catch a released pocket of availability.
-2. **Delete and Move:** If you cannot wait, you must completely `delete` the stopped cluster and recreate a fresh one in a different zone that has current capacity (like `us-central1-a` or `us-east1-c`), then strictly re-run the `apt-get` installation block and clone the code again.
+```bash
+# Submit a queued request — GCP will auto-provision when capacity is available
+gcloud compute tpus queued-resources create sinkhorn-queue \
+  --node-id=sinkhorn-benchmark-cluster \
+  --zone=us-east5-a \
+  --accelerator-type=v6e-8 \
+  --runtime-version=tpu-ubuntu2204-base
+
+# Check status (will show WAITING_FOR_RESOURCES → PROVISIONING → ACTIVE)
+gcloud compute tpus queued-resources describe sinkhorn-queue --zone=us-east5-a
+
+# Once ACTIVE, SSH in as normal
+gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=us-east5-a
+```
+
+To clean up the queued resource after you're done:
+```bash
+gcloud compute tpus queued-resources delete sinkhorn-queue --zone=us-east5-a --force
+```
+
+**Tip:** You can submit queued requests to multiple zones simultaneously — whichever fills first wins:
+```bash
+for ZONE in us-east5-a us-central1-a us-east1-c europe-west4-b; do
+  gcloud compute tpus queued-resources create sinkhorn-queue-${ZONE} \
+    --node-id=sinkhorn-cluster-${ZONE} \
+    --zone=${ZONE} \
+    --accelerator-type=v6e-8 \
+    --runtime-version=tpu-ubuntu2204-base
+done
+```
+
+### Option B: Spot VMs (60–70% cheaper, better availability)
+Spot TPU VMs are heavily discounted and often have better availability since they draw from a separate capacity pool. The tradeoff: Google can preempt (shut down) your VM at any time if they need the chips back.
+
+For a 2.5-hour training run, this is usually fine — preemptions are uncommon for short jobs, and our script checkpoints every 100 steps to GCS.
+
+```bash
+# Queued + Spot (cheapest option that auto-provisions)
+gcloud compute tpus queued-resources create sinkhorn-spot-queue \
+  --node-id=sinkhorn-benchmark-cluster \
+  --zone=us-east5-a \
+  --accelerator-type=v6e-8 \
+  --runtime-version=tpu-ubuntu2204-base \
+  --spot
+```
+
+Or create directly (if capacity is available right now):
+```bash
+gcloud compute tpus tpu-vm create sinkhorn-benchmark-cluster \
+  --zone=us-east5-a \
+  --accelerator-type=v6e-8 \
+  --version=tpu-ubuntu2204-base \
+  --spot
+```
+
+### Option C: Auto-retry script (brute force)
+If you prefer not to use the queued API, save this as `provision_tpu.sh` and run it — it tries every zone in a loop until one succeeds:
+
+```bash
+#!/bin/bash
+ZONES=("us-east5-a" "us-central1-a" "us-east1-c" "europe-west4-b" "us-central2-b")
+
+while true; do
+  for ZONE in "${ZONES[@]}"; do
+    echo "[$(date)] Trying $ZONE..."
+    gcloud compute tpus tpu-vm create sinkhorn-benchmark-cluster \
+      --zone=$ZONE \
+      --accelerator-type=v6e-8 \
+      --version=tpu-ubuntu2204-base \
+      --spot 2>&1
+
+    if [ $? -eq 0 ]; then
+      echo "✓ SUCCESS in $ZONE!"
+      exit 0
+    fi
+  done
+  echo "All zones full. Retrying in 5 minutes..."
+  sleep 300
+done
+```
+
+Run it in the background from Cloud Shell:
+```bash
+chmod +x provision_tpu.sh && nohup ./provision_tpu.sh > provision.log 2>&1 &
+```

@@ -340,99 +340,26 @@ def dq_kernel_multi(
             s_block = jnp.einsum("md,nd->mn", q_block, k_block) * scale
             P11 = safe_exp(s_block + u1_m[:, None] + v1_n[None, :])
 
-            # Multi-Transport Plan Factorization (Proposition 1)
-            # P^{(a,b)} = P^{(1,1)} * exp(u_a - u_1) * exp(v_b - v_1)
-            # This factors out the expensive NxN matrix exponentials.
-            exp_u2_u1 = safe_exp(u2_m - u1_m)
-            exp_v2_v1 = safe_exp(v2_n - v1_n)
-            exp_v0_v1 = safe_exp(v0_n - v1_n)
+# MACH ⚡: Factored the multi-transport dS equation using distributive properties
+            exp_dv12_n = jnp.exp(v1_n - v2_n)
+            exp_du12 = jnp.exp(u1_m - u2_m)
+            exp_dv01_n = jnp.exp(v0_n - v1_n)
 
-            z_block = jnp.einsum("me,ne->mn", do_block, v_mat_block)
-
-            # dS = Term A - Term B - Term C - Term D - Term E
-            # Algebraic reduction: factor out P11
-            ds_block = P11 * (
-                exp_u2_u1[:, None] * exp_v2_v1[None, :] * (z_block - g_v_n[None, :])
-                - exp_u2_u1[:, None] * del_u2_m[:, None]
-                - del_v1_n[None, :]
-                - exp_v0_v1[None, :] * del_u1_m[:, None]
-            )
-
-            ds_block = jnp.where(mask, ds_block, 0.0)
-            dq_acc = dq_acc + jnp.einsum("mn,nd->md", ds_block, k_block)
-        return (dq_acc,)
-
-    dq_acc = jax.lax.fori_loop(start_iter, end_iter, body_fn, init_state)[0]
-    dQ_ref[...] = dq_acc * scale
-
-
-def dk_dv_kernel_multi(
-    Q_ref, K_ref, V_ref, M_data_ref, N_data_ref, dO_ref, W_ref, dK_ref, dV_ref
-):
-    """
-    Fused Pallas kernel: compute dK, dV using the multi-transport-plan formula.
-    Executes entirely in TPU VMEM with banded iteration.
-    """
-    k_block = K_ref[...]       # (BLOCK, D)
-    v_mat_block = V_ref[...]   # (BLOCK, E)
-    n_data = N_data_ref[...]   # (BLOCK, 8)
-    W = W_ref[0]
-
-    v1_n = n_data[:, 1]
-    v2_n = n_data[:, 2]
-    g_v_n = n_data[:, 3]
-    del_v1_n = n_data[:, 4]
-
-    D = k_block.shape[-1]
-    M = Q_ref.shape[0]
-    BLOCK_M = 128
-    UNROLL = 4
-    iters = M // BLOCK_M
-    scale = 1.0 / jnp.sqrt(D)
-
-    n = pl.program_id(0)
-    start_block = jnp.maximum(0, n - W)
-    end_block = jnp.minimum(iters, n + W + 1)
-    start_iter = start_block // UNROLL
-    end_iter = (end_block + UNROLL - 1) // UNROLL
-
-    init_state = (jnp.zeros_like(k_block), jnp.zeros_like(v_mat_block))
-
-    def body_fn(i, state):
-        dk_acc, dv_acc = state
-        for u_i in range(UNROLL):
-            m_idx = i * UNROLL + u_i
-            off = m_idx * BLOCK_M
-            mask = (m_idx >= start_block) & (m_idx < end_block)
-
-            q_block = Q_ref[pl.ds(off, BLOCK_M), :]
-            do_block = dO_ref[pl.ds(off, BLOCK_M), :]
-            m_data = M_data_ref[pl.ds(off, BLOCK_M), :]
-
-            u0_m = m_data[:, 0]
-            u1_m = m_data[:, 1]
-            u2_m = m_data[:, 2]
-            del_u1_m = m_data[:, 3]
-            del_u2_m = m_data[:, 4]
-
-            # Core Transport Plan Block P^{(1,1)} (transposed)
+            # Score matrix
             s_block_T = jnp.einsum("nd,md->nm", k_block, q_block) * scale
-            P11_T = safe_exp(s_block_T + v1_n[:, None] + u1_m[None, :])
-
-            # Multi-Transport Plan Factorization
-            exp_u2_u1 = safe_exp(u2_m - u1_m)
-            exp_u0_u1 = safe_exp(u0_m - u1_m)
-            exp_v2_v1 = safe_exp(v2_n - v1_n)
-
-            # dS_T = Term A - Term B - Term C - Term D - Term E
-            # (Note: Z_T = V @ dO^T)
+            P22_T = safe_exp(s_block_T + v2_n[:, None] + u2_m[None, :])
             z_block_T = jnp.einsum("ne,me->nm", v_mat_block, do_block)
             
-            ds_block_T = P11_T * (
-                exp_v2_v1[:, None] * exp_u2_u1[None, :] * (z_block_T - g_v_n[:, None])
-                - exp_v2_v1[:, None] * del_u2_m[None, :]
-                - del_v1_n[:, None]
-                - exp_v0_v1[:, None] * del_u1_m[None, :]
+            # Full multi-transport dS (factored)
+            ds_block_T = P22_T * (
+                z_block_T - g_v_n[:, None]
+                - exp_dv12_n[:, None] * (
+                    del_u2_m[None, :]
+                    + exp_du12[None, :] * (
+                        del_v1_n[:, None]
+                        + exp_dv01_n[:, None] * del_u1_m[None, :]
+                    )
+                )
             )
 
             ds_block_T = jnp.where(mask, ds_block_T, 0.0)
@@ -688,8 +615,7 @@ def jax_ref_sinkhorn_bwd(n_iters, res, g):
     del_u1 = -jnp.einsum("bhmn,bhn->bhm", P11, del_v1)
 
     dS = (
-        P22 * Z
-        - P22 * g_v[..., None, :]
+        P22 * (Z - g_v[..., None, :])
         - P21 * del_u2[..., :, None]
         - P11 * del_v1[..., None, :]
         - P10 * del_u1[..., :, None]

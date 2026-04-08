@@ -86,21 +86,27 @@ def muon_optimizer(learning_rate):
 # ==============================================================================
 # FOUNDATION MODEL FEATURE EXTRACTION (DNA or Protein)
 # ==============================================================================
+_FOUNDATION_MODEL_CACHE = {}
+
 def get_foundation_embeddings(sequences, model_name):
-    print(f"Loading {model_name}...")
     from transformers import AutoConfig
-    
-    # 1. Load the config first and patch the HuggingFace v4.40+ bug BEFORE model initialization
-    config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
-    if not hasattr(config, 'is_decoder'):
-        config.is_decoder = False
-    if not hasattr(config, 'add_cross_attention'):
-        config.add_cross_attention = False
-        
-    # 2. Instantiate with the patched config
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    model = AutoModel.from_pretrained(model_name, config=config, trust_remote_code=True, ignore_mismatched_sizes=True)
-    model.eval()
+
+    if model_name in _FOUNDATION_MODEL_CACHE:
+        tokenizer, model = _FOUNDATION_MODEL_CACHE[model_name]
+    else:
+        print(f"Loading {model_name}...")
+        # 1. Load the config first and patch the HuggingFace v4.40+ bug BEFORE model initialization
+        config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+        if not hasattr(config, 'is_decoder'):
+            config.is_decoder = False
+        if not hasattr(config, 'add_cross_attention'):
+            config.add_cross_attention = False
+
+        # 2. Instantiate with the patched config
+        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        model = AutoModel.from_pretrained(model_name, config=config, trust_remote_code=True, ignore_mismatched_sizes=True)
+        model.eval()
+        _FOUNDATION_MODEL_CACHE[model_name] = (tokenizer, model)
 
     inputs = tokenizer(sequences, return_tensors="pt", padding=True)
     with torch.no_grad():

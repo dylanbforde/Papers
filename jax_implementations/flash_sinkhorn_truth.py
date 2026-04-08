@@ -798,22 +798,25 @@ def jax_ref_sinkhorn_bwd(n_iters, res, g):
     del_v1 = -jnp.einsum("bhmn,bhm->bhn", jnp.exp(S + u2[..., :, None] + v1[..., None, :]), del_u2)
     del_u1 = -jnp.einsum("bhmn,bhn->bhm", P11, del_v1)
 
-    # Multi-Transport Plan Factorization
-    exp_u2_u1 = jnp.exp(u2[..., :, None] - u1[..., :, None])
-    exp_v2_v1 = jnp.exp(v2[..., None, :] - v1[..., None, :])
-    exp_v0_v1 = jnp.exp(v0[..., None, :] - v1[..., None, :])
-    exp_u0_u1 = jnp.exp(u0[..., :, None] - u1[..., :, None])
+# MACH ⚡ Multi-Transport Plan Factorization
+    P22 = jnp.exp(S + u2[..., :, None] + v2[..., None, :])
+    exp_dv12 = jnp.exp(v1 - v2)
+    exp_du12 = jnp.exp(u1 - u2)
+    exp_dv01 = jnp.exp(v0 - v1)
 
-    # Algebraic reduction: factor out P11
-    dS = P11 * (
-        exp_u2_u1 * exp_v2_v1 * (Z - g_v[..., None, :])
-        - exp_u2_u1 * del_u2[..., :, None]
-        - del_v1[..., None, :]
-        - exp_v0_v1 * del_u1[..., :, None]
+    dS = P22 * (
+        (Z - g_v[..., None, :])
+        - exp_dv12[..., None, :] * (
+            del_u2[..., :, None]
+            + exp_du12[..., :, None] * (
+                del_v1[..., None, :]
+                + exp_dv01[..., None, :] * del_u1[..., :, None]
+            )
+        )
     )
 
     dQ = jnp.matmul(dS, K) * scale
     dK = jnp.matmul(dS.transpose(0, 1, 3, 2), Q) * scale
-    dV = jnp.matmul((P11 * exp_u2_u1 * exp_v2_v1).transpose(0, 1, 3, 2), dO)
+    dV = jnp.matmul(P22.transpose(0, 1, 3, 2), dO)
 
     return dQ, dK, dV
