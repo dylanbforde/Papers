@@ -305,6 +305,9 @@ def dq_kernel_multi(
     del_u1_block = m_data[:, :, 3]
     del_u2_block = m_data[:, :, 4]
 
+    # BOLT ⚡: Hoisted loop-invariant exponential difference out of the inner loop
+    exp_u1_u2 = jnp.exp(u1_block - u2_block)[:, :, None]
+
     D = q_block.shape[-1]
     scale = 1.0 / jnp.sqrt(D)
 
@@ -345,9 +348,10 @@ def dq_kernel_multi(
             # MACH ⚡: Computed base P22 full-block matrix once via safe_exp, then derived P21, P11, P10 using O(N) broadcast multiplications of potential differences. This eliminates 3 redundant full-block MUFU/FMA operations per iteration, saving SRAM throughput.
             # 4 transport matrices (recomputed from packed potentials)
             P22 = safe_exp(s_block + u2_block[:, :, None] + v2_block[:, None, :])
-            P21 = P22 * jnp.exp(v1_block[:, None, :] - v2_block[:, None, :])
-            P11 = P21 * jnp.exp(u1_block[:, :, None] - u2_block[:, :, None])
-            P10 = P11 * jnp.exp(v0_block[:, None, :] - v1_block[:, None, :])
+            # BOLT ⚡: Compute exp on 2D arrays before broadcasting, and use hoisted exp_u1_u2
+            P21 = P22 * jnp.exp(v1_block - v2_block)[:, None, :]
+            P11 = P21 * exp_u1_u2
+            P10 = P11 * jnp.exp(v0_block - v1_block)[:, None, :]
 
             # Z = dO @ V^T
             z_block = jnp.einsum("bme,bne->bmn", do_block, v_mat_block)
@@ -388,6 +392,10 @@ def dk_dv_kernel_multi(
     g_v_block_n = n_data[:, :, 3]
     del_v1_block_n = n_data[:, :, 4]
 
+    # BOLT ⚡: Hoisted loop-invariant exponential differences out of the inner loop
+    exp_v1_v2 = jnp.exp(v1_block_n - v2_block_n)[:, :, None]
+    exp_v0_v1 = jnp.exp(v0_block_n - v1_block_n)[:, :, None]
+
     D = k_block.shape[-1]
     M = Q_ref.shape[1]
     BLOCK_M = 128
@@ -427,9 +435,10 @@ def dk_dv_kernel_multi(
             # MACH ⚡: Computed base P22_T full-block matrix once via safe_exp, then derived P21_T, P11_T, P10_T using O(N) broadcast multiplications of potential differences. This eliminates 3 redundant full-block MUFU/FMA operations per iteration, saving SRAM throughput.
             # 4 transport matrices (transposed)
             P22_T = safe_exp(s_block_T + v2_block_n[:, :, None] + u2_block[:, None, :])
-            P21_T = P22_T * jnp.exp(v1_block_n[:, :, None] - v2_block_n[:, :, None])
-            P11_T = P21_T * jnp.exp(u1_block[:, None, :] - u2_block[:, None, :])
-            P10_T = P11_T * jnp.exp(v0_block_n[:, :, None] - v1_block_n[:, :, None])
+            # BOLT ⚡: Use hoisted exponentials, and compute exp on 2D arrays before broadcasting
+            P21_T = P22_T * exp_v1_v2
+            P11_T = P21_T * jnp.exp(u1_block - u2_block)[:, None, :]
+            P10_T = P11_T * exp_v0_v1
 
             # Z = V @ dO^T
             z_block_T = jnp.einsum("bne,bme->bnm", v_mat_block, do_block)
