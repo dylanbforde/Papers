@@ -40,15 +40,38 @@ while true; do
   sleep 60
 done
 
-# 3. Setup and Run
-# Note: Using ssh-flag="-A" to forward local SSH keys for git clone
-# Make sure you have run 'ssh-add' on your local machine first!
-echo "Step 3: Running setup and training pipeline on the remote cluster..."
-gcloud compute tpus tpu-vm ssh $NODE_ID --project=$PROJECT_ID --zone=$ZONE --worker=all --ssh-flag="-A" --command="
-  sudo apt-get update && sudo apt-get install python3-pip -y && \
-  pip install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html && \
-  pip install optax transformers torch && \
-  git clone git@github.com:dylanbforde/sinkhorn-aligner.git && \
+# 3. Install dependencies (idempotent — safe to re-run)
+echo "Step 3: Installing dependencies..."
+gcloud compute tpus tpu-vm ssh $NODE_ID --project=$PROJECT_ID --zone=$ZONE --worker=all --command="
+  sudo apt-get update -qq && sudo apt-get install -y -qq python3-pip git && \
+  pip install -q jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html && \
+  pip install -q optax transformers torch
+"
+
+if [ $? -ne 0 ]; then
+  echo "✗ Dependency installation failed."
+  exit 1
+fi
+
+# 4. Clone or update repo (SSH in directly for agent forwarding)
+echo "Step 4: Cloning/updating repository..."
+gcloud compute tpus tpu-vm ssh $NODE_ID --project=$PROJECT_ID --zone=$ZONE --ssh-flag="-A" --command="
+  if [ -d sinkhorn-aligner ]; then
+    echo 'Repo exists, pulling latest...'
+    cd sinkhorn-aligner && git pull
+  else
+    git clone git@github.com:dylanbforde/sinkhorn-aligner.git
+  fi
+"
+
+if [ $? -ne 0 ]; then
+  echo "✗ Repository clone/pull failed. Check SSH agent forwarding."
+  exit 1
+fi
+
+# 5. Run training (both methods chained, auto-shutdown at the end)
+echo "Step 5: Starting training (Sinkhorn OT 2.5h → Flash Attention 2.5h → shutdown)..."
+gcloud compute tpus tpu-vm ssh $NODE_ID --project=$PROJECT_ID --zone=$ZONE --worker=all --command="
   cd sinkhorn-aligner && \
   python src/benchmarks/benchmark_wallclock_training.py --method sinkhorn_ot --max_hours 2.5 && \
   python src/benchmarks/benchmark_wallclock_training.py --method flash_attention --max_hours 2.5; \

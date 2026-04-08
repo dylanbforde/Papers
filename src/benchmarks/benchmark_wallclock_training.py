@@ -580,12 +580,13 @@ def train(method, emb_q, emb_k, targets, seq_len, max_hours, gcs_bucket,
             break
 
         idx = np.random.choice(N, size=batch_size, replace=(batch_size > N))
+        step_start = time.time()
         params, opt_state, loss = train_step(
             params, opt_state, emb_q[idx], emb_k[idx], targets[idx],
         )
         jax.block_until_ready(loss)
 
-        step_time = time.time() - start_time - elapsed
+        step_time = time.time() - step_start
         loss_val = float(loss)
         throughput = 1.0 / max(step_time, 1e-6)
 
