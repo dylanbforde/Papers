@@ -7,3 +7,6 @@
 ## 2024-05-24 - [Dual-Tensor Packing Strategy]
 **Learning:** The paper claimed a "single tensor" with $C=8$ channels for the packing strategy, but the codebase actually utilizes two distinct tensors (`M_data` for query-side and `N_data` for key-side), each with 8 channels, to pack potential histories and gradient intermediates without overloading a single tensor.
 **Action:** Always verify memory mapping architecture claims in the text against the actual JAX Pallas kernel inputs, specifically looking for split query/key state representations.
+## 2024-05-24 - [Factorization Sync]
+**Learning:** Code implements the multi-transport factorization using $P^{(2,2)}$ as the base plan, not $P^{(1,1)}$ as originally claimed in the paper's LaTeX text.
+**Action:** Always verify mathematical base cases and reference indices against the actual code implementations (e.g., `P22 = safe_exp(...)` in `ot_kernel.py`).
