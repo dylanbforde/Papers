@@ -75,8 +75,8 @@ echo "Step 5: Starting training..."
 gcloud compute tpus tpu-vm ssh $NODE_ID --project=$PROJECT_ID --zone=$ZONE --worker=all --command="
   export PATH=\"\$PATH:/home/\$USER/.local/bin\" && \
   cd sinkhorn-aligner && \
-  python3 src/benchmarks/benchmark_cross_imputation.py --method sinkhorn_ot --max_hours 3.4 && \
-  python3 src/benchmarks/benchmark_cross_imputation.py --method flash_attention --max_hours 3.4"
+  python3 src/benchmarks/benchmark_cross_imputation.py --method sinkhorn_ot --max_hours 3.4 --seq_len 32768 && \
+  python3 src/benchmarks/benchmark_cross_imputation.py --method flash_attention --max_hours 3.4 --seq_len 32768"
 
 if [ $? -ne 0 ]; then
   echo "✗ Training script failed. Logs should be above."

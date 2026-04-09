@@ -231,7 +231,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--method", type=str, choices=["flash_attention", "sinkhorn_ot"], required=True)
     parser.add_argument("--max_hours", type=float, default=3.4)
-    parser.add_argument("--seq_len", type=int, default=8192)
+    parser.add_argument("--seq_len", type=int, default=32768)
     parser.add_argument("--model_name", type=str, default="InstaDeepAI/nucleotide-transformer-v2-100m-multi-species")
     parser.add_argument("--gcs_bucket", type=str, default="")
     args = parser.parse_args()
