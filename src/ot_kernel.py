@@ -332,7 +332,7 @@ def dq_kernel_multi(
         (dq_acc,) = state
 
 # MACH ⚡: Hoisted loop-invariant exponentiated potential differences out of the inner unrolled loop.
-        exp_du12 = jnp.exp(u1_m - u2_m)
+        exp_du12 = _exp_for_tpu(u1_m - u2_m)
 
         for u_i in range(UNROLL):
             k_idx = i * UNROLL + u_i

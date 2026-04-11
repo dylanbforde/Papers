@@ -10,6 +10,9 @@ pkgs.mkShell {
       python-pkgs.numpy
       python-pkgs.jax
       python-pkgs.jaxlib
+      python-pkgs.transformers
+      python-pkgs.torch
+      python-pkgs.optax
     ]))
   ];
 }

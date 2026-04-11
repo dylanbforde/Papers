@@ -1,3 +1,7 @@
 .env
 __pycache__/
 *.py[cod]
+data/pfam_pairs/
+data/pfam_pairs_test/
+data/cache/
+*.npz
