@@ -302,9 +302,9 @@ def prepare_dataset(data_dir, model_name, seq_len, pad_granularity=128):
         padded = np.zeros((seq_len, seq_len), dtype=np.float32)
         padded[:h, :w] = alignment
         # Uniform distribution for padded rows (avoid NaN in CE)
-        for row in range(seq_len):
-            if padded[row].sum() == 0:
-                padded[row, :] = 1.0 / seq_len
+        # BOLT ⚡: Replaced Python row iteration with vectorized boolean indexing
+        row_sums = np.sum(padded, axis=1)
+        padded[row_sums == 0] = 1.0 / seq_len
         targets_list.append(padded)
         valid_pairs.append(p)
 
