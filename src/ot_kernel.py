@@ -27,6 +27,8 @@ except ImportError:
 import functools
 from functools import partial
 
+_IS_CPU = jax.default_backend() == "cpu"
+
 
 # ============================================================================
 # Utilities
@@ -89,6 +91,7 @@ def safe_exp(x):
 # Forward Pass: Banded Sinkhorn Potential Computation
 # ============================================================================
 
+@partial(jax.jit, static_argnames=("n_iters", "band_width"))
 def compute_global_uv(Q, K, n_iters=15, band_width=None):
     """Compute Sinkhorn dual potentials u, v via alternating logsumexp."""
     B, H, L, D = Q.shape
@@ -133,7 +136,7 @@ def compute_global_uv(Q, K, n_iters=15, band_width=None):
                     acc_diff = acc[0] - max_val
                     acc_diff = jnp.where(jnp.isnan(acc_diff), -jnp.inf, acc_diff)
                     
-                    sum_exp = acc[1] * jnp.exp(acc_diff) + jnp.sum(jnp.exp(diff), axis=-1)
+                    sum_exp = acc[1] * safe_exp(acc_diff) + jnp.sum(safe_exp(diff), axis=-1)
                     return (max_val, sum_exp)
                 
                 return jax.lax.cond(is_valid, true_fn, lambda _: acc, None), None
@@ -172,7 +175,7 @@ def compute_global_uv(Q, K, n_iters=15, band_width=None):
                     acc_diff = acc[0] - max_val
                     acc_diff = jnp.where(jnp.isnan(acc_diff), -jnp.inf, acc_diff)
                     
-                    sum_exp = acc[1] * jnp.exp(acc_diff) + jnp.sum(jnp.exp(diff), axis=-2)
+                    sum_exp = acc[1] * safe_exp(acc_diff) + jnp.sum(safe_exp(diff), axis=-2)
                     return (max_val, sum_exp)
                 
                 return jax.lax.cond(is_valid, true_fn, lambda _: acc, None), None
@@ -207,7 +210,7 @@ def tile_sinkhorn_kernel(q_ref, k_ref, v_ref, u_ref, v_pot_ref, o_ref):
     D = q.shape[-1]
     logits = jnp.dot(q, k.T) / jnp.sqrt(D)
     log_alpha = logits + u[:, None] + v_pot[None, :]
-    o_ref[...] = jnp.dot(jnp.exp(log_alpha), v)
+    o_ref[...] = jnp.dot(safe_exp(log_alpha), v)
 
 
 def pallas_sinkhorn_fwd(Q, K, V, n_iters=15, band_width=None):
@@ -229,8 +232,7 @@ def pallas_sinkhorn_fwd(Q, K, V, n_iters=15, band_width=None):
 
     def compute_tile(q_tile, k_tile, v_tile, u_tile, v_pot_tile):
         out_shape = jax.ShapeDtypeStruct((block_size, head_dim), Q.dtype)
-        is_cpu = jax.devices()[0].platform == "cpu"
-        kw = {"interpret": True} if is_cpu else {}
+        kw = {"interpret": True} if _IS_CPU else {}
         return pl.pallas_call(
             functools.partial(tile_sinkhorn_kernel),
             out_shape=out_shape,
@@ -463,8 +465,7 @@ def pallas_sinkhorn_bwd_fused(Q, K, V, dO, M_data, N_data, band_width):
     W_val = band_width // BLOCK if band_width is not None else M // BLOCK
     W_arr = jnp.array([W_val], dtype=jnp.int32)
 
-    is_cpu = jax.devices()[0].platform == "cpu"
-    kw = {"interpret": True} if is_cpu else {}
+    kw = {"interpret": True} if _IS_CPU else {}
 
     grid_dq = (M // BLOCK,)
     dQ_f = pl.pallas_call(
