@@ -322,6 +322,10 @@ def dq_kernel_multi(
 
     def body_fn(i, state):
         (dq_acc,) = state
+
+# MACH ⚡: Hoisted loop-invariant exponentiated potential differences out of the inner unrolled loop.
+        exp_du12 = jnp.exp(u1_m - u2_m)
+
         for u_i in range(UNROLL):
             k_idx = i * UNROLL + u_i
             off = k_idx * BLOCK_N
@@ -340,7 +344,6 @@ def dq_kernel_multi(
 # MACH ⚡: Factored the multi-transport dS equation using distributive properties
             # This fuses 4 transport terms into a single P22 multiplication
             exp_dv12 = jnp.exp(v1_n - v2_n)
-            exp_du12 = jnp.exp(u1_m - u2_m)
             exp_dv01 = jnp.exp(v0_n - v1_n)
 
             # Score matrix
@@ -404,6 +407,11 @@ def dk_dv_kernel_multi(
 
     def body_fn(i, state):
         dk_acc, dv_acc = state
+
+# MACH ⚡: Hoisted loop-invariant exponentiated potential differences out of the inner unrolled loop.
+        exp_dv12_n = jnp.exp(v1_n - v2_n)
+        exp_dv01_n = jnp.exp(v0_n - v1_n)
+
         for u_i in range(UNROLL):
             m_idx = i * UNROLL + u_i
             off = m_idx * BLOCK_M
@@ -419,9 +427,7 @@ def dk_dv_kernel_multi(
             del_u2_m = m_data[:, 4]
 
 # MACH ⚡: Factored the multi-transport dS equation using distributive properties
-            exp_dv12_n = jnp.exp(v1_n - v2_n)
             exp_du12 = jnp.exp(u1_m - u2_m)
-            exp_dv01_n = jnp.exp(v0_n - v1_n)
 
             # Score matrix
             s_block_T = jnp.einsum("nd,md->nm", k_block, q_block) * scale
