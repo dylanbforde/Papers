@@ -468,65 +468,57 @@ def dk_dv_kernel_multi(
 
 
 def pallas_sinkhorn_bwd_fused(Q, K, V, dO, M_data, N_data, band_width):
-    """Launch fused Pallas kernels over Batch/Head using vmap."""
-    B, H, M, D = Q.shape
-    B, H, N, E = V.shape
+    """Launch fused Pallas kernels over a single (batch, head) slice."""
+    M, D = Q.shape
+    N, E = V.shape
     C = 8
     BLOCK = 128
     W_val = band_width // BLOCK if band_width is not None else M // BLOCK
     W_arr = jnp.array([W_val], dtype=jnp.int32)
 
-    def pallas_sinkhorn_bwd_single(q_s, k_s, v_s, do_s, m_data_s, n_data_s):
-        """Single-head backward pass kernels."""
-        is_cpu = jax.devices()[0].platform == "cpu"
-        kw = {"interpret": True} if is_cpu else {}
+    is_cpu = jax.devices()[0].platform == "cpu"
+    kw = {"interpret": True} if is_cpu else {}
 
-        grid_dq = (M // BLOCK,)
-        dQ_s = pl.pallas_call(
-            dq_kernel_multi,
-            out_shape=jax.ShapeDtypeStruct(q_s.shape, q_s.dtype),
-            grid=grid_dq,
-            in_specs=[
-                pl.BlockSpec(index_map=lambda m: (m, 0), block_shape=(BLOCK, D)),
-                pl.BlockSpec(index_map=lambda m: (0, 0), block_shape=(N, D)),
-                pl.BlockSpec(index_map=lambda m: (0, 0), block_shape=(N, E)),
-                pl.BlockSpec(index_map=lambda m: (m, 0), block_shape=(BLOCK, C)),
-                pl.BlockSpec(index_map=lambda m: (0, 0), block_shape=(N, C)),
-                pl.BlockSpec(index_map=lambda m: (m, 0), block_shape=(BLOCK, E)),
-                pl.BlockSpec(index_map=lambda m: (0,), block_shape=(1,)),
-            ],
-            out_specs=pl.BlockSpec(index_map=lambda m: (m, 0), block_shape=(BLOCK, D)),
-            **kw,
-        )(q_s, k_s, v_s, m_data_s, n_data_s, do_s, W_arr)
+    grid_dq = (M // BLOCK,)
+    dQ_f = pl.pallas_call(
+        dq_kernel_multi,
+        out_shape=jax.ShapeDtypeStruct(Q.shape, Q.dtype),
+        grid=grid_dq,
+        in_specs=[
+            pl.BlockSpec(index_map=lambda m: (m, 0), block_shape=(BLOCK, D)),
+            pl.BlockSpec(index_map=lambda m: (0, 0), block_shape=(N, D)),
+            pl.BlockSpec(index_map=lambda m: (0, 0), block_shape=(N, E)),
+            pl.BlockSpec(index_map=lambda m: (m, 0), block_shape=(BLOCK, C)),
+            pl.BlockSpec(index_map=lambda m: (0, 0), block_shape=(N, C)),
+            pl.BlockSpec(index_map=lambda m: (m, 0), block_shape=(BLOCK, E)),
+            pl.BlockSpec(index_map=lambda m: (0,), block_shape=(1,)),
+        ],
+        out_specs=pl.BlockSpec(index_map=lambda m: (m, 0), block_shape=(BLOCK, D)),
+        **kw,
+    )(Q, K, V, M_data, N_data, dO, W_arr)
 
-        grid_dk_dv = (N // BLOCK,)
-        dK_s, dV_s = pl.pallas_call(
-            dk_dv_kernel_multi,
-            out_shape=(jax.ShapeDtypeStruct(k_s.shape, k_s.dtype), jax.ShapeDtypeStruct(v_s.shape, v_s.dtype)),
-            grid=grid_dk_dv,
-            in_specs=[
-                pl.BlockSpec(index_map=lambda n: (0, 0), block_shape=(M, D)),
-                pl.BlockSpec(index_map=lambda n: (n, 0), block_shape=(BLOCK, D)),
-                pl.BlockSpec(index_map=lambda n: (n, 0), block_shape=(BLOCK, E)),
-                pl.BlockSpec(index_map=lambda n: (0, 0), block_shape=(M, C)),
-                pl.BlockSpec(index_map=lambda n: (n, 0), block_shape=(BLOCK, C)),
-                pl.BlockSpec(index_map=lambda n: (0, 0), block_shape=(M, E)),
-                pl.BlockSpec(index_map=lambda n: (0,), block_shape=(1,)),
-            ],
-            out_specs=[
-                pl.BlockSpec(index_map=lambda n: (n, 0), block_shape=(BLOCK, D)),
-                pl.BlockSpec(index_map=lambda n: (n, 0), block_shape=(BLOCK, E)),
-            ],
-            **kw,
-        )(q_s, k_s, v_s, m_data_s, n_data_s, do_s, W_arr)
+    grid_dk_dv = (N // BLOCK,)
+    dK_f, dV_f = pl.pallas_call(
+        dk_dv_kernel_multi,
+        out_shape=(jax.ShapeDtypeStruct(K.shape, K.dtype), jax.ShapeDtypeStruct(V.shape, V.dtype)),
+        grid=grid_dk_dv,
+        in_specs=[
+            pl.BlockSpec(index_map=lambda n: (0, 0), block_shape=(M, D)),
+            pl.BlockSpec(index_map=lambda n: (n, 0), block_shape=(BLOCK, D)),
+            pl.BlockSpec(index_map=lambda n: (n, 0), block_shape=(BLOCK, E)),
+            pl.BlockSpec(index_map=lambda n: (0, 0), block_shape=(M, C)),
+            pl.BlockSpec(index_map=lambda n: (n, 0), block_shape=(BLOCK, C)),
+            pl.BlockSpec(index_map=lambda n: (0, 0), block_shape=(M, E)),
+            pl.BlockSpec(index_map=lambda n: (0,), block_shape=(1,)),
+        ],
+        out_specs=[
+            pl.BlockSpec(index_map=lambda n: (n, 0), block_shape=(BLOCK, D)),
+            pl.BlockSpec(index_map=lambda n: (n, 0), block_shape=(BLOCK, E)),
+        ],
+        **kw,
+    )(Q, K, V, M_data, N_data, dO, W_arr)
 
-        return dQ_s, dK_s, dV_s
-
-    # Vmap over Head and Batch dimensions
-    vmap_heads = jax.vmap(pallas_sinkhorn_bwd_single, in_axes=(0, 0, 0, 0, 0, 0))
-    vmap_batch = jax.vmap(vmap_heads, in_axes=(0, 0, 0, 0, 0, 0))
-    
-    return vmap_batch(Q, K, V, dO, M_data, N_data)
+    return dQ_f, dK_f, dV_f
 
 def _banded_compute_next_uv(Q, K, u_in, v_in, scale, BLOCK, num_blocks, W, slice_size):
     """Compute one Sinkhorn half-step (u_new, v_new) with banding."""
