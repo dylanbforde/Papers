@@ -85,6 +85,13 @@ def safe_exp(x):
     return pow2_int * pow2_frac
 
 
+def _exp_for_tpu(x):
+    """Prefer the TPU-friendly safe_exp approximation on TPU backends."""
+    if jax.default_backend() == "tpu":
+        return safe_exp(x)
+    return jnp.exp(x)
+
+
 # ============================================================================
 # Forward Pass: Banded Sinkhorn Potential Computation
 # ============================================================================
@@ -100,11 +107,12 @@ def compute_global_uv(Q, K, n_iters=15, band_width=None):
     BLOCK = 128
     num_blocks = L // BLOCK
     
-    Q_b = Q.reshape(B, H, num_blocks, BLOCK, D).transpose(2, 0, 1, 3, 4)
-    K_b = K.reshape(B, H, num_blocks, BLOCK, D).transpose(2, 0, 1, 3, 4)
-
     W = band_width // BLOCK if band_width is not None else num_blocks
     slice_size = min(W * 2 + 1, num_blocks)
+    local_offsets = jnp.arange(slice_size)
+
+    Q_b = Q.reshape(B, H, num_blocks, BLOCK, D).transpose(2, 0, 1, 3, 4)
+    K_b = K.reshape(B, H, num_blocks, BLOCK, D).transpose(2, 0, 1, 3, 4)
 
     def body_fn(i, val):
         u_in, v_in = val
@@ -118,7 +126,7 @@ def compute_global_uv(Q, K, n_iters=15, band_width=None):
             k_band = jax.lax.dynamic_slice_in_dim(K_b, start_idx, slice_size, axis=0)
             v_band = jax.lax.dynamic_slice_in_dim(v_b, start_idx, slice_size, axis=0)
             
-            abs_indices = start_idx + jnp.arange(slice_size)
+            abs_indices = start_idx + local_offsets
             mask = jnp.abs(abs_indices - block_idx) <= W
 
             def scan_k(acc, elements):
@@ -133,7 +141,7 @@ def compute_global_uv(Q, K, n_iters=15, band_width=None):
                     acc_diff = acc[0] - max_val
                     acc_diff = jnp.where(jnp.isnan(acc_diff), -jnp.inf, acc_diff)
                     
-                    sum_exp = acc[1] * jnp.exp(acc_diff) + jnp.sum(jnp.exp(diff), axis=-1)
+                    sum_exp = acc[1] * _exp_for_tpu(acc_diff) + jnp.sum(_exp_for_tpu(diff), axis=-1)
                     return (max_val, sum_exp)
                 
                 return jax.lax.cond(is_valid, true_fn, lambda _: acc, None), None
@@ -157,7 +165,7 @@ def compute_global_uv(Q, K, n_iters=15, band_width=None):
             q_band = jax.lax.dynamic_slice_in_dim(Q_b, start_idx, slice_size, axis=0)
             u_band = jax.lax.dynamic_slice_in_dim(u_b, start_idx, slice_size, axis=0)
             
-            abs_indices = start_idx + jnp.arange(slice_size)
+            abs_indices = start_idx + local_offsets
             mask = jnp.abs(abs_indices - block_idx) <= W
 
             def scan_q2(acc, elements):
@@ -172,7 +180,7 @@ def compute_global_uv(Q, K, n_iters=15, band_width=None):
                     acc_diff = acc[0] - max_val
                     acc_diff = jnp.where(jnp.isnan(acc_diff), -jnp.inf, acc_diff)
                     
-                    sum_exp = acc[1] * jnp.exp(acc_diff) + jnp.sum(jnp.exp(diff), axis=-2)
+                    sum_exp = acc[1] * _exp_for_tpu(acc_diff) + jnp.sum(_exp_for_tpu(diff), axis=-2)
                     return (max_val, sum_exp)
                 
                 return jax.lax.cond(is_valid, true_fn, lambda _: acc, None), None
@@ -207,7 +215,7 @@ def tile_sinkhorn_kernel(q_ref, k_ref, v_ref, u_ref, v_pot_ref, o_ref):
     D = q.shape[-1]
     logits = jnp.dot(q, k.T) / jnp.sqrt(D)
     log_alpha = logits + u[:, None] + v_pot[None, :]
-    o_ref[...] = jnp.dot(jnp.exp(log_alpha), v)
+    o_ref[...] = jnp.dot(_exp_for_tpu(log_alpha), v)
 
 
 def pallas_sinkhorn_fwd(Q, K, V, n_iters=15, band_width=None):
@@ -343,8 +351,8 @@ def dq_kernel_multi(
 
 # MACH ⚡: Factored the multi-transport dS equation using distributive properties
             # This fuses 4 transport terms into a single P22 multiplication
-            exp_dv12 = jnp.exp(v1_n - v2_n)
-            exp_dv01 = jnp.exp(v0_n - v1_n)
+            exp_dv12 = _exp_for_tpu(v1_n - v2_n)
+            exp_dv01 = _exp_for_tpu(v0_n - v1_n)
 
             # Score matrix
             s_block = jnp.einsum("md,nd->mn", q_block, k_block) * scale
@@ -409,8 +417,8 @@ def dk_dv_kernel_multi(
         dk_acc, dv_acc = state
 
 # MACH ⚡: Hoisted loop-invariant exponentiated potential differences out of the inner unrolled loop.
-        exp_dv12_n = jnp.exp(v1_n - v2_n)
-        exp_dv01_n = jnp.exp(v0_n - v1_n)
+        exp_dv12_n = _exp_for_tpu(v1_n - v2_n)
+        exp_dv01_n = _exp_for_tpu(v0_n - v1_n)
 
         for u_i in range(UNROLL):
             m_idx = i * UNROLL + u_i
@@ -427,7 +435,7 @@ def dk_dv_kernel_multi(
             del_u2_m = m_data[:, 4]
 
 # MACH ⚡: Factored the multi-transport dS equation using distributive properties
-            exp_du12 = jnp.exp(u1_m - u2_m)
+            exp_du12 = _exp_for_tpu(u1_m - u2_m)
 
             # Score matrix
             s_block_T = jnp.einsum("nd,md->nm", k_block, q_block) * scale
@@ -460,58 +468,65 @@ def dk_dv_kernel_multi(
 
 
 def pallas_sinkhorn_bwd_fused(Q, K, V, dO, M_data, N_data, band_width):
-    """Launch fused Pallas kernels over Batch/Head sequentially."""
-    M, D = Q.shape
-    N, E = V.shape
+    """Launch fused Pallas kernels over Batch/Head using vmap."""
+    B, H, M, D = Q.shape
+    B, H, N, E = V.shape
     C = 8
-
     BLOCK = 128
     W_val = band_width // BLOCK if band_width is not None else M // BLOCK
     W_arr = jnp.array([W_val], dtype=jnp.int32)
 
-    is_cpu = jax.devices()[0].platform == "cpu"
-    kw = {"interpret": True} if is_cpu else {}
+    def pallas_sinkhorn_bwd_single(q_s, k_s, v_s, do_s, m_data_s, n_data_s):
+        """Single-head backward pass kernels."""
+        is_cpu = jax.devices()[0].platform == "cpu"
+        kw = {"interpret": True} if is_cpu else {}
 
-    grid_dq = (M // BLOCK,)
-    dQ_f = pl.pallas_call(
-        dq_kernel_multi,
-        out_shape=jax.ShapeDtypeStruct(Q.shape, Q.dtype),
-        grid=grid_dq,
-        in_specs=[
-            pl.BlockSpec(index_map=lambda m: (m, 0), block_shape=(BLOCK, D)),
-            pl.BlockSpec(index_map=lambda m: (0, 0), block_shape=(N, D)),
-            pl.BlockSpec(index_map=lambda m: (0, 0), block_shape=(N, E)),
-            pl.BlockSpec(index_map=lambda m: (m, 0), block_shape=(BLOCK, C)),
-            pl.BlockSpec(index_map=lambda m: (0, 0), block_shape=(N, C)),
-            pl.BlockSpec(index_map=lambda m: (m, 0), block_shape=(BLOCK, E)),
-            pl.BlockSpec(index_map=lambda m: (0,), block_shape=(1,)),
-        ],
-        out_specs=pl.BlockSpec(index_map=lambda m: (m, 0), block_shape=(BLOCK, D)),
-        **kw,
-    )(Q, K, V, M_data, N_data, dO, W_arr)
+        grid_dq = (M // BLOCK,)
+        dQ_s = pl.pallas_call(
+            dq_kernel_multi,
+            out_shape=jax.ShapeDtypeStruct(q_s.shape, q_s.dtype),
+            grid=grid_dq,
+            in_specs=[
+                pl.BlockSpec(index_map=lambda m: (m, 0), block_shape=(BLOCK, D)),
+                pl.BlockSpec(index_map=lambda m: (0, 0), block_shape=(N, D)),
+                pl.BlockSpec(index_map=lambda m: (0, 0), block_shape=(N, E)),
+                pl.BlockSpec(index_map=lambda m: (m, 0), block_shape=(BLOCK, C)),
+                pl.BlockSpec(index_map=lambda m: (0, 0), block_shape=(N, C)),
+                pl.BlockSpec(index_map=lambda m: (m, 0), block_shape=(BLOCK, E)),
+                pl.BlockSpec(index_map=lambda m: (0,), block_shape=(1,)),
+            ],
+            out_specs=pl.BlockSpec(index_map=lambda m: (m, 0), block_shape=(BLOCK, D)),
+            **kw,
+        )(q_s, k_s, v_s, m_data_s, n_data_s, do_s, W_arr)
 
-    grid_dk_dv = (N // BLOCK,)
-    dK_f, dV_f = pl.pallas_call(
-        dk_dv_kernel_multi,
-        out_shape=(jax.ShapeDtypeStruct(K.shape, K.dtype), jax.ShapeDtypeStruct(V.shape, V.dtype)),
-        grid=grid_dk_dv,
-        in_specs=[
-            pl.BlockSpec(index_map=lambda n: (0, 0), block_shape=(M, D)),
-            pl.BlockSpec(index_map=lambda n: (n, 0), block_shape=(BLOCK, D)),
-            pl.BlockSpec(index_map=lambda n: (n, 0), block_shape=(BLOCK, E)),
-            pl.BlockSpec(index_map=lambda n: (0, 0), block_shape=(M, C)),
-            pl.BlockSpec(index_map=lambda n: (n, 0), block_shape=(BLOCK, C)),
-            pl.BlockSpec(index_map=lambda n: (0, 0), block_shape=(M, E)),
-            pl.BlockSpec(index_map=lambda n: (0,), block_shape=(1,)),
-        ],
-        out_specs=[
-            pl.BlockSpec(index_map=lambda n: (n, 0), block_shape=(BLOCK, D)),
-            pl.BlockSpec(index_map=lambda n: (n, 0), block_shape=(BLOCK, E)),
-        ],
-        **kw,
-    )(Q, K, V, M_data, N_data, dO, W_arr)
+        grid_dk_dv = (N // BLOCK,)
+        dK_s, dV_s = pl.pallas_call(
+            dk_dv_kernel_multi,
+            out_shape=(jax.ShapeDtypeStruct(k_s.shape, k_s.dtype), jax.ShapeDtypeStruct(v_s.shape, v_s.dtype)),
+            grid=grid_dk_dv,
+            in_specs=[
+                pl.BlockSpec(index_map=lambda n: (0, 0), block_shape=(M, D)),
+                pl.BlockSpec(index_map=lambda n: (n, 0), block_shape=(BLOCK, D)),
+                pl.BlockSpec(index_map=lambda n: (n, 0), block_shape=(BLOCK, E)),
+                pl.BlockSpec(index_map=lambda n: (0, 0), block_shape=(M, C)),
+                pl.BlockSpec(index_map=lambda n: (n, 0), block_shape=(BLOCK, C)),
+                pl.BlockSpec(index_map=lambda n: (0, 0), block_shape=(M, E)),
+                pl.BlockSpec(index_map=lambda n: (0,), block_shape=(1,)),
+            ],
+            out_specs=[
+                pl.BlockSpec(index_map=lambda n: (n, 0), block_shape=(BLOCK, D)),
+                pl.BlockSpec(index_map=lambda n: (n, 0), block_shape=(BLOCK, E)),
+            ],
+            **kw,
+        )(q_s, k_s, v_s, m_data_s, n_data_s, do_s, W_arr)
 
-    return dQ_f, dK_f, dV_f
+        return dQ_s, dK_s, dV_s
+
+    # Vmap over Head and Batch dimensions
+    vmap_heads = jax.vmap(pallas_sinkhorn_bwd_single, in_axes=(0, 0, 0, 0, 0, 0))
+    vmap_batch = jax.vmap(vmap_heads, in_axes=(0, 0, 0, 0, 0, 0))
+    
+    return vmap_batch(Q, K, V, dO, M_data, N_data)
 
 def _banded_compute_next_uv(Q, K, u_in, v_in, scale, BLOCK, num_blocks, W, slice_size):
     """Compute one Sinkhorn half-step (u_new, v_new) with banding."""
