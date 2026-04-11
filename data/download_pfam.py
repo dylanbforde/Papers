@@ -17,8 +17,6 @@ import json
 import random
 import argparse
 import urllib.request
-from pathlib import Path
-from collections import defaultdict
 
 import numpy as np
 
@@ -33,7 +31,7 @@ def download_pfam_seed(cache_dir: str) -> str:
     if os.path.exists(local_path):
         print(f"✓ Using cached {local_path}")
         return local_path
-    print(f"⬇ Downloading Pfam-A.seed.gz from EBI (~200MB)...")
+    print("⬇ Downloading Pfam-A.seed.gz from EBI (~200MB)...")
     urllib.request.urlretrieve(PFAM_SEED_URL, local_path)
     print(f"✓ Saved to {local_path}")
     return local_path

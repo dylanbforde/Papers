@@ -33,7 +33,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import optax
-from jax.sharding import Mesh, PartitionSpec, NamedSharding
+from jax.sharding import Mesh
 
 import torch
 from transformers import AutoTokenizer, AutoModel, AutoConfig
@@ -89,7 +89,6 @@ def muon_optimizer(learning_rate):
 _FOUNDATION_MODEL_CACHE = {}
 
 def get_foundation_embeddings(sequences, model_name):
-    from transformers import AutoConfig
 
     if model_name in _FOUNDATION_MODEL_CACHE:
         tokenizer, model = _FOUNDATION_MODEL_CACHE[model_name]
@@ -193,11 +192,11 @@ def run_long_benchmark(model_name, vocab):
     except Exception:
         mesh = None
 
-    print(f"===================================================================")
-    print(f"   Long-Context Foundation Model Alignment Benchmark")
+    print("===================================================================")
+    print("   Long-Context Foundation Model Alignment Benchmark")
     print(f"   Backbone: {model_name}")
     print(f"   Target: {vocab.upper()} (Testing massive context survival)")
-    print(f"===================================================================\n")
+    print("===================================================================\n")
     print(f"| {'Context (L)':<12} | {'Method':<20} | {'Fwd (ms)':<10} | {'Bwd (ms)':<10} | {'Status':<15} |")
     print("-" * 80)
     
@@ -222,8 +221,6 @@ def run_long_benchmark(model_name, vocab):
             emb_k = jnp.pad(emb_k, ((0,0), (0,0), (0, pad_len), (0,0)))
             emb_v = jnp.pad(emb_v, ((0,0), (0,0), (0, pad_len), (0,0)))
 
-        dim = emb_q.shape[-1]
-        
         # 1. Baseline: SOTA Flash Attention
         def flash_attn_baseline(q, k, v):
             return jax.nn.dot_product_attention(q, k, v)
@@ -233,7 +230,7 @@ def run_long_benchmark(model_name, vocab):
             fa_stats["seq_len"] = L
             results_db.append(fa_stats)
             print(f"| {L:<12} | {'Flash Attention':<20} | {fa_stats['fwd_latency_ms']:<10.2f} | {fa_stats['bwd_latency_ms']:<10.2f} | {'Success':<15} |")
-        except Exception as e:
+        except Exception:
             print(f"| {L:<12} | {'Flash Attention':<20} | {'OOM':<10} | {'OOM':<10} | {'Failed':<15} |")
 
         # 2. Ours: Sinkhorn OT Block-Wise Attention
