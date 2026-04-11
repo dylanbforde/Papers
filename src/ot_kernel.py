@@ -24,7 +24,6 @@ try:
     from jax.experimental.pallas import tpu as pltpu
 except ImportError:
     pltpu = None
-import functools
 from functools import partial
 
 
@@ -90,106 +89,27 @@ def safe_exp(x):
 # ============================================================================
 
 def compute_global_uv(Q, K, n_iters=15, band_width=None):
-    """Compute Sinkhorn dual potentials u, v via alternating logsumexp."""
+    """Compute Sinkhorn dual potentials u, v via alternating banded logsumexp."""
     B, H, L, D = Q.shape
     scale = 1.0 / jnp.sqrt(D)
-    
-    u = jnp.zeros((B, H, L), dtype=Q.dtype)
-    v = jnp.zeros((B, H, L), dtype=Q.dtype)
-    
+
+    u0 = jnp.zeros((B, H, L), dtype=Q.dtype)
+    v0 = jnp.zeros((B, H, L), dtype=Q.dtype)
+
     BLOCK = 128
     num_blocks = L // BLOCK
-    
-    Q_b = Q.reshape(B, H, num_blocks, BLOCK, D).transpose(2, 0, 1, 3, 4)
-    K_b = K.reshape(B, H, num_blocks, BLOCK, D).transpose(2, 0, 1, 3, 4)
-
     W = band_width // BLOCK if band_width is not None else num_blocks
     slice_size = min(W * 2 + 1, num_blocks)
 
     def body_fn(i, val):
         u_in, v_in = val
-        
-        v_b = v_in.reshape(B, H, num_blocks, BLOCK).transpose(2, 0, 1, 3)
-        def scan_q(carry, q_kv_idx):
-            q_block, block_idx = q_kv_idx
-            
-            start_idx = jnp.minimum(jnp.maximum(0, block_idx - W), num_blocks - slice_size)
-            
-            k_band = jax.lax.dynamic_slice_in_dim(K_b, start_idx, slice_size, axis=0)
-            v_band = jax.lax.dynamic_slice_in_dim(v_b, start_idx, slice_size, axis=0)
-            
-            abs_indices = start_idx + jnp.arange(slice_size)
-            mask = jnp.abs(abs_indices - block_idx) <= W
 
-            def scan_k(acc, elements):
-                k_block, v_block, is_valid = elements
-                def true_fn(_):
-                    S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block, k_block) * scale
-                    val = S_block + v_block[..., None, :]
-                    max_val = jnp.maximum(acc[0], jnp.max(val, axis=-1))
-                    
-                    diff = val - max_val[..., None]
-                    diff = jnp.where(jnp.isnan(diff), -jnp.inf, diff)
-                    acc_diff = acc[0] - max_val
-                    acc_diff = jnp.where(jnp.isnan(acc_diff), -jnp.inf, acc_diff)
-                    
-                    sum_exp = acc[1] * jnp.exp(acc_diff) + jnp.sum(jnp.exp(diff), axis=-1)
-                    return (max_val, sum_exp)
-                
-                return jax.lax.cond(is_valid, true_fn, lambda _: acc, None), None
-                
-            init_acc = (jnp.full((B, H, BLOCK), -float('inf')), jnp.zeros((B, H, BLOCK)))
-            final_acc, _ = jax.lax.scan(scan_k, init_acc, (k_band, v_band, mask))
-            
-            sum_exp = jnp.maximum(final_acc[1], 1e-10)
-            u_new = -(final_acc[0] + jnp.log(sum_exp))
-            return None, u_new
-        
-        _, u_new_b = jax.lax.scan(scan_q, None, (Q_b, jnp.arange(num_blocks)))
-        u_new = u_new_b.transpose(1, 2, 0, 3).reshape(B, H, L)
-        
-        u_b = u_new.reshape(B, H, num_blocks, BLOCK).transpose(2, 0, 1, 3)
-        def scan_k2(carry, k_qu_idx):
-            k_block, block_idx = k_qu_idx
-            
-            start_idx = jnp.minimum(jnp.maximum(0, block_idx - W), num_blocks - slice_size)
-            
-            q_band = jax.lax.dynamic_slice_in_dim(Q_b, start_idx, slice_size, axis=0)
-            u_band = jax.lax.dynamic_slice_in_dim(u_b, start_idx, slice_size, axis=0)
-            
-            abs_indices = start_idx + jnp.arange(slice_size)
-            mask = jnp.abs(abs_indices - block_idx) <= W
-
-            def scan_q2(acc, elements):
-                q_block, u_block, is_valid = elements
-                def true_fn(_):
-                    S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block, k_block) * scale
-                    val = S_block + u_block[..., :, None]
-                    max_val = jnp.maximum(acc[0], jnp.max(val, axis=-2))
-                    
-                    diff = val - max_val[..., None, :]
-                    diff = jnp.where(jnp.isnan(diff), -jnp.inf, diff)
-                    acc_diff = acc[0] - max_val
-                    acc_diff = jnp.where(jnp.isnan(acc_diff), -jnp.inf, acc_diff)
-                    
-                    sum_exp = acc[1] * jnp.exp(acc_diff) + jnp.sum(jnp.exp(diff), axis=-2)
-                    return (max_val, sum_exp)
-                
-                return jax.lax.cond(is_valid, true_fn, lambda _: acc, None), None
-            
-            init_acc = (jnp.full((B, H, BLOCK), -float('inf')), jnp.zeros((B, H, BLOCK)))
-            final_acc, _ = jax.lax.scan(scan_q2, init_acc, (q_band, u_band, mask))
-            
-            sum_exp = jnp.maximum(final_acc[1], 1e-10)
-            v_new = -(final_acc[0] + jnp.log(sum_exp))
-            return None, v_new
-            
-        _, v_new_b = jax.lax.scan(scan_k2, None, (K_b, jnp.arange(num_blocks)))
-        v_new = v_new_b.transpose(1, 2, 0, 3).reshape(B, H, L)
-        
+        u_new, v_new = _banded_compute_next_uv(
+            Q, K, u_in, v_in, scale, BLOCK, num_blocks, W, slice_size
+        )
         return (u_new, v_new)
 
-    return jax.lax.fori_loop(0, n_iters, body_fn, (u, v))
+    return jax.lax.fori_loop(0, n_iters, body_fn, (u0, v0))
 
 
 # ============================================================================
@@ -211,7 +131,7 @@ def tile_sinkhorn_kernel(q_ref, k_ref, v_ref, u_ref, v_pot_ref, o_ref):
 
 
 def pallas_sinkhorn_fwd(Q, K, V, n_iters=15, band_width=None):
-    """Full banded Sinkhorn forward pass with Pallas tile kernels."""
+    """Full banded Sinkhorn forward pass with fused block-banded contractions."""
     u_out, v_out = compute_global_uv(Q, K, n_iters, band_width)
     
     B, H, L, D = Q.shape
@@ -221,56 +141,28 @@ def pallas_sinkhorn_fwd(Q, K, V, n_iters=15, band_width=None):
     W = band_width // block_size if band_width is not None else num_blocks
     slice_size = min(W * 2 + 1, num_blocks)
 
-    q_blocks = Q.reshape(B, H, num_blocks, block_size, head_dim)
-    k_blocks = K.reshape(B, H, num_blocks, block_size, head_dim)
-    v_blocks = V.reshape(B, H, num_blocks, block_size, head_dim)
-    u_blocks = u_out.reshape(B, H, num_blocks, block_size, 1)   # v6e pad
-    v_pot_blocks = v_out.reshape(B, H, num_blocks, block_size, 1)
+    def scan_q(carry, i):
+        q_block = jax.lax.dynamic_slice_in_dim(Q, i * block_size, block_size, axis=-2)
+        u_block = jax.lax.dynamic_slice_in_dim(u_out, i * block_size, block_size, axis=-1)
+        start_idx = jnp.minimum(jnp.maximum(0, i - W), num_blocks - slice_size)
 
-    def compute_tile(q_tile, k_tile, v_tile, u_tile, v_pot_tile):
-        out_shape = jax.ShapeDtypeStruct((block_size, head_dim), Q.dtype)
-        is_cpu = jax.devices()[0].platform == "cpu"
-        kw = {"interpret": True} if is_cpu else {}
-        return pl.pallas_call(
-            functools.partial(tile_sinkhorn_kernel),
-            out_shape=out_shape,
-            grid=(),
-            in_specs=[
-                pl.BlockSpec(block_shape=q_tile.shape, index_map=lambda: (0, 0)),
-                pl.BlockSpec(block_shape=k_tile.shape, index_map=lambda: (0, 0)),
-                pl.BlockSpec(block_shape=v_tile.shape, index_map=lambda: (0, 0)),
-                pl.BlockSpec(block_shape=u_tile.shape, index_map=lambda: (0, 0)),
-                pl.BlockSpec(block_shape=v_pot_tile.shape, index_map=lambda: (0, 0)),
-            ],
-            out_specs=pl.BlockSpec(block_shape=out_shape.shape, index_map=lambda: (0, 0)),
-            **kw,
-        )(q_tile, k_tile, v_tile, u_tile, v_pot_tile)
+        k_band = jax.lax.dynamic_slice_in_dim(K, start_idx * block_size, slice_size * block_size, axis=-2)
+        v_band = jax.lax.dynamic_slice_in_dim(V, start_idx * block_size, slice_size * block_size, axis=-2)
+        v_pot_band = jax.lax.dynamic_slice_in_dim(v_out, start_idx * block_size, slice_size * block_size, axis=-1)
 
-    def scan_kv_blocks(acc, elements):
-        k_tile, v_tile, v_pot_tile, is_valid = elements
-        q_tile, u_tile, out_sum = acc
-        out_tile = compute_tile(q_tile, k_tile, v_tile, u_tile, v_pot_tile)
-        out_tile = jnp.where(is_valid, out_tile, 0.0)
-        return (q_tile, u_tile, out_sum + out_tile), None
+        logits = jnp.einsum("bhmd,bhnd->bhmn", q_block, k_band) / jnp.sqrt(head_dim)
+        logits = logits + u_block[..., :, None] + v_pot_band[..., None, :]
 
-    def process_q_block(q_tile, u_tile, block_idx, k_blocks_all, v_blocks_all, v_pot_blocks_all):
-        init_sum = jnp.zeros((block_size, head_dim), dtype=q_tile.dtype)
-        start_idx = jnp.minimum(jnp.maximum(0, block_idx - W), num_blocks - slice_size)
-        k_band = jax.lax.dynamic_slice_in_dim(k_blocks_all, start_idx, slice_size, axis=0)
-        v_band = jax.lax.dynamic_slice_in_dim(v_blocks_all, start_idx, slice_size, axis=0)
-        v_pot_band = jax.lax.dynamic_slice_in_dim(v_pot_blocks_all, start_idx, slice_size, axis=0)
-        abs_indices = start_idx + jnp.arange(slice_size)
-        mask = jnp.abs(abs_indices - block_idx) <= W
-        (q_val, _, final_sum), _ = jax.lax.scan(
-            scan_kv_blocks, (q_tile, u_tile, init_sum), (k_band, v_band, v_pot_band, mask)
-        )
-        return final_sum
+        abs_indices = start_idx + jnp.arange(slice_size * block_size) // block_size
+        mask = jnp.abs(abs_indices - i) <= W
+        logits = jnp.where(mask[None, None, None, :], logits, -jnp.inf)
 
-    vmap_q = jax.vmap(process_q_block, in_axes=(0, 0, 0, None, None, None))
-    vmap_heads = jax.vmap(vmap_q, in_axes=(0, 0, None, 0, 0, 0))
-    vmap_batch = jax.vmap(vmap_heads, in_axes=(0, 0, None, 0, 0, 0))
-    out_blocks = vmap_batch(q_blocks, u_blocks, jnp.arange(num_blocks), k_blocks, v_blocks, v_pot_blocks)
-    out = out_blocks.reshape(B, H, L, D)
+        weights = safe_exp(logits)
+        out_block = jnp.einsum("bhmn,bhnd->bhmd", weights, v_band)
+        return carry, out_block
+
+    _, out_blocks = jax.lax.scan(scan_q, None, jnp.arange(num_blocks))
+    out = out_blocks.transpose(1, 2, 0, 3, 4).reshape(B, H, L, D)
     return out, (u_out, v_out, Q, K, V)
 
 
