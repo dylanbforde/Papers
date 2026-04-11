@@ -27,6 +27,8 @@ except ImportError:
 import functools
 from functools import partial
 
+IS_CPU = jax.devices()[0].platform == "cpu"
+
 
 # ============================================================================
 # Utilities
@@ -133,7 +135,7 @@ def compute_global_uv(Q, K, n_iters=15, band_width=None):
                     acc_diff = acc[0] - max_val
                     acc_diff = jnp.where(jnp.isnan(acc_diff), -jnp.inf, acc_diff)
                     
-                    sum_exp = acc[1] * jnp.exp(acc_diff) + jnp.sum(jnp.exp(diff), axis=-1)
+                    sum_exp = acc[1] * safe_exp(acc_diff) + jnp.sum(safe_exp(diff), axis=-1)
                     return (max_val, sum_exp)
                 
                 return jax.lax.cond(is_valid, true_fn, lambda _: acc, None), None
@@ -172,7 +174,7 @@ def compute_global_uv(Q, K, n_iters=15, band_width=None):
                     acc_diff = acc[0] - max_val
                     acc_diff = jnp.where(jnp.isnan(acc_diff), -jnp.inf, acc_diff)
                     
-                    sum_exp = acc[1] * jnp.exp(acc_diff) + jnp.sum(jnp.exp(diff), axis=-2)
+                    sum_exp = acc[1] * safe_exp(acc_diff) + jnp.sum(safe_exp(diff), axis=-2)
                     return (max_val, sum_exp)
                 
                 return jax.lax.cond(is_valid, true_fn, lambda _: acc, None), None
@@ -229,8 +231,7 @@ def pallas_sinkhorn_fwd(Q, K, V, n_iters=15, band_width=None):
 
     def compute_tile(q_tile, k_tile, v_tile, u_tile, v_pot_tile):
         out_shape = jax.ShapeDtypeStruct((block_size, head_dim), Q.dtype)
-        is_cpu = jax.devices()[0].platform == "cpu"
-        kw = {"interpret": True} if is_cpu else {}
+        kw = {"interpret": True} if IS_CPU else {}
         return pl.pallas_call(
             functools.partial(tile_sinkhorn_kernel),
             out_shape=out_shape,
@@ -249,8 +250,12 @@ def pallas_sinkhorn_fwd(Q, K, V, n_iters=15, band_width=None):
     def scan_kv_blocks(acc, elements):
         k_tile, v_tile, v_pot_tile, is_valid = elements
         q_tile, u_tile, out_sum = acc
-        out_tile = compute_tile(q_tile, k_tile, v_tile, u_tile, v_pot_tile)
-        out_tile = jnp.where(is_valid, out_tile, 0.0)
+        out_tile = jax.lax.cond(
+            is_valid,
+            lambda _: compute_tile(q_tile, k_tile, v_tile, u_tile, v_pot_tile),
+            lambda _: jnp.zeros_like(out_sum),
+            operand=None,
+        )
         return (q_tile, u_tile, out_sum + out_tile), None
 
     def process_q_block(q_tile, u_tile, block_idx, k_blocks_all, v_blocks_all, v_pot_blocks_all):
@@ -463,8 +468,7 @@ def pallas_sinkhorn_bwd_fused(Q, K, V, dO, M_data, N_data, band_width):
     W_val = band_width // BLOCK if band_width is not None else M // BLOCK
     W_arr = jnp.array([W_val], dtype=jnp.int32)
 
-    is_cpu = jax.devices()[0].platform == "cpu"
-    kw = {"interpret": True} if is_cpu else {}
+    kw = {"interpret": True} if IS_CPU else {}
 
     grid_dq = (M // BLOCK,)
     dQ_f = pl.pallas_call(
