@@ -302,6 +302,8 @@ def dq_kernel_multi(
     u2_m = m_data[:, 2]
     del_u1_m = m_data[:, 3]
     del_u2_m = m_data[:, 4]
+    # v6e-8 micro-opt: these are invariant across all K-tiles for a fixed Q-tile.
+    exp_du12_m = jnp.exp(u1_m - u2_m)
 
     D = q_block.shape[-1]
     scale = 1.0 / jnp.sqrt(D)
@@ -340,7 +342,6 @@ def dq_kernel_multi(
 # MACH ⚡: Factored the multi-transport dS equation using distributive properties
             # This fuses 4 transport terms into a single P22 multiplication
             exp_dv12 = jnp.exp(v1_n - v2_n)
-            exp_du12 = jnp.exp(u1_m - u2_m)
             exp_dv01 = jnp.exp(v0_n - v1_n)
 
             # Score matrix
@@ -353,7 +354,7 @@ def dq_kernel_multi(
                 z_block - g_v_n[None, :]
                 - exp_dv12[None, :] * (
                     del_u2_m[:, None]
-                    + exp_du12[:, None] * (
+                    + exp_du12_m[:, None] * (
                         del_v1_n[None, :]
                         + exp_dv01[None, :] * del_u1_m[:, None]
                     )
@@ -385,6 +386,9 @@ def dk_dv_kernel_multi(
     v2_n = n_data[:, 2]
     g_v_n = n_data[:, 3]
     del_v1_n = n_data[:, 4]
+    # v6e-8 micro-opt: these are invariant across all Q-tiles for a fixed K-tile.
+    exp_dv12_n = jnp.exp(v1_n - v2_n)
+    exp_dv01_n = jnp.exp(v0_n - v1_n)
 
     D = k_block.shape[-1]
     M = Q_ref.shape[0]
@@ -419,9 +423,7 @@ def dk_dv_kernel_multi(
             del_u2_m = m_data[:, 4]
 
 # MACH ⚡: Factored the multi-transport dS equation using distributive properties
-            exp_dv12_n = jnp.exp(v1_n - v2_n)
             exp_du12 = jnp.exp(u1_m - u2_m)
-            exp_dv01_n = jnp.exp(v0_n - v1_n)
 
             # Score matrix
             s_block_T = jnp.einsum("nd,md->nm", k_block, q_block) * scale
