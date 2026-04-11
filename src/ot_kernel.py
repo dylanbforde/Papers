@@ -85,6 +85,13 @@ def safe_exp(x):
     return pow2_int * pow2_frac
 
 
+def _exp_for_tpu(x):
+    """Prefer the TPU-friendly exp approximation on TPU backends."""
+    if jax.default_backend() == "tpu":
+        return safe_exp(x)
+    return jnp.exp(x)
+
+
 # ============================================================================
 # Forward Pass: Banded Sinkhorn Potential Computation
 # ============================================================================
@@ -105,6 +112,7 @@ def compute_global_uv(Q, K, n_iters=15, band_width=None):
 
     W = band_width // BLOCK if band_width is not None else num_blocks
     slice_size = min(W * 2 + 1, num_blocks)
+    local_offsets = jnp.arange(slice_size)
 
     def body_fn(i, val):
         u_in, v_in = val
@@ -118,7 +126,7 @@ def compute_global_uv(Q, K, n_iters=15, band_width=None):
             k_band = jax.lax.dynamic_slice_in_dim(K_b, start_idx, slice_size, axis=0)
             v_band = jax.lax.dynamic_slice_in_dim(v_b, start_idx, slice_size, axis=0)
             
-            abs_indices = start_idx + jnp.arange(slice_size)
+            abs_indices = start_idx + local_offsets
             mask = jnp.abs(abs_indices - block_idx) <= W
 
             def scan_k(acc, elements):
@@ -133,7 +141,7 @@ def compute_global_uv(Q, K, n_iters=15, band_width=None):
                     acc_diff = acc[0] - max_val
                     acc_diff = jnp.where(jnp.isnan(acc_diff), -jnp.inf, acc_diff)
                     
-                    sum_exp = acc[1] * jnp.exp(acc_diff) + jnp.sum(jnp.exp(diff), axis=-1)
+                    sum_exp = acc[1] * _exp_for_tpu(acc_diff) + jnp.sum(_exp_for_tpu(diff), axis=-1)
                     return (max_val, sum_exp)
                 
                 return jax.lax.cond(is_valid, true_fn, lambda _: acc, None), None
@@ -157,7 +165,7 @@ def compute_global_uv(Q, K, n_iters=15, band_width=None):
             q_band = jax.lax.dynamic_slice_in_dim(Q_b, start_idx, slice_size, axis=0)
             u_band = jax.lax.dynamic_slice_in_dim(u_b, start_idx, slice_size, axis=0)
             
-            abs_indices = start_idx + jnp.arange(slice_size)
+            abs_indices = start_idx + local_offsets
             mask = jnp.abs(abs_indices - block_idx) <= W
 
             def scan_q2(acc, elements):
@@ -172,7 +180,7 @@ def compute_global_uv(Q, K, n_iters=15, band_width=None):
                     acc_diff = acc[0] - max_val
                     acc_diff = jnp.where(jnp.isnan(acc_diff), -jnp.inf, acc_diff)
                     
-                    sum_exp = acc[1] * jnp.exp(acc_diff) + jnp.sum(jnp.exp(diff), axis=-2)
+                    sum_exp = acc[1] * _exp_for_tpu(acc_diff) + jnp.sum(_exp_for_tpu(diff), axis=-2)
                     return (max_val, sum_exp)
                 
                 return jax.lax.cond(is_valid, true_fn, lambda _: acc, None), None
@@ -207,7 +215,7 @@ def tile_sinkhorn_kernel(q_ref, k_ref, v_ref, u_ref, v_pot_ref, o_ref):
     D = q.shape[-1]
     logits = jnp.dot(q, k.T) / jnp.sqrt(D)
     log_alpha = logits + u[:, None] + v_pot[None, :]
-    o_ref[...] = jnp.dot(jnp.exp(log_alpha), v)
+    o_ref[...] = jnp.dot(_exp_for_tpu(log_alpha), v)
 
 
 def pallas_sinkhorn_fwd(Q, K, V, n_iters=15, band_width=None):
@@ -339,9 +347,9 @@ def dq_kernel_multi(
 
 # MACH ⚡: Factored the multi-transport dS equation using distributive properties
             # This fuses 4 transport terms into a single P22 multiplication
-            exp_dv12 = jnp.exp(v1_n - v2_n)
-            exp_du12 = jnp.exp(u1_m - u2_m)
-            exp_dv01 = jnp.exp(v0_n - v1_n)
+            exp_dv12 = _exp_for_tpu(v1_n - v2_n)
+            exp_du12 = _exp_for_tpu(u1_m - u2_m)
+            exp_dv01 = _exp_for_tpu(v0_n - v1_n)
 
             # Score matrix
             s_block = jnp.einsum("md,nd->mn", q_block, k_block) * scale
@@ -419,9 +427,9 @@ def dk_dv_kernel_multi(
             del_u2_m = m_data[:, 4]
 
 # MACH ⚡: Factored the multi-transport dS equation using distributive properties
-            exp_dv12_n = jnp.exp(v1_n - v2_n)
-            exp_du12 = jnp.exp(u1_m - u2_m)
-            exp_dv01_n = jnp.exp(v0_n - v1_n)
+            exp_dv12_n = _exp_for_tpu(v1_n - v2_n)
+            exp_du12 = _exp_for_tpu(u1_m - u2_m)
+            exp_dv01_n = _exp_for_tpu(v0_n - v1_n)
 
             # Score matrix
             s_block_T = jnp.einsum("nd,md->nm", k_block, q_block) * scale
