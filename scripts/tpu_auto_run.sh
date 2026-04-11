@@ -70,13 +70,24 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 
-# 5. Run training (Pfam Seed Alignment - High Authority Benchmark)
+# 4b. Bootstrap Pfam Shards (Aggressive Sharding & Embedding)
+echo "Step 4b: Bootstrapping Pfam 50k dataset (this may take 20-30 mins)..."
+gcloud compute tpus tpu-vm ssh $NODE_ID --project=$PROJECT_ID --zone=$ZONE --worker=all --command="
+  export PATH=\"\$PATH:/home/\$USER/.local/bin\" && \
+  cd sinkhorn-aligner && \
+  if [ ! -f data/pfam_shards/metadata.json ]; then
+    python3 data/download_pfam.py --max_pairs 50000 --shard_size 500 --embed
+  else
+    echo '✓ Pfam shards already exist, skipping bootstrap.'
+  fi"
+
+# 5. Run training (Pfam Seed Alignment - Production Run)
 echo "Step 5: Starting training..."
 gcloud compute tpus tpu-vm ssh $NODE_ID --project=$PROJECT_ID --zone=$ZONE --worker=all --command="
   export PATH=\"\$PATH:/home/\$USER/.local/bin\" && \
   cd sinkhorn-aligner && \
-  python3 src/benchmarks/benchmark_pfam_training.py --method sinkhorn_ot --max_hours 3.0 && \
-  python3 src/benchmarks/benchmark_pfam_training.py --method flash_attention --max_hours 3.0"
+  python3 src/benchmarks/benchmark_pfam_training.py --method sinkhorn_ot --max_hours 3.0 --data_dir data/pfam_shards && \
+  python3 src/benchmarks/benchmark_pfam_training.py --method flash_attention --max_hours 3.0 --data_dir data/pfam_shards"
 
 if [ $? -ne 0 ]; then
   echo "✗ Training script failed. Logs should be above."
