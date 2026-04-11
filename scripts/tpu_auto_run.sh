@@ -5,6 +5,7 @@ PROJECT_ID="sinkhorn-neurips"
 ZONE="us-east5-a"
 NODE_ID="sinkhorn-benchmark-cluster"
 RESOURCE_ID="sinkhorn-queue"
+BUCKET_NAME="sinkhorn-neurips"
 
 # Function to guarantee cleanup on exit or failure
 cleanup() {
@@ -70,16 +71,17 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 
-# 4b. Bootstrap Pfam Shards (Aggressive Sharding & Embedding)
-echo "Step 4b: Bootstrapping Pfam 50k dataset (this may take 20-30 mins)..."
+# 4b. Fetch Pfam Shards from GCS (Rapid Pre-fetching)
+echo "Step 4b: Fetching pre-computed Pfam shards from gs://$BUCKET_NAME..."
 gcloud compute tpus tpu-vm ssh $NODE_ID --project=$PROJECT_ID --zone=$ZONE --worker=all --command="
-  export PATH=\"\$PATH:/home/\$USER/.local/bin\" && \
   cd sinkhorn-aligner && \
-  if [ ! -f data/pfam_shards/metadata.json ]; then
-    python3 data/download_pfam.py --max_pairs 50000 --shard_size 500 --embed
-  else
-    echo '✓ Pfam shards already exist, skipping bootstrap.'
-  fi"
+  mkdir -p data/pfam_shards && \
+  gsutil -m cp -r gs://$BUCKET_NAME/pfam_shards/* data/pfam_shards/"
+
+if [ $? -ne 0 ]; then
+  echo "✗ GCS Fetch failed. Ensure you have run the offline embedding job first."
+  exit 1
+fi
 
 # 5. Run training (Pfam Seed Alignment - Production Run)
 echo "Step 5: Starting training..."
