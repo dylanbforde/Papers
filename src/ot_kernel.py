@@ -106,87 +106,52 @@ def compute_global_uv(Q, K, n_iters=15, band_width=None):
     W = band_width // BLOCK if band_width is not None else num_blocks
     slice_size = min(W * 2 + 1, num_blocks)
 
+    block_ids = jnp.arange(num_blocks, dtype=jnp.int32)
+    raw_starts = block_ids - W
+    max_start = max(0, num_blocks - slice_size)
+    starts = jnp.clip(raw_starts, 0, max_start)
+    band_offsets = jnp.arange(slice_size, dtype=jnp.int32)
+    band_block_ids = starts[:, None] + band_offsets[None, :]
+    band_mask = jnp.abs(band_block_ids - block_ids[:, None]) <= W
+
+    def _gather_band_blocks(blocks):
+        # blocks: (num_blocks, ...)
+        # returns: (num_blocks, slice_size, ...)
+        return jnp.take(blocks, band_block_ids, axis=0)
+
     def body_fn(i, val):
         u_in, v_in = val
-        
+
         v_b = v_in.reshape(B, H, num_blocks, BLOCK).transpose(2, 0, 1, 3)
-        def scan_q(carry, q_kv_idx):
-            q_block, block_idx = q_kv_idx
-            
-            start_idx = jnp.minimum(jnp.maximum(0, block_idx - W), num_blocks - slice_size)
-            
-            k_band = jax.lax.dynamic_slice_in_dim(K_b, start_idx, slice_size, axis=0)
-            v_band = jax.lax.dynamic_slice_in_dim(v_b, start_idx, slice_size, axis=0)
-            
-            abs_indices = start_idx + jnp.arange(slice_size)
-            mask = jnp.abs(abs_indices - block_idx) <= W
+        k_band = _gather_band_blocks(K_b)
+        v_band = _gather_band_blocks(v_b)
 
-            def scan_k(acc, elements):
-                k_block, v_block, is_valid = elements
-                def true_fn(_):
-                    S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block, k_block) * scale
-                    val = S_block + v_block[..., None, :]
-                    max_val = jnp.maximum(acc[0], jnp.max(val, axis=-1))
-                    
-                    diff = val - max_val[..., None]
-                    diff = jnp.where(jnp.isnan(diff), -jnp.inf, diff)
-                    acc_diff = acc[0] - max_val
-                    acc_diff = jnp.where(jnp.isnan(acc_diff), -jnp.inf, acc_diff)
-                    
-                    sum_exp = acc[1] * jnp.exp(acc_diff) + jnp.sum(jnp.exp(diff), axis=-1)
-                    return (max_val, sum_exp)
-                
-                return jax.lax.cond(is_valid, true_fn, lambda _: acc, None), None
-                
-            init_acc = (jnp.full((B, H, BLOCK), -float('inf')), jnp.zeros((B, H, BLOCK)))
-            final_acc, _ = jax.lax.scan(scan_k, init_acc, (k_band, v_band, mask))
-            
-            sum_exp = jnp.maximum(final_acc[1], 1e-10)
-            u_new = -(final_acc[0] + jnp.log(sum_exp))
-            return None, u_new
-        
-        _, u_new_b = jax.lax.scan(scan_q, None, (Q_b, jnp.arange(num_blocks)))
+        logits_u = jnp.einsum("xbhmd,xybhnd->xybhmn", Q_b, k_band) * scale
+        logits_u = logits_u + v_band[..., None, :]
+        logits_u = jnp.where(
+            band_mask[:, :, None, None, None, None],
+            logits_u,
+            -jnp.inf,
+        )
+        logits_u = logits_u.transpose(0, 2, 3, 4, 1, 5).reshape(num_blocks, B, H, BLOCK, slice_size * BLOCK)
+        u_new_b = -jax.scipy.special.logsumexp(logits_u, axis=-1)
         u_new = u_new_b.transpose(1, 2, 0, 3).reshape(B, H, L)
-        
-        u_b = u_new.reshape(B, H, num_blocks, BLOCK).transpose(2, 0, 1, 3)
-        def scan_k2(carry, k_qu_idx):
-            k_block, block_idx = k_qu_idx
-            
-            start_idx = jnp.minimum(jnp.maximum(0, block_idx - W), num_blocks - slice_size)
-            
-            q_band = jax.lax.dynamic_slice_in_dim(Q_b, start_idx, slice_size, axis=0)
-            u_band = jax.lax.dynamic_slice_in_dim(u_b, start_idx, slice_size, axis=0)
-            
-            abs_indices = start_idx + jnp.arange(slice_size)
-            mask = jnp.abs(abs_indices - block_idx) <= W
 
-            def scan_q2(acc, elements):
-                q_block, u_block, is_valid = elements
-                def true_fn(_):
-                    S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block, k_block) * scale
-                    val = S_block + u_block[..., :, None]
-                    max_val = jnp.maximum(acc[0], jnp.max(val, axis=-2))
-                    
-                    diff = val - max_val[..., None, :]
-                    diff = jnp.where(jnp.isnan(diff), -jnp.inf, diff)
-                    acc_diff = acc[0] - max_val
-                    acc_diff = jnp.where(jnp.isnan(acc_diff), -jnp.inf, acc_diff)
-                    
-                    sum_exp = acc[1] * jnp.exp(acc_diff) + jnp.sum(jnp.exp(diff), axis=-2)
-                    return (max_val, sum_exp)
-                
-                return jax.lax.cond(is_valid, true_fn, lambda _: acc, None), None
-            
-            init_acc = (jnp.full((B, H, BLOCK), -float('inf')), jnp.zeros((B, H, BLOCK)))
-            final_acc, _ = jax.lax.scan(scan_q2, init_acc, (q_band, u_band, mask))
-            
-            sum_exp = jnp.maximum(final_acc[1], 1e-10)
-            v_new = -(final_acc[0] + jnp.log(sum_exp))
-            return None, v_new
-            
-        _, v_new_b = jax.lax.scan(scan_k2, None, (K_b, jnp.arange(num_blocks)))
+        u_b = u_new.reshape(B, H, num_blocks, BLOCK).transpose(2, 0, 1, 3)
+        q_band = _gather_band_blocks(Q_b)
+        u_band = _gather_band_blocks(u_b)
+
+        logits_v = jnp.einsum("xybhmd,xbhnd->xybhmn", q_band, K_b) * scale
+        logits_v = logits_v + u_band[..., :, None]
+        logits_v = jnp.where(
+            band_mask[:, :, None, None, None, None],
+            logits_v,
+            -jnp.inf,
+        )
+        logits_v = logits_v.transpose(0, 2, 3, 5, 1, 4).reshape(num_blocks, B, H, BLOCK, slice_size * BLOCK)
+        v_new_b = -jax.scipy.special.logsumexp(logits_v, axis=-1)
         v_new = v_new_b.transpose(1, 2, 0, 3).reshape(B, H, L)
-        
+
         return (u_new, v_new)
 
     return jax.lax.fori_loop(0, n_iters, body_fn, (u, v))
@@ -227,49 +192,31 @@ def pallas_sinkhorn_fwd(Q, K, V, n_iters=15, band_width=None):
     u_blocks = u_out.reshape(B, H, num_blocks, block_size, 1)   # v6e pad
     v_pot_blocks = v_out.reshape(B, H, num_blocks, block_size, 1)
 
-    def compute_tile(q_tile, k_tile, v_tile, u_tile, v_pot_tile):
-        out_shape = jax.ShapeDtypeStruct((block_size, head_dim), Q.dtype)
-        is_cpu = jax.devices()[0].platform == "cpu"
-        kw = {"interpret": True} if is_cpu else {}
-        return pl.pallas_call(
-            functools.partial(tile_sinkhorn_kernel),
-            out_shape=out_shape,
-            grid=(),
-            in_specs=[
-                pl.BlockSpec(block_shape=q_tile.shape, index_map=lambda: (0, 0)),
-                pl.BlockSpec(block_shape=k_tile.shape, index_map=lambda: (0, 0)),
-                pl.BlockSpec(block_shape=v_tile.shape, index_map=lambda: (0, 0)),
-                pl.BlockSpec(block_shape=u_tile.shape, index_map=lambda: (0, 0)),
-                pl.BlockSpec(block_shape=v_pot_tile.shape, index_map=lambda: (0, 0)),
-            ],
-            out_specs=pl.BlockSpec(block_shape=out_shape.shape, index_map=lambda: (0, 0)),
-            **kw,
-        )(q_tile, k_tile, v_tile, u_tile, v_pot_tile)
+    block_ids = jnp.arange(num_blocks, dtype=jnp.int32)
+    max_start = max(0, num_blocks - slice_size)
+    starts = jnp.clip(block_ids - W, 0, max_start)
+    band_offsets = jnp.arange(slice_size, dtype=jnp.int32)
+    band_block_ids = starts[:, None] + band_offsets[None, :]
+    band_mask = jnp.abs(band_block_ids - block_ids[:, None]) <= W
 
-    def scan_kv_blocks(acc, elements):
-        k_tile, v_tile, v_pot_tile, is_valid = elements
-        q_tile, u_tile, out_sum = acc
-        out_tile = compute_tile(q_tile, k_tile, v_tile, u_tile, v_pot_tile)
-        out_tile = jnp.where(is_valid, out_tile, 0.0)
-        return (q_tile, u_tile, out_sum + out_tile), None
+    def _gather_band_blocks(blocks):
+        # blocks: (B, H, num_blocks, block_size, d)
+        gathered = jnp.take(blocks, band_block_ids.reshape(-1), axis=2)
+        return gathered.reshape(B, H, num_blocks, slice_size, block_size, -1)
 
-    def process_q_block(q_tile, u_tile, block_idx, k_blocks_all, v_blocks_all, v_pot_blocks_all):
-        init_sum = jnp.zeros((block_size, head_dim), dtype=q_tile.dtype)
-        start_idx = jnp.minimum(jnp.maximum(0, block_idx - W), num_blocks - slice_size)
-        k_band = jax.lax.dynamic_slice_in_dim(k_blocks_all, start_idx, slice_size, axis=0)
-        v_band = jax.lax.dynamic_slice_in_dim(v_blocks_all, start_idx, slice_size, axis=0)
-        v_pot_band = jax.lax.dynamic_slice_in_dim(v_pot_blocks_all, start_idx, slice_size, axis=0)
-        abs_indices = start_idx + jnp.arange(slice_size)
-        mask = jnp.abs(abs_indices - block_idx) <= W
-        (q_val, _, final_sum), _ = jax.lax.scan(
-            scan_kv_blocks, (q_tile, u_tile, init_sum), (k_band, v_band, v_pot_band, mask)
-        )
-        return final_sum
+    k_band = _gather_band_blocks(k_blocks)
+    v_band = _gather_band_blocks(v_blocks)
+    v_pot_band = _gather_band_blocks(v_pot_blocks)
 
-    vmap_q = jax.vmap(process_q_block, in_axes=(0, 0, 0, None, None, None))
-    vmap_heads = jax.vmap(vmap_q, in_axes=(0, 0, None, 0, 0, 0))
-    vmap_batch = jax.vmap(vmap_heads, in_axes=(0, 0, None, 0, 0, 0))
-    out_blocks = vmap_batch(q_blocks, u_blocks, jnp.arange(num_blocks), k_blocks, v_blocks, v_pot_blocks)
+    logits = jnp.einsum("bhxmd,bhxynd->bhxymn", q_blocks, k_band) / jnp.sqrt(head_dim)
+    logits = logits + u_blocks[..., None, :, None] + v_pot_band[..., None, :]
+    logits = jnp.where(
+        band_mask[None, None, :, :, None, None],
+        logits,
+        -jnp.inf,
+    )
+    weights = jnp.exp(logits)
+    out_blocks = jnp.einsum("bhxymn,bhxynd->bhxmd", weights, v_band)
     out = out_blocks.reshape(B, H, L, D)
     return out, (u_out, v_out, Q, K, V)
 
