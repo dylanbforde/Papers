@@ -143,7 +143,8 @@ def compute_global_uv(Q, K, n_iters=15, band_width=None):
             def scan_k(acc, elements):
                 k_block, v_block, is_valid = elements
                 def true_fn(_):
-                    S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block, k_block) * scale
+                    q_block_scaled = q_block * scale
+                    S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block_scaled, k_block)
                     val = S_block + v_block[..., None, :]
                     max_val = jnp.maximum(acc[0], jnp.max(val, axis=-1))
                     
@@ -182,7 +183,8 @@ def compute_global_uv(Q, K, n_iters=15, band_width=None):
             def scan_q2(acc, elements):
                 q_block, u_block, is_valid = elements
                 def true_fn(_):
-                    S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block, k_block) * scale
+                    q_block_scaled = q_block * scale
+                    S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block_scaled, k_block)
                     val = S_block + u_block[..., :, None]
                     max_val = jnp.maximum(acc[0], jnp.max(val, axis=-2))
                     
@@ -224,7 +226,9 @@ def tile_sinkhorn_kernel(q_ref, k_ref, v_ref, u_ref, v_pot_ref, o_ref):
     v_pot = v_pot_ref[..., 0]
 
     D = q.shape[-1]
-    logits = jnp.dot(q, k.T) / jnp.sqrt(D)
+    # BOLT ⚡: Pre-scale query block to replace O(M x N) scaling with O(M x D)
+    q_scaled = q / jnp.sqrt(D)
+    logits = jnp.dot(q_scaled, k.T)
     log_alpha = logits + u[:, None] + v_pot[None, :]
     o_ref[...] = jnp.dot(_exp_for_tpu(log_alpha), v)
 
@@ -324,6 +328,8 @@ def dq_kernel_multi(
 
     D = q_block.shape[-1]
     scale = 1.0 / jnp.sqrt(D)
+    # BOLT ⚡: Pre-scale query block to replace O(M x N) scaling with O(M x D)
+    q_block_scaled = q_block * scale
 
     N = K_ref.shape[0]
     BLOCK_N = 128
@@ -366,7 +372,7 @@ def dq_kernel_multi(
             exp_dv01 = _exp_for_tpu(v0_n - v1_n)
 
             # Score matrix
-            s_block = jnp.einsum("md,nd->mn", q_block, k_block) * scale
+            s_block = jnp.einsum("md,nd->mn", q_block_scaled, k_block)
             P22 = safe_exp(s_block + u2_m[:, None] + v2_n[None, :])
             z_block = jnp.einsum("me,ne->mn", do_block, v_mat_block)
 
@@ -414,6 +420,8 @@ def dk_dv_kernel_multi(
     UNROLL = 4
     iters = M // BLOCK_M
     scale = 1.0 / jnp.sqrt(D)
+    # BOLT ⚡: Pre-scale key block to replace O(N x M) scaling with O(N x D)
+    k_block_scaled = k_block * scale
 
     n = pl.program_id(0)
     start_block = jnp.maximum(0, n - W)
@@ -449,7 +457,7 @@ def dk_dv_kernel_multi(
             exp_du12 = _exp_for_tpu(u1_m - u2_m)
 
             # Score matrix
-            s_block_T = jnp.einsum("nd,md->nm", k_block, q_block) * scale
+            s_block_T = jnp.einsum("nd,md->nm", k_block_scaled, q_block)
             P22_T = safe_exp(s_block_T + v2_n[:, None] + u2_m[None, :])
             z_block_T = jnp.einsum("ne,me->nm", v_mat_block, do_block)
             
@@ -550,10 +558,11 @@ def _banded_compute_next_uv(Q, K, u_in, v_in, scale, BLOCK, num_blocks, W, slice
 
     def scan_v(carry, j):
         k_block = jax.lax.dynamic_slice_in_dim(K, j * BLOCK, BLOCK, axis=-2)
+        k_block_scaled = k_block * scale
         start_idx = jnp.minimum(jnp.maximum(0, j - W), num_blocks - slice_size)
         q_band = jax.lax.dynamic_slice_in_dim(Q, start_idx * BLOCK, slice_size * BLOCK, axis=-2)
         u_band = jax.lax.dynamic_slice_in_dim(u_new, start_idx * BLOCK, slice_size * BLOCK, axis=-1)
-        S_block = jnp.einsum("bhmd,bhnd->bhmn", q_band, k_block) * scale
+        S_block = jnp.einsum("bhmd,bhnd->bhmn", q_band, k_block_scaled)
         logits = S_block + u_band[..., :, None]
         abs_indices = start_idx + jnp.arange(slice_size * BLOCK) // BLOCK
         mask = jnp.abs(abs_indices - j) <= W
@@ -570,12 +579,13 @@ def _banded_matvec_P(Q, K, u_a, v_b, vec, scale, BLOCK, num_blocks, W, slice_siz
     if direction == "row":
         def scan_body(carry, i):
             q_block = jax.lax.dynamic_slice_in_dim(Q, i * BLOCK, BLOCK, axis=-2)
+            q_block_scaled = q_block * scale
             u_block = jax.lax.dynamic_slice_in_dim(u_a, i * BLOCK, BLOCK, axis=-1)
             start_idx = jnp.minimum(jnp.maximum(0, i - W), num_blocks - slice_size)
             k_band = jax.lax.dynamic_slice_in_dim(K, start_idx * BLOCK, slice_size * BLOCK, axis=-2)
             v_band = jax.lax.dynamic_slice_in_dim(v_b, start_idx * BLOCK, slice_size * BLOCK, axis=-1)
             vec_band = jax.lax.dynamic_slice_in_dim(vec, start_idx * BLOCK, slice_size * BLOCK, axis=-1)
-            S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block, k_band) * scale
+            S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block_scaled, k_band)
             A_block = safe_exp(S_block + u_block[..., :, None] + v_band[..., None, :])
             abs_indices = start_idx + jnp.arange(slice_size * BLOCK) // BLOCK
             mask = jnp.abs(abs_indices - i) <= W
@@ -588,12 +598,13 @@ def _banded_matvec_P(Q, K, u_a, v_b, vec, scale, BLOCK, num_blocks, W, slice_siz
         result = jnp.zeros_like(v_b)
         def scan_body(acc, i):
             q_block = jax.lax.dynamic_slice_in_dim(Q, i * BLOCK, BLOCK, axis=-2)
+            q_block_scaled = q_block * scale
             u_block = jax.lax.dynamic_slice_in_dim(u_a, i * BLOCK, BLOCK, axis=-1)
             vec_block = jax.lax.dynamic_slice_in_dim(vec, i * BLOCK, BLOCK, axis=-1)
             start_idx = jnp.minimum(jnp.maximum(0, i - W), num_blocks - slice_size)
             k_band = jax.lax.dynamic_slice_in_dim(K, start_idx * BLOCK, slice_size * BLOCK, axis=-2)
             v_band = jax.lax.dynamic_slice_in_dim(v_b, start_idx * BLOCK, slice_size * BLOCK, axis=-1)
-            S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block, k_band) * scale
+            S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block_scaled, k_band)
             A_block = safe_exp(S_block + u_block[..., :, None] + v_band[..., None, :])
             abs_indices = start_idx + jnp.arange(slice_size * BLOCK) // BLOCK
             mask = jnp.abs(abs_indices - i) <= W
@@ -632,6 +643,7 @@ def pallas_sinkhorn_bwd_full(n_iters, band_width, res, g):
     def pass1_body(carry, i):
         g_u, g_v = carry
         q_block = jax.lax.dynamic_slice_in_dim(Q, i * BLOCK, BLOCK, axis=-2)
+        q_block_scaled = q_block * scale
         u_block = jax.lax.dynamic_slice_in_dim(u2, i * BLOCK, BLOCK, axis=-1)
         do_block = jax.lax.dynamic_slice_in_dim(dO, i * BLOCK, BLOCK, axis=-2)
         start_idx = jnp.minimum(jnp.maximum(0, i - W), num_blocks - slice_size)
@@ -639,7 +651,7 @@ def pallas_sinkhorn_bwd_full(n_iters, band_width, res, g):
         v_band = jax.lax.dynamic_slice_in_dim(v2, start_idx * BLOCK, slice_size * BLOCK, axis=-1)
         V_mat_band = jax.lax.dynamic_slice_in_dim(V, start_idx * BLOCK, slice_size * BLOCK, axis=-2)
         Z_block = jnp.matmul(do_block, V_mat_band.transpose(0, 1, 3, 2))
-        S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block, k_band) * scale
+        S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block_scaled, k_band)
         A_block = safe_exp(S_block + u_block[..., :, None] + v_band[..., None, :])
         T_block = A_block * Z_block
         abs_indices = start_idx + jnp.arange(slice_size * BLOCK) // BLOCK
