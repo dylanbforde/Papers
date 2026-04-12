@@ -102,22 +102,34 @@ def train_pfam(method, max_hours, data_dir):
     optimizer = muon_optimizer(3e-4)
     opt_state = optimizer.init(params)
 
+    def stable_sinkhorn_probs(Q, K, scale):
+        """Compute potential-stabilized transport probabilities for Pfam training."""
+        u, v = ot_kernel.compute_global_uv(Q, K, n_iters=15, band_width=band_width)
+        u = jnp.nan_to_num(u, nan=0.0, posinf=0.0, neginf=0.0)
+        v = jnp.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0)
+        logits = jnp.einsum("bhmd,bhnd->bhmn", Q, K) * scale
+        logits = logits + u[..., :, None] + v[..., None, :]
+        logits = jnp.clip(logits, -40.0, 40.0)
+        probs = jax.nn.softmax(logits, axis=-1)
+        probs = jnp.nan_to_num(probs, nan=0.0)
+        denom = jnp.sum(probs, axis=-1, keepdims=True) + 1e-10
+        return probs / denom
+
     @jax.jit
     def train_step(p, opt, q, k, t):
         def loss_fn(params):
             Q = jnp.einsum("bhld,dp->bhlp", q, params["W_q"])
             K = jnp.einsum("bhld,dp->bhlp", k, params["W_k"])
             scale = 1.0 / jnp.sqrt(Q.shape[-1])
-            
             if method == "sinkhorn_ot":
-                _ = ot_kernel.pallas_flash_sinkhorn(Q, K, K, n_iters=15, band_width=band_width)
-                u, v = ot_kernel.compute_global_uv(Q, K, n_iters=15, band_width=band_width)
-                log_P = (jnp.einsum("bhmd,bhnd->bhmn", Q, K) * scale) + u[..., :, None] + v[..., None, :]
-                P = jax.nn.softmax(log_P, axis=-1)
+                O_pallas = ot_kernel.pallas_flash_sinkhorn(Q, K, K, n_iters=15, band_width=band_width)
+                P = stable_sinkhorn_probs(Q, K, scale)
+                aux_loss = 1e-4 * jnp.mean(jnp.square(jnp.nan_to_num(O_pallas)))
             else:
                 P = jax.nn.softmax(jnp.einsum("bhmd,bhnd->bhmn", Q, K) * scale, axis=-1)
-            
-            return -jnp.mean(jnp.sum(t * jnp.log(jnp.clip(P, 1e-10, 1.0)), axis=-1))
+                aux_loss = 0.0
+            ce_loss = -jnp.mean(jnp.sum(t * jnp.log(jnp.clip(P, 1e-10, 1.0)), axis=-1))
+            return ce_loss + aux_loss
 
         loss, grads = jax.value_and_grad(loss_fn)(p)
         updates, next_opt = optimizer.update(grads, opt, p)
@@ -129,7 +141,7 @@ def train_pfam(method, max_hours, data_dir):
     start = time.time()
     step = 0
     while (time.time() - start) < (max_hours * 3600):
-        q, k, t = ds.sample_batch(batch_size=4) # Multi-batch support
+        q, k, t = ds.sample_batch(batch_size=4)
         params, opt_state, loss = train_step(params, opt_state, q, k, t)
         
         if step % 50 == 0:

@@ -79,10 +79,21 @@ def safe_exp(x):
     t = x * LOG2E
     k = jnp.floor(t)                          # integer part
     r = t - k                                  # fractional part in [0, 1)
+    
+    # Cody-Waite guards for infinity
+    is_neg_inf = x == -jnp.inf
+    is_pos_inf = x == jnp.inf
+    
+    # Clean up t/k/r for inf cases to prevent NaN in polynomial
+    k = jnp.where(is_neg_inf | is_pos_inf, 0.0, k)
+    r = jnp.where(is_neg_inf | is_pos_inf, 0.0, r)
+    
     k = jnp.clip(k, -126.0, 127.0)            # clamp to float32 exponent range
     pow2_int = jnp.exp2(k)                     # 2^k via exponent bit manipulation
     pow2_frac = _poly_exp2_frac(r)             # 2^r via FMA polynomial
-    return pow2_int * pow2_frac
+    
+    res = pow2_int * pow2_frac
+    return jnp.where(is_neg_inf, 0.0, jnp.where(is_pos_inf, jnp.inf, res))
 
 
 def _exp_for_tpu(x):
