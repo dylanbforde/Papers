@@ -6,6 +6,7 @@ ZONE="us-east5-a"
 NODE_ID="sinkhorn-benchmark-cluster"
 RESOURCE_ID="sinkhorn-queue"
 BUCKET_NAME="sinkhorn-neurips"
+GCS_CKPT_DIR="gs://$BUCKET_NAME/checkpoints"
 
 # Function to guarantee cleanup on exit or failure
 cleanup() {
@@ -84,12 +85,12 @@ if [ $? -ne 0 ]; then
 fi
 
 # 5. Run training (Pfam Seed Alignment - Production Run)
-echo "Step 5: Starting training..."
+echo "Step 5: Starting training (with Preemption Checkpointing)..."
 gcloud compute tpus tpu-vm ssh $NODE_ID --project=$PROJECT_ID --zone=$ZONE --worker=all --command="
   export PATH=\"\$PATH:/home/\$USER/.local/bin\" && \
   cd sinkhorn-aligner && \
-  python3 src/benchmarks/benchmark_pfam_training.py --method sinkhorn_ot --max_hours 3.0 --data_dir data/pfam_shards && \
-  python3 src/benchmarks/benchmark_pfam_training.py --method flash_attention --max_hours 3.0 --data_dir data/pfam_shards"
+  python3 src/benchmarks/benchmark_pfam_training.py --method sinkhorn_ot --max_hours 3.0 --data_dir data/pfam_shards --gcs_ckpt_dir $GCS_CKPT_DIR && \
+  python3 src/benchmarks/benchmark_pfam_training.py --method flash_attention --max_hours 3.0 --data_dir data/pfam_shards --gcs_ckpt_dir $GCS_CKPT_DIR"
 
 if [ $? -ne 0 ]; then
   echo "✗ Training script failed. Logs should be above."

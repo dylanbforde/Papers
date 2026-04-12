@@ -3,6 +3,7 @@ Pfam Protein Alignment Benchmark (Sharded Production Edition)
 ============================================================
 
 Optimized for A-grade TPU v6e-8 hardware using sharded float16 embeddings.
+Includes GCS-resilient checkpointing for preemption resilience.
 """
 
 import os
@@ -16,6 +17,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import optax
+import pickle
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import ot_kernel
@@ -81,16 +83,45 @@ def muon_optimizer(lr):
     return optax.GradientTransformation(init_fn, update_fn)
 
 # ==============================================================================
+# Checkpointing Utilities
+# ==============================================================================
+
+def save_checkpoint(params, opt_state, step, local_dir, gcs_dir=None):
+    os.makedirs(local_dir, exist_ok=True)
+    path = os.path.join(local_dir, "ckpt.pkl")
+    with open(path, "wb") as f:
+        pickle.dump({"params": params, "opt_state": opt_state, "step": step}, f)
+    print(f"⌊ Checkpoint saved at step {step} -> {path}")
+    if gcs_dir:
+        gcs_path = os.path.join(gcs_dir, "ckpt.pkl")
+        print(f"⌊ Syncing to GCS: {gcs_path}")
+        os.system(f"gsutil cp {path} {gcs_path}")
+
+def load_checkpoint(local_dir, gcs_dir=None):
+    path = os.path.join(local_dir, "ckpt.pkl")
+    if gcs_dir:
+        gcs_path = os.path.join(gcs_dir, "ckpt.pkl")
+        print(f"⌊ Pulling checkpoint from GCS: {gcs_path}")
+        os.system(f"gsutil cp {gcs_path} {path}")
+    
+    if os.path.exists(path):
+        with open(path, "rb") as f:
+            data = pickle.load(f)
+        print(f"⌊ Resuming from checkpoint at step {data['step']}")
+        return data["params"], data["opt_state"], data["step"]
+    return None
+
+# ==============================================================================
 # Training Loop
 # ==============================================================================
 
-def train_pfam(method, max_hours, data_dir):
+def train_pfam(method, max_hours, data_dir, ckpt_dir, gcs_ckpt_dir=None):
     ds = PfamShardDataset(data_dir)
     num_pairs = ds.metadata['total_pairs']
-    
     D_in, D_proj = 320, 64
     band_width = 1024
     
+    # Initialization
     key = jax.random.PRNGKey(42)
     k1, k2, k3 = jax.random.split(key, 3)
     params = {
@@ -101,6 +132,12 @@ def train_pfam(method, max_hours, data_dir):
     
     optimizer = muon_optimizer(3e-4)
     opt_state = optimizer.init(params)
+    start_step = 0
+
+    # Resume if possible
+    ckpt_data = load_checkpoint(ckpt_dir, gcs_ckpt_dir)
+    if ckpt_data:
+        params, opt_state, start_step = ckpt_data
 
     def stable_sinkhorn_probs(Q, K, scale):
         """Compute potential-stabilized transport probabilities for Pfam training."""
@@ -136,19 +173,25 @@ def train_pfam(method, max_hours, data_dir):
         return optax.apply_updates(p, updates), next_opt, loss
 
     print(f"\n🚀 Sharded Production Training ({method}) on {num_pairs} Pfam pairs...")
-    print(f"   (Max Hours: {max_hours} | Shards: {ds.total_shards})")
+    print(f"   (Max Hours: {max_hours} | Shards: {ds.total_shards} | Resume From: {start_step})")
     
-    start = time.time()
-    step = 0
-    while (time.time() - start) < (max_hours * 3600):
+    start_time = time.time()
+    step = start_step
+    while (time.time() - start_time) < (max_hours * 3600):
         q, k, t = ds.sample_batch(batch_size=4)
         params, opt_state, loss = train_step(params, opt_state, q, k, t)
         
         if step % 50 == 0:
             jax.block_until_ready(loss)
-            print(f"Step {step:>6} | Loss: {float(loss):>8.4f} | Time: {int(time.time()-start)}s")
+            print(f"Step {step:>6} | Loss: {float(loss):>8.4f} | Time: {int(time.time()-start_time)}s")
+        
+        if step > 0 and step % 250 == 0:
+            save_checkpoint(params, opt_state, step, ckpt_dir, gcs_ckpt_dir)
+            
         step += 1
 
+    # Final Save
+    save_checkpoint(params, opt_state, step, ckpt_dir, gcs_ckpt_dir)
     print("\n✓ Sharded Pfam training complete.")
 
 if __name__ == "__main__":
@@ -156,5 +199,7 @@ if __name__ == "__main__":
     parser.add_argument("--method", choices=["flash_attention", "sinkhorn_ot"], required=True)
     parser.add_argument("--max_hours", type=float, default=3.0)
     parser.add_argument("--data_dir", default="./data/pfam_shards")
+    parser.add_argument("--ckpt_dir", default="./checkpoints")
+    parser.add_argument("--gcs_ckpt_dir", help="gs://bucket/path for redundant checkpointing")
     args = parser.parse_args()
-    train_pfam(args.method, args.max_hours, args.data_dir)
+    train_pfam(args.method, args.max_hours, args.data_dir, args.ckpt_dir, args.gcs_ckpt_dir)
