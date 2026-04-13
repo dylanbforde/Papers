@@ -34,7 +34,7 @@ Dylan B. Forde \\
 \maketitle
 
 \begin{abstract}
-We present a memory-efficient, fully differentiable Sinkhorn attention mechanism that scales entropic optimal transport (OT) to massive contexts on TPU hardware. While optimal transport provides a principled framework for discovering latent structure in sequence data, its application has been severely bottlenecked by quadratic memory requirements and divergent gradient approximations. Our key contribution is a novel \textit{multi-transport-plan backward pass} that correctly differentiates through truncated Sinkhorn iterations by utilizing distinct transport matrices at each chain-rule step. This resolves the fundamental limitation of prior implicit differentiation approaches whose gradients often fail to converge in practice. The forward pass uses block-wise Pallas kernels operating in $O(L)$ memory, while the backward pass computes exact gradients through the truncated unrolling using four distinct transport plans, all without materializing $L \times L$ intermediates. We demonstrate our approach on a protein family alignment benchmark from Pfam. Ultimately, our work bridges optimal transport theory and hardware-aware kernel design to enable differentiable alignment at scales previously inaccessible to OT methods.
+We present a memory-efficient Sinkhorn attention mechanism that scales entropic optimal transport (OT) to massive contexts on TPU hardware. While optimal transport provides a principled framework for discovering latent structure in sequence data, its application has been bottlenecked by quadratic memory requirements and expensive gradient computation. Our key contribution is a hardware-aware \textit{tail-refinement gradient estimator}: starting from stopped $T$-step Sinkhorn potentials, we unroll a short refinement tail and differentiate that surrogate exactly. In our TPU kernel we instantiate the $K=2$ case, which yields a staircase of four transport plans and admits an efficient single-base-plan factorization. The forward pass uses block-wise Pallas kernels operating in $O(L)$ memory, while the backward pass evaluates the masked tail estimator without materializing $L \times L$ intermediates. We validate the optimized $K=2$ kernel against exact autodiff of the same masked surrogate on small problems and benchmark it on a protein family alignment task from Pfam. Ultimately, our work bridges optimal transport theory and hardware-aware kernel design to enable practical differentiable alignment at scales previously inaccessible to OT methods.
 \end{abstract}
 
 \section{Introduction}
@@ -45,7 +45,7 @@ Recent work has explored differentiable relaxations of alignment, notably optima
 
 However, quadratic memory scaling and backward pass correctness have limited widespread adoption. Standard Sinkhorn implementations materializing $L \times L$ score matrices exhaust memory quickly. Furthermore, differentiating through Sinkhorn iterations is non-trivial; implicit differentiation via the adjoint system \citep{luise2018differential, bai2019deep} often diverges or requires solve steps that are numerically unstable.
 
-We address both challenges. Our forward and backward passes utilize block-wise Pallas kernels on TPUs, maintaining an $O(L)$ HBM footprint. Crucially, we introduce \textbf{multi-transport-plan truncated backpropagation}, which utilizes $k=2$ additional refinement iterations to produce exact gradients using four distinct transport matrices. We validate this on the Pfam benchmark.
+We address both challenges. Our forward and backward passes utilize block-wise Pallas kernels on TPUs, maintaining an $O(L)$ HBM footprint. Crucially, we introduce \textbf{multi-transport-plan tail refinement}: starting from stopped $T$-step Sinkhorn potentials, we unroll a short refinement tail and differentiate that surrogate. The TPU kernel implements the $K=2$ case using four transport matrices. We validate this on the Pfam benchmark.
 
 \section{Method}
 
@@ -54,22 +54,22 @@ The forward pass computes Sinkhorn potentials $u, v$ and output $O = PV$ in a ti
 \begin{equation}
     u_i = -\log\!\Bigl[\sum_{j} \exp(Q_i K_j^\top / \sqrt{d} + v_j)\Bigr]. % Updated to match code [2024-05-24]
 \end{equation}
-This strategy yields $O(L)$ HBM memory usage while maintaining hardware-efficient matrix multiplications. To further optimize TPU performance, we employ an \textbf{8-channel packing strategy} within the Pallas kernels. By packing potential histories and intermediate gradient vectors into two distinct tensors (\texttt{M\_data} for query-side variables and \texttt{N\_data} for key-side variables), each with $C=8$ channels, we significantly reduce kernel signatures and minimize VMEM pressure, ensuring compatibility with TPU v6e Trillium constraints.
+This strategy yields $O(L)$ HBM memory usage while maintaining hardware-efficient matrix multiplications. With band width $W$ and fixed head dimension, each Sinkhorn half-step costs $O(LW)$, so a $T$-step forward with a fixed-$K$ tail-refinement backward costs $O((T+K)LW)$ time; the quadratic $O(L^2)$ regime reappears only in the dense limit $W=\Theta(L)$. To further optimize TPU performance, we employ an \textbf{8-channel packing strategy} within the Pallas kernels. By packing potential histories and intermediate gradient vectors into two distinct tensors (\texttt{M\_data} for query-side variables and \texttt{N\_data} for key-side variables), each with $C=8$ channels, we significantly reduce kernel signatures and minimize VMEM pressure, ensuring compatibility with TPU v6e Trillium constraints.
 
 \subsection{Multi-Transport-Plan Backward Pass}
-Our core technical contribution is the derivation and implementation of a rigorous backward pass through the unrolled Sinkhorn chain. We prove that truncated backpropagation through $k$ iterations is more stable than implicit methods, provided the intermediate transport plans are handled correctly.
+Our core technical contribution is the derivation and implementation of a hardware-compatible backward pass for a short refinement tail appended to a stopped Sinkhorn solve. Rather than claiming exact autodiff of the full $T$-step forward map, we study the algebraic structure of this estimator and show how its transport plans can be factorized for efficient kernel execution.
 
-Starting from stopped-gradient potentials $u^{(0)}, v^{(0)}$, we recompute $k=2$ refinement iterations to obtain the chain $(u^{(1)}, v^{(1)}) \to (u^{(2)}, v^{(2)})$. 
+Starting from stopped-gradient potentials $u^{(0)}, v^{(0)}$, we recompute a short refinement tail. In the TPU kernel we use $K=2$ refinement iterations to obtain the chain $(u^{(1)}, v^{(1)}) \to (u^{(2)}, v^{(2)})$. 
 
-\begin{proposition}[Multi-Transport-Plan Gradient]\label{prop:multi_plan}
-The gradient $\partial \mathcal{L} / \partial S$ for $k=2$ unrolled Sinkhorn iterations receives contributions from five distinct sources, utilizing four distinct transport matrices $P^{(a,b)} = \exp(S + u^{(a)} + v^{(b)})$. 
+\begin{proposition}[K=2 Tail-Refinement Estimator]\label{prop:multi_plan}
+For the $K=2$ tail-refinement surrogate, the VJP with respect to the score matrix $S$ decomposes into five source terms involving four transport matrices $P^{(a,b)} = \exp(S + u^{(a)} + v^{(b)})$.
 \end{proposition}
 
 \paragraph{Hardware-Efficient Factorization.} While the formulation involves four matrices, we observe that for fixed $S$, any $P^{(a,b)}$ can be recovered from a base plan $P^{(1,1)}$ via element-wise vector scaling: 
 \begin{equation}
     P^{(a,b)} = P^{(1,1)} \odot \exp(u^{(a)} - u^{(1)}) \odot \exp(v^{(b)} - v^{(1)}).
 \end{equation}
-This factorization allows our Pallas kernels to compute the core $N^2$ transport coefficients only once, deriving the other terms through $O(N)$ operations. This reduces the computational overhead of the multi-transport pass from $4N^2$ to $\sim 1N^2$, matching the complexity of biased approximations while maintaining mathematical exactness. We provide a proof of this factorization and the resultant gradient bias in Appendix~\ref{app:proof}.
+This factorization allows our Pallas kernels to compute the core $N^2$ transport coefficients only once, deriving the other terms through $O(N)$ operations. This reduces the computational overhead of the multi-transport pass from $4N^2$ to $\sim 1N^2$. The optimized TPU backward is exact for the $K=2$ surrogate because it reconstructs the remaining staircase plans by exact row/column rescaling rather than approximating them with a single plan. The same orbit-factorized idea also yields an explicit fixed-$K$ backward beyond $K=2$, while residual-adaptive refinement remains a reference path. Production TPU runs use the fixed $K=2$ kernel and exact autodiff through the same masked surrogate is used for verification on small problems. Appendix~\ref{app:proof} records the algebraic identities used by the kernel.
 
 \section{Experiments}
 
@@ -105,9 +105,9 @@ The results demonstrate that while Sinkhorn is computationally more expensive (d
 
 \subsection{Alignment Performance}
 
-We evaluate alignment quality on a real genomic DNA alignment task. Using the Ensembl REST API, we download coding DNA sequences (CDS) from 30 well-characterized human--mouse orthologous gene pairs (e.g., \textit{BRCA2}, \textit{TP53}, \textit{EGFR}, \textit{KRAS}) with sequence lengths up to 8,192bp. We compute ground-truth pairwise alignments via Needleman--Wunsch global alignment and embed sequences using the Nucleotide Transformer (\nolinkurl{InstaDeepAI/nucleotide-transformer-v2-100m-multi-species}) with frozen backbone weights. Learnable Q/K/V projection heads are trained via MUON to minimize cross-entropy between the attention/transport matrix and the ground-truth alignment.
+We evaluate alignment quality on a real genomic DNA alignment task. Using the Ensembl REST API, we download coding DNA sequences (CDS) from 30 well-characterized human--mouse orthologous gene pairs (e.g., \textit{BRCA2}, \textit{TP53}, \textit{EGFR}, \textit{KRAS}) with sequence lengths up to 8,192bp. We compute ground-truth pairwise alignments via Needleman--Wunsch global alignment and embed sequences using the Nucleotide Transformer (\nolinkurl{InstaDeepAI/nucleotide-transformer-v2-100m-multi-species}) with frozen backbone weights. Learnable Q/K/V projection heads are trained under a masked alignment surrogate, while sparse cross-entropy on valid alignment targets is reported as the primary alignment-quality metric. For both Sinkhorn and Flash baselines we apply the same QR-based Stiefel retraction to the $Q/K$ projection heads after each optimizer step to stabilize score geometry without changing the attention definition. The implementation also supports a gap-aware ablation that appends a learned dustbin row/column block and supervises unmatched residues to a null state.
 
-Crucially, the ground-truth alignment approximates a permutation matrix (doubly-stochastic). Sinkhorn's transport plan is doubly-stochastic by construction and can express this target. Flash Attention produces row-stochastic matrices (rows sum to 1, columns do not) and structurally cannot represent a permutation. Both methods are trained for 2.5 wall-clock hours on a TPU v6e-1 (8 chips) with identical optimizers, learning rates, and batch sizes. Due to its $\sim$2000$\times$ faster per-step latency, Flash Attention completes orders of magnitude more gradient updates in the same budget.
+Crucially, the ground-truth alignment approximates a permutation matrix (doubly-stochastic). Sinkhorn's transport plan is doubly-stochastic by construction and can express this target. Flash Attention produces row-stochastic matrices (rows sum to 1, columns do not) and structurally cannot represent a permutation. Both methods are trained for 2.5 wall-clock hours on a TPU v6e-1 (8 chips) with identical optimizers, learning rates, and batch sizes. Due to its $\sim$2000$\times$ faster per-step latency, Flash Attention completes orders of magnitude more gradient updates in the same budget. In addition to sparse CE, we track a monotonicity-violation metric based on row barycenters of the predicted transport, which measures departures from order-preserving alignment geometry.
 
 % TODO: Add loss-vs-wallclock figure after TPU experiments
 % \begin{figure}[h]
@@ -118,7 +118,7 @@ Crucially, the ground-truth alignment approximates a permutation matrix (doubly-
 
 
 \section{Conclusion}
-We have developed a hardware-optimized, fully differentiable Sinkhorn attention mechanism for massive context lengths. By resolving the memory bottleneck via block-wise Pallas kernels and the gradient bottleneck via a novel multi-transport-plan backward pass, we enable high-accuracy Optimal Transport at scales previously inaccessible.
+We have developed a hardware-optimized Sinkhorn attention mechanism for massive context lengths. By resolving the memory bottleneck via block-wise Pallas kernels and the gradient bottleneck via a masked tail-refinement estimator, we enable practical Optimal Transport at scales previously inaccessible.
 
 \bibliographystyle{plainnat}
 \bibliography{references}
@@ -126,10 +126,10 @@ We have developed a hardware-optimized, fully differentiable Sinkhorn attention 
 \newpage
 \appendix
 
-\section{Proof of Proposition~1}
+\section{Algebraic Structure of the K=2 Tail-Refinement Estimator}
 \label{app:proof}
 
-We provide a formal proof in two parts: (A) the four transport matrices arising in the backward pass are strictly distinct whenever the Sinkhorn iterates have not converged, and (B) replacing all four matrices with a single $P^{(2,2)}$ introduces an exact, non-vanishing gradient bias.
+We record the exact factorization identities used by the TPU kernel. Throughout, potentials are understood modulo the standard additive Sinkhorn gauge, and the implementation uses a gauge-fixing convention when materializing them numerically.
 
 \paragraph{Notation.}
 The four transport matrices used in the backward pass are indexed by pairs drawn from the set $\mathcal{I} = \{(2,2),\,(2,1),\,(1,1),\,(1,0)\}$, defined as:
@@ -151,141 +151,32 @@ Setting the reference indices $(c,d) = (1,1)$, we obtain the element-wise scalin
 \begin{equation}
     P^{(a,b)}_{ij} = P^{(1,1)}_{ij} \cdot \exp(u^{(a)}_i - u^{(1)}_i) \cdot \exp(v^{(b)}_j - v^{(1)}_j).
 \end{equation}
-This factorization is exact for any $S, u, v$ and does not depend on convergence, ensuring that the optimized kernel computes gradients identical to the full unrolled unrolling.
+This factorization is exact for any $S, u, v$ and does not depend on convergence. The optimized kernel therefore does not approximate the staircase by a single plan; it materializes one base plan and reconstructs the remaining staircase plans by exact row/column rescaling.
 
-\subsection*{Part A: Distinctness of Transport Matrices}
+\subsection*{Part A: Gauge and Plan Separation}
 
-\begin{lemma}[Distinctness]\label{lem:distinct}
-If the iterate chain has not converged (i.e., at least one of $\Delta u^{(1)}$, $\Delta v^{(1)}$, $\Delta u^{(2)}$, $\Delta v^{(2)}$ is nonzero), then
+Sinkhorn potentials are only defined up to the additive gauge transformation
 \begin{equation}
-    P^{(a_1,b_1)} \neq P^{(a_2,b_2)} \quad \text{for all distinct pairs } (a_1,b_1)\neq(a_2,b_2)\in\mathcal{I}.
+    (u, v) \mapsto (u - c\mathbf{1}, v + c\mathbf{1}),
 \end{equation}
-\end{lemma}
+which leaves the transport plan unchanged. Consequently, equality of two staircase plans implies only that their underlying potentials agree up to this gauge. The implementation fixes the gauge numerically by centering the valid-query potentials after each update. Under this convention, non-convergence of the refinement tail on the active support generically leads to different staircase plans. The TPU kernel itself does not rely on pairwise distinctness; it relies only on the exact factorization identity stated above, which holds regardless of gauge.
 
-\begin{proof}
-Suppose for contradiction that $P^{(a_1,b_1)} = P^{(a_2,b_2)}$ for some $(a_1,b_1)\neq(a_2,b_2)$ in $\mathcal{I}$. For all $i,j$:
+\subsection*{Part B: Exactness of the Factorized $K=2$ Kernel}
+
+\begin{theorem}[Exact Single-Base-Plan Reconstruction]
+Consider the explicit $K=2$ tail-refinement VJP written in terms of the four staircase plans $P^{(2,2)}, P^{(2,1)}, P^{(1,1)}, P^{(1,0)}$. Replacing each non-base plan by its exact rescaled form
 \begin{equation}
-    \exp(S_{ij}+u^{(a_1)}_i+v^{(b_1)}_j) = \exp(S_{ij}+u^{(a_2)}_i+v^{(b_2)}_j).
+    P^{(a,b)}_{ij} = P^{(2,2)}_{ij} \cdot \exp(u^{(a)}_i-u^{(2)}_i) \cdot \exp(v^{(b)}_j-v^{(2)}_j)
 \end{equation}
-Taking logarithms, $(u^{(a_1)}_i-u^{(a_2)}_i)+(v^{(b_1)}_j-v^{(b_2)}_j)=0$ for all $i,j$. Fixing $j$ and varying $i$ shows the $u$-difference is a constant $c$ independent of $i$; fixing $i$ and varying $j$ then gives the $v$-difference equals $-c$ for all $j$. Hence:
-\begin{equation}\label{eq:shift}
-    u^{(a_1)} = u^{(a_2)} + c\mathbf{1}, \qquad v^{(b_1)} = v^{(b_2)} - c\mathbf{1}.
-\end{equation}
-We show $c=0$ by exhaustive case analysis over all six unordered pairs from $\mathcal{I}$.
-
-\medskip
-\noindent\textbf{Cases with a shared index} (three trivial cases)\textbf{.}
-\begin{itemize}
-    \item \textbf{$(2,2)$ vs $(2,1)$}: $a_1=a_2=2$, so $u^{(2)}=u^{(2)}+c\mathbf{1}$ immediately gives $c=0$.
-    \item \textbf{$(2,1)$ vs $(1,1)$}: $b_1=b_2=1$, so $v^{(1)}=v^{(1)}-c\mathbf{1}$ immediately gives $c=0$.
-    \item \textbf{$(1,1)$ vs $(1,0)$}: $a_1=a_2=1$, so $u^{(1)}=u^{(1)}+c\mathbf{1}$ immediately gives $c=0$.
-\end{itemize}
-
-\noindent\textbf{Cases where both indices differ} (three non-trivial cases)\textbf{.}
-For these cases, neither component of~\eqref{eq:shift} collapses trivially. We use the update equations~\eqref{eq:u_update_app}--\eqref{eq:v_update_app}, substituting only into the update rule that produced each iterate from its immediate predecessor in the chain.
-
-\medskip
-\noindent\textit{Case $(2,2)$ vs $(1,1)$}: $u^{(2)}=u^{(1)}+c\mathbf{1}$ and $v^{(2)}=v^{(1)}-c\mathbf{1}$.
-
-Define $D_j \coloneqq \sum_i\exp(S_{ij}+u^{(1)}_i)>0$. The $v^{(1)}$-update gives $v^{(1)}_j = -\log D_j$. The $v^{(2)}$-update uses $u^{(2)}=u^{(1)}+c$:
-\begin{equation}
-    v^{(2)}_j = -\log\!\bigl[e^c D_j\bigr] = -\log D_j - c.
-\end{equation}
-Applying the assumed shift $v^{(2)}_j = v^{(1)}_j - c$, we see that any $c$ satisfies this local step. However, the full chain of iterates is anchored by the stopped-gradient potentials $(u^{(0)}, v^{(0)})$, ensuring $c=0$ at convergence.
-
-\medskip
-\noindent\textit{Case $(2,1)$ vs $(1,0)$}: $u^{(2)}=u^{(1)}+c\mathbf{1}$ and $v^{(1)}=v^{(0)}-c\mathbf{1}$.
-
-Define $E_i \coloneqq \sum_j\exp(S_{ij}+v^{(0)}_j)>0$. The $u^{(1)}$-update gives $u^{(1)}_i = -\log E_i$. The $u^{(2)}$-update uses $v^{(1)}_j=v^{(0)}_j-c$:
-\begin{equation}
-    u^{(2)}_i = -\log\!\bigl[e^{-c}E_i\bigr] = -\log E_i + c.
-\end{equation}
-Applying the assumed shift $u^{(2)}_i = u^{(1)}_i + c$, we again recover $c=0$ consistency. 
-
-\medskip
-\noindent\textit{Case $(2,2)$ vs $(1,0)$}: $u^{(2)}=u^{(1)}+c\mathbf{1}$ and $v^{(2)}=v^{(0)}-c\mathbf{1}$.
-
-This is the deepest case. Using $D_j$ as above, the $v^{(1)}$ and $v^{(2)}$ updates yield $v^{(1)}_j = -\log[D_j]$ and $v^{(2)}_j = -\log[e^c D_j]$. From the shift $v^{(2)}_j = v^{(0)}_j - c$, we recover $v^{(0)}_j = c - \log[e^c D_j]$. This gives:
-\begin{equation}
-    \exp(S_{ij}+v^{(1)}_j) = \frac{\exp(S_{ij})}{D_j}, \qquad \exp(S_{ij}+v^{(0)}_j) = \frac{e^c\exp(S_{ij})}{e^c D_j} = \frac{\exp(S_{ij})}{D_j}.
-\end{equation}
-Define $F_i\coloneqq\sum_j\exp(S_{ij}+v^{(1)}_j)$ and $E_i\coloneqq\sum_j\exp(S_{ij}+v^{(0)}_j)$. The updates yield $u^{(2)}_i=-\log[F_i]$ and $u^{(1)}_i=-\log[E_i]$. Applying the shift $u^{(2)}_i = u^{(1)}_i + c$ gives $F_i = e^{-c}E_i$. Substituting the explicit forms:
-\begin{equation}
-    \sum_j\frac{\exp(S_{ij})}{D_j} = e^{-c}\sum_j\frac{\exp(S_{ij})}{D_j}.
-\end{equation}
-Since the sum is strictly positive, this implies $1 = e^{-c}$, so $c=0$.
-
-\medskip
-In every case, $P^{(a_1,b_1)}=P^{(a_2,b_2)}$ forces $c=0$, yielding $u^{(a_1)}=u^{(a_2)}$ and $v^{(b_1)}=v^{(b_2)}$. Since the iterate chain has not converged, at least two iterates are distinct, contradicting $c=0$ for the relevant pair. Hence $P^{(a_1,b_1)}\neq P^{(a_2,b_2)}$ for all distinct pairs.
-\end{proof}
-
-\subsection*{Part B: Gradient Bias Under the Single-$P$ Assumption}
-
-Let $\nabla_S\mathcal{L}_{\mathrm{multi}}$ denote the true gradient using all four transport matrices, and $\nabla_S\mathcal{L}_{\mathrm{single}}$ the approximation replacing every transport matrix with $P^{(2,2)}$. Define the pointwise bias $\mathcal{B}=\nabla_S\mathcal{L}_{\mathrm{single}}-\nabla_S\mathcal{L}_{\mathrm{multi}}$.
-
-From the Method section, the total gradient decomposes into five contributions:
-\begin{align*}
-    \Delta S^{(A)}_{mn} &= P^{(2,2)}_{mn}\cdot Z_{mn}, &\quad \Delta S^{(B)}_{mn} &= -P^{(2,2)}_{mn} \cdot g_{v,n},\\
-    \Delta S^{(C)}_{mn} &= -\delta u^{(2)}_m\cdot P^{(2,1)}_{mn}, &\quad \Delta S^{(D)}_{mn} &= -\delta v^{(1)}_n\cdot P^{(1,1)}_{mn},\\
-    \Delta S^{(E)}_{mn} &= -\delta u^{(1)}_m\cdot P^{(1,0)}_{mn},
-\end{align*}
-where $\delta u^{(2)}, \delta v^{(1)}, \delta u^{(1)}$ are the intermediate gradient vectors. 
-
-\begin{theorem}[Exact Gradient Bias]\label{thm:bias}
-The exact pointwise bias introduced by the single-$P$ approximation is:
-\begin{align}
-    \mathcal{B}_{mn} &= -\delta u^{(2)}_m\cdot P^{(2,1)}_{mn}\!\left(e^{\Delta v^{(1)}_n}-1\right) \label{eq:biasC_app}\\
-    &\quad -\delta v^{(1)}_n\cdot P^{(1,1)}_{mn}\!\left(e^{\Delta u^{(1)}_m+\Delta v^{(1)}_n}-1\right) \label{eq:biasD_app}\\
-    &\quad -\delta u^{(1)}_m\cdot P^{(1,0)}_{mn}\!\left(e^{\Delta u^{(1)}_m+\Delta v^{(0)}_n+\Delta v^{(1)}_n}-1\right). \label{eq:biasE_app}
-\end{align}
+leaves every gradient entry unchanged. Consequently, the optimized TPU kernel computes exactly the same $K=2$ surrogate gradient as explicit four-plan unrolling while materializing only one transport tile per block pair.
 \end{theorem}
 
 \begin{proof}
-Terms $A$ and $B$ already use $P^{(2,2)}$, leaving them unchanged: $\mathcal{B}^{(A)}=\mathcal{B}^{(B)}=0$.
-For the remaining terms, the approximation substitutes $P^{(2,2)}$:
-\begin{equation}
-    \mathcal{B}^{(k)}_{mn} = -\gamma^{(k)}\!\left(P^{(a_k,b_k)}_{mn} - P^{(2,2)}_{mn}\right).
-\end{equation}
-
-\noindent\textbf{Term C} ($\gamma^{(C)}_m = -\delta u^{(2)}_m$):
-The ratio is $P^{(2,2)}_{mn} / P^{(2,1)}_{mn} = \exp(v^{(2)}_n - v^{(1)}_n) = e^{\Delta v^{(1)}_n}$. Thus, $P^{(2,2)}_{mn} - P^{(2,1)}_{mn} = P^{(2,1)}_{mn}(e^{\Delta v^{(1)}_n}-1)$, yielding Eq.~\eqref{eq:biasC_app}.
-
-\medskip
-\noindent\textbf{Term D} ($\gamma^{(D)}_n = -\delta v^{(1)}_n$):
-The ratio is $P^{(2,2)}_{mn} / P^{(1,1)}_{mn} = \exp(u^{(2)}_m - u^{(1)}_m + v^{(2)}_n - v^{(1)}_n) = e^{\Delta u^{(1)}_m + \Delta v^{(1)}_n}$. Thus, $P^{(2,2)}_{mn} - P^{(1,1)}_{mn} = P^{(1,1)}_{mn}(e^{\Delta u^{(1)}_m+\Delta v^{(1)}_n}-1)$, yielding Eq.~\eqref{eq:biasD_app}.
-
-\medskip
-\noindent\textbf{Term E} ($\gamma^{(E)}_m = -\delta u^{(1)}_m$):
-The ratio is $P^{(2,2)}_{mn} / P^{(1,0)}_{mn} = \exp(u^{(2)}_m - u^{(1)}_m + v^{(2)}_n - v^{(0)}_n) = e^{\Delta u^{(1)}_m + \Delta v^{(1)}_n + \Delta v^{(0)}_n}$, yielding Eq.~\eqref{eq:biasE_app}.
-
-Summing the three contributions yields the stated expression.
+The $K=2$ VJP is a sum of five element-wise source terms, each of which is the product of a row factor, a column factor, and one staircase plan. Terms using $P^{(2,2)}$ are unchanged. For the remaining terms, substitute the rescaling identity above. The exponential row and column factors are exactly the same factors that explicit unrolling would attach to the corresponding staircase plan, so every element of every source term is preserved. Summing the preserved source terms yields the same gradient tensor entrywise.
 \end{proof}
 
-\begin{corollary}[Non-Vanishing Component Bias]\label{cor:nonvanishing}
-Define $\varepsilon_T \coloneqq \max\bigl(\|\Delta u^{(1)}\|_\infty,\,\|\Delta v^{(1)}\|_\infty\bigr)$, which is strictly positive whenever the $T$-step forward Sinkhorn has not converged. If $\delta u^{(2)} \neq \mathbf{0}$, the individual bias components do not trivially vanish. Specifically, the Term C bias satisfies:
-\begin{equation}
-    \|\mathcal{B}^{(C)}\|_\infty \geq (1 - e^{-\varepsilon_T}) \cdot \min_{m,n} P^{(2,1)}_{mn} \cdot \|\delta u^{(2)}\|_\infty \; > \; 0.
-\end{equation}
-\end{corollary}
-
-\begin{proof}
-Focus on term $C$. By definition of $\varepsilon_T$, there exists at least one index $n^*$ where $|\Delta v^{(1)}_{n^*}| \geq \varepsilon_T > 0$. For any real $x$, the function $|e^x - 1|$ is asymmetric but bounded below by $1 - e^{-|x|}$. Therefore, since $|\Delta v^{(1)}_{n^*}| \geq \varepsilon_T$:
-\begin{equation}
-    |e^{\Delta v^{(1)}_{n^*}} - 1| \geq 1 - e^{-\varepsilon_T}.
-\end{equation}
-Because $\delta u^{(2)} \neq \mathbf{0}$, there exists an index $m^*$ where $|\delta u^{(2)}_{m^*}| = \|\delta u^{(2)}\|_\infty > 0$. Evaluating the absolute bias at the coordinate $(m^*, n^*)$:
-\begin{equation}
-    |\mathcal{B}^{(C)}_{m^*, n^*}| = |\delta u^{(2)}_{m^*}| \cdot P^{(2,1)}_{m^*,n^*} \cdot |e^{\Delta v^{(1)}_{n^*}} - 1|.
-\end{equation}
-Substituting the lower bounds:
-\begin{equation}
-    |\mathcal{B}^{(C)}_{m^*, n^*}| \geq \|\delta u^{(2)}\|_\infty \cdot \min_{m,n} P^{(2,1)}_{mn} \cdot (1 - e^{-\varepsilon_T}).
-\end{equation}
-Since $S$ is finite, all entries of $P^{(2,1)}$ are strictly positive. Since $\varepsilon_T > 0$, the factor $(1 - e^{-\varepsilon_T})$ is strictly positive. Therefore, the maximum absolute entry of $\mathcal{B}^{(C)}$ is strictly greater than zero. Barring exact pathological cancellation between terms C, D, and E (which scale with distinct matrices $P^{(2,1)}, P^{(1,1)}, P^{(1,0)}$), the total gradient bias $\mathcal{B}$ remains non-zero.
-\end{proof}
-
-\begin{remark}[Multiplicative Error at High-Confidence Positions]
-Each bias term scales multiplicatively with the true transport entry $P^{(a_k,b_k)}_{mn}$. At positions of high alignment confidence (large $P$ entries), the exponential error factor multiplies a large base, systematically corrupting the gradient components that correspond to the most certain alignments. This directional bias is the mechanism by which single-$P$ methods stagnate: the optimizer receives incorrect reinforcement precisely where it should be most confident.
+\begin{remark}[Adaptive Tail and Reference Path]
+The implementation also supports a residual-adaptive refinement schedule, which continues the stopped tail until either a prescribed maximum depth or a masked $\ell_\infty$ potential residual threshold is reached. This mode is useful for analysis, but the production TPU kernel fixes $K=2$ for throughput. For fixed depths beyond $K=2$, we use the same orbit-factorized reconstruction to avoid falling back to full autodiff. We validate the optimized masked backward against exact autodiff through the same banded surrogate on small problems.
 \end{remark}
 
 \end{document}

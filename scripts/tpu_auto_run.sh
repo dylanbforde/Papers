@@ -1,5 +1,7 @@
 #!/bin/bash
 # scripts/tpu_auto_run.sh
+set -euo pipefail
+export CLOUDSDK_CORE_DISABLE_PROMPTS=1
 
 PROJECT_ID="sinkhorn-neurips"
 ZONE="us-east5-a"
@@ -7,6 +9,12 @@ NODE_ID="sinkhorn-benchmark-cluster"
 RESOURCE_ID="sinkhorn-queue"
 BUCKET_NAME="sinkhorn-neurips"
 GCS_CKPT_DIR="gs://$BUCKET_NAME/checkpoints"
+ACTIVE_ACCOUNT="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null || true)"
+
+if [ -z "$ACTIVE_ACCOUNT" ]; then
+  echo "✗ No active gcloud account found. Run 'gcloud auth login' or 'gcloud config set account ACCOUNT' before launching TPU jobs."
+  exit 1
+fi
 
 # Function to guarantee cleanup on exit or failure
 cleanup() {
@@ -21,7 +29,7 @@ trap cleanup EXIT
 echo "Step 1: Queuing TPU..."
 gcloud compute tpus queued-resources create $RESOURCE_ID \
   --project=$PROJECT_ID --zone=$ZONE --node-id=$NODE_ID \
-  --accelerator-type=v6e-8 --runtime-version=tpu-ubuntu2204-base 
+  --accelerator-type=v6e-8 --runtime-version=tpu-ubuntu2204-base --quiet
 
 # 2. Wait until ACTIVE
 echo "Step 2: Waiting for TPU to become ACTIVE..."
@@ -48,10 +56,12 @@ done
 # 3. Install dependencies
 echo "Step 3: Installing dependencies..."
 gcloud compute tpus tpu-vm ssh $NODE_ID --project=$PROJECT_ID --zone=$ZONE --worker=all --command="
+  set -euo pipefail && \
+  export DEBIAN_FRONTEND=noninteractive && \
   sudo apt-get update -qq && sudo apt-get install -y -qq python3-pip git && \
   export PATH=\"\$PATH:/home/\$USER/.local/bin\" && \
   pip install -U -q jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html && \
-  pip install -U -q optax transformers torch"
+  pip install -U -q optax" --quiet --ssh-flag="-o StrictHostKeyChecking=no" --ssh-flag="-o UserKnownHostsFile=/dev/null"
 
 if [ $? -ne 0 ]; then
   echo "✗ Dependency installation failed."
@@ -60,12 +70,16 @@ fi
 
 # 4. Clone or update repo
 echo "Step 4: Cloning/updating repository..."
-gcloud compute tpus tpu-vm ssh $NODE_ID --project=$PROJECT_ID --zone=$ZONE --ssh-flag="-A" --command="
+gcloud compute tpus tpu-vm ssh $NODE_ID --project=$PROJECT_ID --zone=$ZONE --command="
+  set -euo pipefail && \
+  export GIT_TERMINAL_PROMPT=0 && \
   if [ -d sinkhorn-aligner ]; then
-    cd sinkhorn-aligner && git pull
+    cd sinkhorn-aligner && \
+    git remote set-url origin https://github.com/dylanbforde/sinkhorn-aligner.git && \
+    git pull --rebase
   else
-    GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=no' git clone git@github.com:dylanbforde/sinkhorn-aligner.git
-  fi"
+    git clone --depth 1 https://github.com/dylanbforde/sinkhorn-aligner.git
+  fi" --quiet --ssh-flag="-o StrictHostKeyChecking=no" --ssh-flag="-o UserKnownHostsFile=/dev/null"
 
 if [ $? -ne 0 ]; then
   echo "✗ Repo clone failed."
@@ -75,9 +89,10 @@ fi
 # 4b. Fetch Pfam Shards from GCS (Rapid Pre-fetching)
 echo "Step 4b: Fetching pre-computed Pfam shards from gs://$BUCKET_NAME..."
 gcloud compute tpus tpu-vm ssh $NODE_ID --project=$PROJECT_ID --zone=$ZONE --worker=all --command="
+  set -euo pipefail && \
   cd sinkhorn-aligner && \
   mkdir -p data/pfam_shards && \
-  gsutil -m cp -r gs://$BUCKET_NAME/pfam_shards/* data/pfam_shards/"
+  gsutil -m cp -r gs://$BUCKET_NAME/pfam_shards/* data/pfam_shards/" --quiet --ssh-flag="-o StrictHostKeyChecking=no" --ssh-flag="-o UserKnownHostsFile=/dev/null"
 
 if [ $? -ne 0 ]; then
   echo "✗ GCS Fetch failed. Ensure you have run the offline embedding job first."
@@ -87,10 +102,11 @@ fi
 # 5. Run training (Pfam Seed Alignment - Production Run)
 echo "Step 5: Starting training (with Preemption Checkpointing)..."
 gcloud compute tpus tpu-vm ssh $NODE_ID --project=$PROJECT_ID --zone=$ZONE --worker=all --command="
+  set -euo pipefail && \
   export PATH=\"\$PATH:/home/\$USER/.local/bin\" && \
   cd sinkhorn-aligner && \
-  python3 src/benchmarks/benchmark_pfam_training.py --method sinkhorn_ot --max_hours 3.0 --data_dir data/pfam_shards --gcs_ckpt_dir $GCS_CKPT_DIR && \
-  python3 src/benchmarks/benchmark_pfam_training.py --method flash_attention --max_hours 3.0 --data_dir data/pfam_shards --gcs_ckpt_dir $GCS_CKPT_DIR"
+  python3 -u src/benchmarks/benchmark_pfam_training.py --method sinkhorn_ot --max_hours 3.0 --data_dir data/pfam_shards --gcs_ckpt_dir $GCS_CKPT_DIR --band_width 1024 --n_iters 15 --sinkhorn_gradient_mode tail_refinement --sinkhorn_refine_steps 2 --projection_manifold stiefel_qk --gap_mode none --metric_every 50 --autotune_batch_size --autotune_max_per_device_batch_size 8 --batch_size_file checkpoints/pfam_batch_size.json --checkpoint_every 250 && \
+  python3 -u src/benchmarks/benchmark_pfam_training.py --method flash_attention --max_hours 3.0 --data_dir data/pfam_shards --gcs_ckpt_dir $GCS_CKPT_DIR --band_width 1024 --n_iters 15 --projection_manifold stiefel_qk --gap_mode none --metric_every 50 --batch_size_file checkpoints/pfam_batch_size.json --checkpoint_every 250" --quiet --ssh-flag="-o StrictHostKeyChecking=no" --ssh-flag="-o UserKnownHostsFile=/dev/null"
 
 if [ $? -ne 0 ]; then
   echo "✗ Training script failed. Logs should be above."
