@@ -3,6 +3,9 @@
 set -euo pipefail
 export CLOUDSDK_CORE_DISABLE_PROMPTS=1
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 PROJECT_ID="${PROJECT_ID:-sinkhorn-neurips}"
 ZONE="${ZONE:-us-east5-a}"
 NODE_ID="${NODE_ID:-sinkhorn-k-ablation-cluster}"
@@ -12,6 +15,8 @@ GCS_CKPT_ROOT="${GCS_CKPT_ROOT:-gs://$BUCKET_NAME/checkpoints_k_ablation}"
 K_VALUES="${K_VALUES:-2 4}"
 MAX_HOURS_PER_RUN="${MAX_HOURS_PER_RUN:-0.25}"
 ACTIVE_ACCOUNT="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null || true)"
+SOURCE_COMMIT="${SOURCE_COMMIT:-$(git -C "$REPO_ROOT" rev-parse HEAD)}"
+SOURCE_ARCHIVE="${SOURCE_ARCHIVE:-/tmp/sinkhorn-aligner-${SOURCE_COMMIT}.tar.gz}"
 
 if [ -z "$ACTIVE_ACCOUNT" ]; then
   echo "✗ No active gcloud account found. Run 'gcloud auth login' or 'gcloud config set account ACCOUNT' before launching TPU jobs."
@@ -55,22 +60,23 @@ echo "Step 3: Installing dependencies..."
 gcloud compute tpus tpu-vm ssh "$NODE_ID" --project="$PROJECT_ID" --zone="$ZONE" --worker=all --command="
   set -euo pipefail && \
   export DEBIAN_FRONTEND=noninteractive && \
-  sudo apt-get update -qq && sudo apt-get install -y -qq python3-pip git && \
+  sudo apt-get update -qq && sudo apt-get install -y -qq python3-pip && \
   export PATH=\"\$PATH:/home/\$USER/.local/bin\" && \
   pip install -U -q jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html && \
   pip install -U -q optax" --quiet --ssh-flag="-o StrictHostKeyChecking=no" --ssh-flag="-o UserKnownHostsFile=/dev/null"
 
-echo "Step 4: Cloning/updating repository..."
-gcloud compute tpus tpu-vm ssh "$NODE_ID" --project="$PROJECT_ID" --zone="$ZONE" --command="
+echo "Step 4: Packaging and uploading source snapshot at commit $SOURCE_COMMIT..."
+git -C "$REPO_ROOT" archive --format=tar.gz --output="$SOURCE_ARCHIVE" "$SOURCE_COMMIT"
+gcloud compute tpus tpu-vm ssh "$NODE_ID" --project="$PROJECT_ID" --zone="$ZONE" --worker=all --command="
   set -euo pipefail && \
-  export GIT_TERMINAL_PROMPT=0 && \
-  if [ -d sinkhorn-aligner ]; then
-    cd sinkhorn-aligner && \
-    git remote set-url origin https://github.com/dylanbforde/sinkhorn-aligner.git && \
-    git pull --rebase
-  else
-    git clone --depth 1 https://github.com/dylanbforde/sinkhorn-aligner.git
-  fi" --quiet --ssh-flag="-o StrictHostKeyChecking=no" --ssh-flag="-o UserKnownHostsFile=/dev/null"
+  rm -rf sinkhorn-aligner && \
+  mkdir -p sinkhorn-aligner" --quiet --ssh-flag="-o StrictHostKeyChecking=no" --ssh-flag="-o UserKnownHostsFile=/dev/null"
+gcloud compute tpus tpu-vm scp "$SOURCE_ARCHIVE" "$NODE_ID:~/sinkhorn-aligner.tar.gz" --project="$PROJECT_ID" --zone="$ZONE" --worker=all --quiet --scp-flag="-o StrictHostKeyChecking=no" --scp-flag="-o UserKnownHostsFile=/dev/null"
+gcloud compute tpus tpu-vm ssh "$NODE_ID" --project="$PROJECT_ID" --zone="$ZONE" --worker=all --command="
+  set -euo pipefail && \
+  tar -xzf ~/sinkhorn-aligner.tar.gz -C sinkhorn-aligner && \
+  rm -f ~/sinkhorn-aligner.tar.gz && \
+  echo source_commit=$SOURCE_COMMIT" --quiet --ssh-flag="-o StrictHostKeyChecking=no" --ssh-flag="-o UserKnownHostsFile=/dev/null"
 
 echo "Step 4b: Fetching pre-computed Pfam shards from gs://$BUCKET_NAME..."
 gcloud compute tpus tpu-vm ssh "$NODE_ID" --project="$PROJECT_ID" --zone="$ZONE" --worker=all --command="
