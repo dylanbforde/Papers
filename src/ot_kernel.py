@@ -224,7 +224,9 @@ def tile_sinkhorn_kernel(q_ref, k_ref, v_ref, u_ref, v_pot_ref, o_ref):
     v_pot = v_pot_ref[..., 0]
 
     D = q.shape[-1]
-    logits = jnp.dot(q, k.T) / jnp.sqrt(D)
+    # MACH ⚡: Pre-scaled query block by 1/sqrt(D) to replace O(M*N) logits scaling with O(M*D) scaling.
+    q_scaled = q * (1.0 / jnp.sqrt(D))
+    logits = jnp.dot(q_scaled, k.T)
     log_alpha = logits + u[:, None] + v_pot[None, :]
     o_ref[...] = jnp.dot(_exp_for_tpu(log_alpha), v)
 
@@ -325,6 +327,9 @@ def dq_kernel_multi(
     D = q_block.shape[-1]
     scale = 1.0 / jnp.sqrt(D)
 
+    # MACH ⚡: Pre-scaled query block by 1/sqrt(D) outside the unrolled loop to replace O(M*N) matrix scaling with O(M*D) vector scaling.
+    q_block_scaled = q_block * scale
+
     N = K_ref.shape[0]
     BLOCK_N = 128
     UNROLL = 4
@@ -366,7 +371,7 @@ def dq_kernel_multi(
             exp_dv01 = _exp_for_tpu(v0_n - v1_n)
 
             # Score matrix
-            s_block = jnp.einsum("md,nd->mn", q_block, k_block) * scale
+            s_block = jnp.einsum("md,nd->mn", q_block_scaled, k_block)
             P22 = safe_exp(s_block + u2_m[:, None] + v2_n[None, :])
             z_block = jnp.einsum("me,ne->mn", do_block, v_mat_block)
 
@@ -415,6 +420,9 @@ def dk_dv_kernel_multi(
     iters = M // BLOCK_M
     scale = 1.0 / jnp.sqrt(D)
 
+    # MACH ⚡: Pre-scaled key block by 1/sqrt(D) outside the unrolled loop to replace O(M*N) matrix scaling with O(N*D) vector scaling.
+    k_block_scaled = k_block * scale
+
     n = pl.program_id(0)
     start_block = jnp.maximum(0, n - W)
     end_block = jnp.minimum(iters, n + W + 1)
@@ -449,7 +457,7 @@ def dk_dv_kernel_multi(
             exp_du12 = _exp_for_tpu(u1_m - u2_m)
 
             # Score matrix
-            s_block_T = jnp.einsum("nd,md->nm", k_block, q_block) * scale
+            s_block_T = jnp.einsum("nd,md->nm", k_block_scaled, q_block)
             P22_T = safe_exp(s_block_T + v2_n[:, None] + u2_m[None, :])
             z_block_T = jnp.einsum("ne,me->nm", v_mat_block, do_block)
             
