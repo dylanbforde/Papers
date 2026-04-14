@@ -334,8 +334,18 @@ def flash_alignment_barycenters(Q, K, q_mask, k_mask, band_width):
     return jnp.where(q_mask[:, None, :], bary, 0.0)
 
 
-def sinkhorn_alignment_barycenters(Q, K, q_mask, k_mask, n_iters, band_width):
-    scale = 1.0 / jnp.sqrt(Q.shape[-1])
+def sinkhorn_alignment_barycenters(
+    Q,
+    K,
+    q_mask,
+    k_mask,
+    n_iters,
+    band_width,
+    epsilon,
+    epsilon_scaling_steps,
+    epsilon_scaling_factor,
+):
+    scale = 1.0 / (jnp.sqrt(Q.shape[-1]) * epsilon)
     u, v = ot_kernel.compute_global_uv(
         Q,
         K,
@@ -343,6 +353,9 @@ def sinkhorn_alignment_barycenters(Q, K, q_mask, k_mask, n_iters, band_width):
         band_width=band_width,
         q_mask=q_mask,
         k_mask=k_mask,
+        epsilon=epsilon,
+        epsilon_scaling_steps=epsilon_scaling_steps,
+        epsilon_scaling_factor=epsilon_scaling_factor,
     )
     logits = jnp.einsum("bhmd,bhnd->bhmn", Q, K) * scale
     logits = logits + u[..., :, None] + v[..., None, :]
@@ -376,6 +389,9 @@ def sinkhorn_outputs(
     gradient_mode,
     refine_steps,
     refine_tolerance,
+    epsilon,
+    epsilon_scaling_steps,
+    epsilon_scaling_factor,
 ):
     return ot_kernel.sinkhorn_attention(
         Q,
@@ -387,6 +403,9 @@ def sinkhorn_outputs(
         k_mask=k_mask,
         refine_steps=refine_steps,
         refine_tolerance=refine_tolerance,
+        epsilon=epsilon,
+        epsilon_scaling_steps=epsilon_scaling_steps,
+        epsilon_scaling_factor=epsilon_scaling_factor,
         gradient_mode=gradient_mode,
     )
 
@@ -405,6 +424,9 @@ def output_reconstruction_loss(
     sinkhorn_gradient_mode,
     sinkhorn_refine_steps,
     sinkhorn_refine_tolerance,
+    sinkhorn_epsilon,
+    sinkhorn_epsilon_scaling_steps,
+    sinkhorn_epsilon_scaling_factor,
     gap_mode,
     params,
 ):
@@ -434,6 +456,9 @@ def output_reconstruction_loss(
             gradient_mode=sinkhorn_gradient_mode,
             refine_steps=sinkhorn_refine_steps,
             refine_tolerance=sinkhorn_refine_tolerance,
+            epsilon=sinkhorn_epsilon,
+            epsilon_scaling_steps=sinkhorn_epsilon_scaling_steps,
+            epsilon_scaling_factor=sinkhorn_epsilon_scaling_factor,
         )
     else:
         outputs = flash_attention_outputs(Q, K, V, q_mask, k_mask, band_width=band_width)
@@ -442,7 +467,19 @@ def output_reconstruction_loss(
     return jnp.sum(jnp.where(active_mask[:, None, :], sq_error, 0.0)) / denom
 
 
-def sparse_ce_metric(Q, K, target_cols, target_mask, q_mask, k_mask, n_iters, band_width):
+def sparse_ce_metric(
+    Q,
+    K,
+    target_cols,
+    target_mask,
+    q_mask,
+    k_mask,
+    n_iters,
+    band_width,
+    epsilon,
+    epsilon_scaling_steps,
+    epsilon_scaling_factor,
+):
     # Exact sparse CE metric computed from masked potentials; expensive, optional.
     u, v = ot_kernel.compute_global_uv(
         Q,
@@ -451,9 +488,12 @@ def sparse_ce_metric(Q, K, target_cols, target_mask, q_mask, k_mask, n_iters, ba
         band_width=band_width,
         q_mask=q_mask,
         k_mask=k_mask,
+        epsilon=epsilon,
+        epsilon_scaling_steps=epsilon_scaling_steps,
+        epsilon_scaling_factor=epsilon_scaling_factor,
     )
 
-    scale = 1.0 / jnp.sqrt(Q.shape[-1])
+    scale = 1.0 / (jnp.sqrt(Q.shape[-1]) * epsilon)
     safe_cols, active_mask = _prepare_sparse_supervision(target_cols, target_mask, q_mask, k_mask)
     matched_k = _batch_take_rows(K, safe_cols)
     matched_v = _batch_take_last(v, safe_cols)
@@ -491,6 +531,9 @@ def build_train_step(
     sinkhorn_gradient_mode,
     sinkhorn_refine_steps,
     sinkhorn_refine_tolerance,
+    sinkhorn_epsilon,
+    sinkhorn_epsilon_scaling_steps,
+    sinkhorn_epsilon_scaling_factor,
     projection_manifold,
     gap_mode,
 ):
@@ -512,6 +555,9 @@ def build_train_step(
                 sinkhorn_gradient_mode,
                 sinkhorn_refine_steps,
                 sinkhorn_refine_tolerance,
+                sinkhorn_epsilon,
+                sinkhorn_epsilon_scaling_steps,
+                sinkhorn_epsilon_scaling_factor,
                 gap_mode,
                 model_params,
             )
@@ -530,7 +576,15 @@ def build_train_step(
     return train_step
 
 
-def build_metric_step(method, n_iters, band_width, gap_mode):
+def build_metric_step(
+    method,
+    n_iters,
+    band_width,
+    gap_mode,
+    sinkhorn_epsilon,
+    sinkhorn_epsilon_scaling_steps,
+    sinkhorn_epsilon_scaling_factor,
+):
     @functools.partial(jax.pmap, axis_name="devices")
     def metric_step(params, emb_q, emb_k, target_cols, target_mask, q_mask, k_mask):
         Q, K, V = _project_qkv(params, emb_q, emb_k)
@@ -547,8 +601,30 @@ def build_metric_step(method, n_iters, band_width, gap_mode):
         )
         band_width_eff = _effective_band_width(band_width, gap_mode, target_cols.shape[-1] - DUSTBIN_BLOCK_SIZE)
         if method == "sinkhorn_ot":
-            ce_metric = sparse_ce_metric(Q, K, target_cols, target_mask, q_mask, k_mask, n_iters, band_width_eff)
-            barycenters = sinkhorn_alignment_barycenters(Q, K, q_mask, k_mask, n_iters, band_width_eff)
+            ce_metric = sparse_ce_metric(
+                Q,
+                K,
+                target_cols,
+                target_mask,
+                q_mask,
+                k_mask,
+                n_iters,
+                band_width_eff,
+                sinkhorn_epsilon,
+                sinkhorn_epsilon_scaling_steps,
+                sinkhorn_epsilon_scaling_factor,
+            )
+            barycenters = sinkhorn_alignment_barycenters(
+                Q,
+                K,
+                q_mask,
+                k_mask,
+                n_iters,
+                band_width_eff,
+                sinkhorn_epsilon,
+                sinkhorn_epsilon_scaling_steps,
+                sinkhorn_epsilon_scaling_factor,
+            )
         else:
             ce_metric = flash_sparse_ce_metric(Q, K, target_cols, target_mask, q_mask, k_mask, band_width_eff)
             barycenters = flash_alignment_barycenters(Q, K, q_mask, k_mask, band_width_eff)
@@ -608,6 +684,9 @@ def autotune_per_device_batch_size(
     sinkhorn_gradient_mode,
     sinkhorn_refine_steps,
     sinkhorn_refine_tolerance,
+    sinkhorn_epsilon,
+    sinkhorn_epsilon_scaling_steps,
+    sinkhorn_epsilon_scaling_factor,
     projection_manifold,
     gap_mode,
     max_per_device_batch_size,
@@ -638,6 +717,9 @@ def autotune_per_device_batch_size(
                 sinkhorn_gradient_mode,
                 sinkhorn_refine_steps,
                 sinkhorn_refine_tolerance,
+                sinkhorn_epsilon,
+                sinkhorn_epsilon_scaling_steps,
+                sinkhorn_epsilon_scaling_factor,
                 projection_manifold,
                 gap_mode,
             )
@@ -691,6 +773,9 @@ def train_pfam(
     sinkhorn_gradient_mode="tail_refinement",
     sinkhorn_refine_steps=2,
     sinkhorn_refine_tolerance=None,
+    sinkhorn_epsilon=1.0,
+    sinkhorn_epsilon_scaling_steps=0,
+    sinkhorn_epsilon_scaling_factor=2.0,
     projection_manifold="none",
     gap_mode="none",
 ):
@@ -710,6 +795,12 @@ def train_pfam(
         raise ValueError("sinkhorn_refine_steps must be non-negative.")
     if sinkhorn_refine_tolerance is not None and sinkhorn_refine_tolerance <= 0:
         raise ValueError("sinkhorn_refine_tolerance must be positive when provided.")
+    if sinkhorn_epsilon <= 0:
+        raise ValueError("sinkhorn_epsilon must be positive.")
+    if sinkhorn_epsilon_scaling_steps < 0:
+        raise ValueError("sinkhorn_epsilon_scaling_steps must be non-negative.")
+    if sinkhorn_epsilon_scaling_factor < 1.0:
+        raise ValueError("sinkhorn_epsilon_scaling_factor must be at least 1.0.")
     if gap_mode not in ("none", "dustbin_block"):
         raise ValueError(f"Unsupported gap_mode={gap_mode!r}.")
 
@@ -766,6 +857,9 @@ def train_pfam(
             sinkhorn_gradient_mode=sinkhorn_gradient_mode,
             sinkhorn_refine_steps=sinkhorn_refine_steps,
             sinkhorn_refine_tolerance=sinkhorn_refine_tolerance,
+            sinkhorn_epsilon=sinkhorn_epsilon,
+            sinkhorn_epsilon_scaling_steps=sinkhorn_epsilon_scaling_steps,
+            sinkhorn_epsilon_scaling_factor=sinkhorn_epsilon_scaling_factor,
             projection_manifold=projection_manifold,
             gap_mode=gap_mode,
             max_per_device_batch_size=int(autotune_max_per_device_batch_size),
@@ -792,10 +886,25 @@ def train_pfam(
         sinkhorn_gradient_mode,
         sinkhorn_refine_steps,
         sinkhorn_refine_tolerance,
+        sinkhorn_epsilon,
+        sinkhorn_epsilon_scaling_steps,
+        sinkhorn_epsilon_scaling_factor,
         projection_manifold,
         gap_mode,
     )
-    metric_step = build_metric_step(method, n_iters, band_width, gap_mode) if metric_every and metric_every > 0 else None
+    metric_step = (
+        build_metric_step(
+            method,
+            n_iters,
+            band_width,
+            gap_mode,
+            sinkhorn_epsilon,
+            sinkhorn_epsilon_scaling_steps,
+            sinkhorn_epsilon_scaling_factor,
+        )
+        if metric_every and metric_every > 0
+        else None
+    )
 
     if is_primary:
         print()
@@ -812,6 +921,9 @@ def train_pfam(
             print(f"  sinkhorn gradient mode: {sinkhorn_gradient_mode}")
             print(f"  sinkhorn refine steps: {sinkhorn_refine_steps}")
             print(f"  sinkhorn refine tolerance: {sinkhorn_refine_tolerance}")
+            print(f"  sinkhorn epsilon: {sinkhorn_epsilon}")
+            print(f"  sinkhorn epsilon scaling steps: {sinkhorn_epsilon_scaling_steps}")
+            print(f"  sinkhorn epsilon scaling factor: {sinkhorn_epsilon_scaling_factor}")
         print(f"  projection manifold: {projection_manifold}")
         print(f"  gap mode: {gap_mode}")
         print(f"  metric every: {metric_every}")
@@ -928,6 +1040,24 @@ if __name__ == "__main__":
         help="Optional infinity-norm residual tolerance for adaptive tail refinement.",
     )
     parser.add_argument(
+        "--sinkhorn_epsilon",
+        type=float,
+        default=1.0,
+        help="Entropic temperature for the Sinkhorn transport plan.",
+    )
+    parser.add_argument(
+        "--sinkhorn_epsilon_scaling_steps",
+        type=int,
+        default=0,
+        help="Number of coarse-to-fine epsilon warm-start stages folded into the fixed base-iteration budget.",
+    )
+    parser.add_argument(
+        "--sinkhorn_epsilon_scaling_factor",
+        type=float,
+        default=2.0,
+        help="Multiplicative ratio between adjacent epsilon-scaling stages (must be >= 1).",
+    )
+    parser.add_argument(
         "--projection_manifold",
         choices=["none", "stiefel_qk"],
         default="none",
@@ -959,6 +1089,9 @@ if __name__ == "__main__":
         sinkhorn_gradient_mode=args.sinkhorn_gradient_mode,
         sinkhorn_refine_steps=args.sinkhorn_refine_steps,
         sinkhorn_refine_tolerance=args.sinkhorn_refine_tolerance,
+        sinkhorn_epsilon=args.sinkhorn_epsilon,
+        sinkhorn_epsilon_scaling_steps=args.sinkhorn_epsilon_scaling_steps,
+        sinkhorn_epsilon_scaling_factor=args.sinkhorn_epsilon_scaling_factor,
         projection_manifold=args.projection_manifold,
         gap_mode=args.gap_mode,
     )

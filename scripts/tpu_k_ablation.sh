@@ -109,6 +109,9 @@ gcloud compute tpus tpu-vm ssh "$NODE_ID" --project="$PROJECT_ID" --zone="$ZONE"
       --n_iters 15 \
       --sinkhorn_gradient_mode tail_refinement \
       --sinkhorn_refine_steps \${K} \
+      --sinkhorn_epsilon 1.0 \
+      --sinkhorn_epsilon_scaling_steps 0 \
+      --sinkhorn_epsilon_scaling_factor 2.0 \
       --projection_manifold stiefel_qk \
       --gap_mode none \
       --metric_every 50 \

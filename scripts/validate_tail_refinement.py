@@ -39,7 +39,23 @@ def _make_inputs(seed, length, dim):
     return q, k, v, target, q_mask, k_mask, params
 
 
-def _loss(fn, q, k, v, target, q_mask, k_mask, n_iters, band_width, refine_steps, refine_tolerance, gradient_mode):
+def _loss(
+    fn,
+    q,
+    k,
+    v,
+    target,
+    q_mask,
+    k_mask,
+    n_iters,
+    band_width,
+    refine_steps,
+    refine_tolerance,
+    gradient_mode,
+    epsilon=1.0,
+    epsilon_scaling_steps=0,
+    epsilon_scaling_factor=2.0,
+):
     out = fn(
         q,
         k,
@@ -50,12 +66,30 @@ def _loss(fn, q, k, v, target, q_mask, k_mask, n_iters, band_width, refine_steps
         k_mask=k_mask,
         refine_steps=refine_steps,
         refine_tolerance=refine_tolerance,
+        epsilon=epsilon,
+        epsilon_scaling_steps=epsilon_scaling_steps,
+        epsilon_scaling_factor=epsilon_scaling_factor,
         gradient_mode=gradient_mode,
     )
     return jnp.sum(out * target) / out.size
 
 
-def _grad_case(name, q, k, v, target, q_mask, k_mask, n_iters, band_width, refine_steps, refine_tolerance):
+def _grad_case(
+    name,
+    q,
+    k,
+    v,
+    target,
+    q_mask,
+    k_mask,
+    n_iters,
+    band_width,
+    refine_steps,
+    refine_tolerance,
+    epsilon=1.0,
+    epsilon_scaling_steps=0,
+    epsilon_scaling_factor=2.0,
+):
     def tail_loss(q_, k_, v_):
         return _loss(
             ot_kernel.sinkhorn_attention,
@@ -70,6 +104,9 @@ def _grad_case(name, q, k, v, target, q_mask, k_mask, n_iters, band_width, refin
             refine_steps,
             refine_tolerance,
             "tail_refinement",
+            epsilon,
+            epsilon_scaling_steps,
+            epsilon_scaling_factor,
         )
 
     def exact_loss(q_, k_, v_):
@@ -86,6 +123,9 @@ def _grad_case(name, q, k, v, target, q_mask, k_mask, n_iters, band_width, refin
             refine_steps,
             refine_tolerance,
             "exact_autodiff",
+            epsilon,
+            epsilon_scaling_steps,
+            epsilon_scaling_factor,
         )
 
     tail_out = ot_kernel.sinkhorn_attention(
@@ -98,6 +138,9 @@ def _grad_case(name, q, k, v, target, q_mask, k_mask, n_iters, band_width, refin
         k_mask=k_mask,
         refine_steps=refine_steps,
         refine_tolerance=refine_tolerance,
+        epsilon=epsilon,
+        epsilon_scaling_steps=epsilon_scaling_steps,
+        epsilon_scaling_factor=epsilon_scaling_factor,
         gradient_mode="tail_refinement",
     )
     exact_out = ot_kernel.sinkhorn_attention(
@@ -110,6 +153,9 @@ def _grad_case(name, q, k, v, target, q_mask, k_mask, n_iters, band_width, refin
         k_mask=k_mask,
         refine_steps=refine_steps,
         refine_tolerance=refine_tolerance,
+        epsilon=epsilon,
+        epsilon_scaling_steps=epsilon_scaling_steps,
+        epsilon_scaling_factor=epsilon_scaling_factor,
         gradient_mode="exact_autodiff",
     )
     tail_val, tail_grads = jax.value_and_grad(tail_loss, argnums=(0, 1, 2))(q, k, v)
@@ -139,6 +185,9 @@ def _module_agreement(q, k, v, q_mask, k_mask, n_iters, band_width):
         k_mask=k_mask,
         refine_steps=2,
         refine_tolerance=None,
+        epsilon=1.0,
+        epsilon_scaling_steps=0,
+        epsilon_scaling_factor=2.0,
         gradient_mode="tail_refinement",
     )
     src_out = ot_kernel.sinkhorn_attention(q, k, v, **kwargs)
@@ -160,6 +209,27 @@ def _stiefel_case(params):
         "W_q_orth_max_abs": wq_err,
         "W_k_orth_max_abs": wk_err,
         "W_v_change_max_abs": wv_diff,
+    }
+
+
+def _epsilon_scaling_case(q, k, v, q_mask, k_mask, band_width):
+    common = dict(
+        band_width=band_width,
+        q_mask=q_mask,
+        k_mask=k_mask,
+        refine_steps=0,
+        refine_tolerance=None,
+        gradient_mode="exact_autodiff",
+        epsilon=0.5,
+    )
+    reference = ot_kernel.sinkhorn_attention(q, k, v, n_iters=64, epsilon_scaling_steps=0, epsilon_scaling_factor=2.0, **common)
+    plain = ot_kernel.sinkhorn_attention(q, k, v, n_iters=8, epsilon_scaling_steps=0, epsilon_scaling_factor=2.0, **common)
+    scaled = ot_kernel.sinkhorn_attention(q, k, v, n_iters=8, epsilon_scaling_steps=2, epsilon_scaling_factor=2.0, **common)
+    jax.block_until_ready((reference, plain, scaled))
+    return {
+        "reference_vs_plain_max_abs": float(jnp.max(jnp.abs(reference - plain))),
+        "reference_vs_scaled_max_abs": float(jnp.max(jnp.abs(reference - scaled))),
+        "scaled_improves": bool(jnp.max(jnp.abs(reference - scaled)) <= jnp.max(jnp.abs(reference - plain))),
     }
 
 
@@ -217,6 +287,7 @@ def main():
             4,
             None,
         ),
+        "epsilon_scaling": _epsilon_scaling_case(q, k, v, q_mask, k_mask, args.band_width),
         "stiefel_projection": _stiefel_case(params),
     }
 

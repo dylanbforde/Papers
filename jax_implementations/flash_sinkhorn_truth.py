@@ -84,6 +84,42 @@ def _gauge_fix_potentials(u, v, q_mask, k_mask):
     return u, v
 
 
+def _validate_sinkhorn_hyperparams(epsilon, epsilon_scaling_steps, epsilon_scaling_factor):
+    epsilon = float(epsilon)
+    epsilon_scaling_steps = int(epsilon_scaling_steps)
+    epsilon_scaling_factor = float(epsilon_scaling_factor)
+    if epsilon <= 0:
+        raise ValueError("epsilon must be positive.")
+    if epsilon_scaling_steps < 0:
+        raise ValueError("epsilon_scaling_steps must be non-negative.")
+    if epsilon_scaling_factor < 1.0:
+        raise ValueError("epsilon_scaling_factor must be at least 1.0.")
+    return epsilon, epsilon_scaling_steps, epsilon_scaling_factor
+
+
+def _score_scale(dim, epsilon):
+    return 1.0 / ((float(dim) ** 0.5) * float(epsilon))
+
+
+def _epsilon_stage_schedule(n_iters, epsilon, epsilon_scaling_steps, epsilon_scaling_factor):
+    n_iters = int(n_iters)
+    epsilon, epsilon_scaling_steps, epsilon_scaling_factor = _validate_sinkhorn_hyperparams(
+        epsilon,
+        epsilon_scaling_steps,
+        epsilon_scaling_factor,
+    )
+    if n_iters <= 0:
+        return [(epsilon, 0)]
+
+    warm_steps = min(epsilon_scaling_steps, max(n_iters - 1, 0))
+    if warm_steps == 0 or epsilon_scaling_factor == 1.0:
+        return [(epsilon, n_iters)]
+
+    epsilons = [epsilon * (epsilon_scaling_factor ** power) for power in range(warm_steps, -1, -1)]
+    stage_iters = [1] * warm_steps + [n_iters - warm_steps]
+    return list(zip(epsilons, stage_iters))
+
+
 def _masked_potential_residual(u_new, v_new, u_prev, v_prev, q_mask, k_mask):
     """Infinity-norm refinement residual on the active support."""
     du = jnp.where(q_mask, jnp.abs(u_new - u_prev), 0.0)
@@ -156,13 +192,21 @@ def _exp_for_tpu(x):
 # Forward Pass: Banded Sinkhorn Potential Computation
 # ============================================================================
 
-def compute_global_uv(Q, K, n_iters=15, band_width=None, q_mask=None, k_mask=None):
+def compute_global_uv(
+    Q,
+    K,
+    n_iters=15,
+    band_width=None,
+    q_mask=None,
+    k_mask=None,
+    epsilon=1.0,
+    epsilon_scaling_steps=0,
+    epsilon_scaling_factor=2.0,
+):
     """Compute Sinkhorn dual potentials u, v via alternating logsumexp."""
     B, H, L, D = Q.shape
     if K.shape != Q.shape:
         raise ValueError(f"Q and K must have identical shapes, got {Q.shape} and {K.shape}.")
-
-    scale = 1.0 / jnp.sqrt(D)
 
     u = jnp.zeros((B, H, L), dtype=Q.dtype)
     v = jnp.zeros((B, H, L), dtype=Q.dtype)
@@ -178,105 +222,123 @@ def compute_global_uv(Q, K, n_iters=15, band_width=None, q_mask=None, k_mask=Non
     q_mask_b = q_mask.reshape(B, H, num_blocks, BLOCK).transpose(2, 0, 1, 3)
     k_mask_b = k_mask.reshape(B, H, num_blocks, BLOCK).transpose(2, 0, 1, 3)
 
-    def body_fn(i, val):
-        u_in, v_in = val
+    def run_stage(state, scale, stage_iters):
+        if int(stage_iters) <= 0:
+            return state
 
-        v_b = v_in.reshape(B, H, num_blocks, BLOCK).transpose(2, 0, 1, 3)
-        def scan_q(carry, q_kv_mask_idx):
-            q_block, q_valid, block_idx = q_kv_mask_idx
+        def body_fn(i, val):
+            u_in, v_in = val
 
-            start_idx = jnp.minimum(jnp.maximum(0, block_idx - W), num_blocks - slice_size)
+            v_b = v_in.reshape(B, H, num_blocks, BLOCK).transpose(2, 0, 1, 3)
 
-            k_band = jax.lax.dynamic_slice_in_dim(K_b, start_idx, slice_size, axis=0)
-            v_band = jax.lax.dynamic_slice_in_dim(v_b, start_idx, slice_size, axis=0)
-            k_mask_band = jax.lax.dynamic_slice_in_dim(k_mask_b, start_idx, slice_size, axis=0)
+            def scan_q(carry, q_kv_mask_idx):
+                q_block, q_valid, block_idx = q_kv_mask_idx
 
-            abs_indices = start_idx + local_offsets
-            mask = jnp.abs(abs_indices - block_idx) <= W
+                start_idx = jnp.minimum(jnp.maximum(0, block_idx - W), num_blocks - slice_size)
 
-            def scan_k(acc, elements):
-                k_block, v_block, k_valid, is_valid = elements
-                def true_fn(_):
-                    S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block, k_block) * scale
-                    valid = q_valid[..., :, None] & k_valid[..., None, :]
-                    val = S_block + v_block[..., None, :]
-                    val = jnp.where(valid, val, -jnp.inf)
-                    max_val = jnp.maximum(acc[0], jnp.max(val, axis=-1))
+                k_band = jax.lax.dynamic_slice_in_dim(K_b, start_idx, slice_size, axis=0)
+                v_band = jax.lax.dynamic_slice_in_dim(v_b, start_idx, slice_size, axis=0)
+                k_mask_band = jax.lax.dynamic_slice_in_dim(k_mask_b, start_idx, slice_size, axis=0)
 
-                    diff = val - max_val[..., None]
-                    diff = jnp.where(jnp.isnan(diff), -jnp.inf, diff)
-                    acc_diff = acc[0] - max_val
-                    acc_diff = jnp.where(jnp.isnan(acc_diff), -jnp.inf, acc_diff)
+                abs_indices = start_idx + local_offsets
+                mask = jnp.abs(abs_indices - block_idx) <= W
 
-                    sum_exp = acc[1] * _exp_for_tpu(acc_diff) + jnp.sum(_exp_for_tpu(diff), axis=-1)
-                    return (max_val, sum_exp)
+                def scan_k(acc, elements):
+                    k_block, v_block, k_valid, is_valid = elements
 
-                return jax.lax.cond(is_valid, true_fn, lambda _: acc, None), None
+                    def true_fn(_):
+                        S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block, k_block) * scale
+                        valid = q_valid[..., :, None] & k_valid[..., None, :]
+                        val = S_block + v_block[..., None, :]
+                        val = jnp.where(valid, val, -jnp.inf)
+                        max_val = jnp.maximum(acc[0], jnp.max(val, axis=-1))
 
-            init_acc = (jnp.full((B, H, BLOCK), -float('inf')), jnp.zeros((B, H, BLOCK)))
-            final_acc, _ = jax.lax.scan(scan_k, init_acc, (k_band, v_band, k_mask_band, mask))
+                        diff = val - max_val[..., None]
+                        diff = jnp.where(jnp.isnan(diff), -jnp.inf, diff)
+                        acc_diff = acc[0] - max_val
+                        acc_diff = jnp.where(jnp.isnan(acc_diff), -jnp.inf, acc_diff)
 
-            sum_exp = jnp.maximum(final_acc[1], 1e-10)
-            u_new = -(final_acc[0] + jnp.log(sum_exp))
-            u_new = jnp.where(q_valid, u_new, 0.0)
-            return None, u_new
+                        sum_exp = acc[1] * _exp_for_tpu(acc_diff) + jnp.sum(_exp_for_tpu(diff), axis=-1)
+                        return (max_val, sum_exp)
 
-        _, u_new_b = jax.lax.scan(scan_q, None, (Q_b, q_mask_b, jnp.arange(num_blocks)))
-        u_new = u_new_b.transpose(1, 2, 0, 3).reshape(B, H, L)
+                    return jax.lax.cond(is_valid, true_fn, lambda _: acc, None), None
 
-        u_b = u_new.reshape(B, H, num_blocks, BLOCK).transpose(2, 0, 1, 3)
-        def scan_k2(carry, k_qu_mask_idx):
-            k_block, k_valid, block_idx = k_qu_mask_idx
+                init_acc = (jnp.full((B, H, BLOCK), -float("inf")), jnp.zeros((B, H, BLOCK)))
+                final_acc, _ = jax.lax.scan(scan_k, init_acc, (k_band, v_band, k_mask_band, mask))
 
-            start_idx = jnp.minimum(jnp.maximum(0, block_idx - W), num_blocks - slice_size)
+                sum_exp = jnp.maximum(final_acc[1], 1e-10)
+                u_new = -(final_acc[0] + jnp.log(sum_exp))
+                u_new = jnp.where(q_valid, u_new, 0.0)
+                return None, u_new
 
-            q_band = jax.lax.dynamic_slice_in_dim(Q_b, start_idx, slice_size, axis=0)
-            u_band = jax.lax.dynamic_slice_in_dim(u_b, start_idx, slice_size, axis=0)
-            q_mask_band = jax.lax.dynamic_slice_in_dim(q_mask_b, start_idx, slice_size, axis=0)
+            _, u_new_b = jax.lax.scan(scan_q, None, (Q_b, q_mask_b, jnp.arange(num_blocks)))
+            u_new = u_new_b.transpose(1, 2, 0, 3).reshape(B, H, L)
 
-            abs_indices = start_idx + local_offsets
-            mask = jnp.abs(abs_indices - block_idx) <= W
+            u_b = u_new.reshape(B, H, num_blocks, BLOCK).transpose(2, 0, 1, 3)
 
-            def scan_q2(acc, elements):
-                q_block, u_block, q_valid, is_valid = elements
-                def true_fn(_):
-                    S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block, k_block) * scale
-                    valid = q_valid[..., :, None] & k_valid[..., None, :]
-                    val = S_block + u_block[..., :, None]
-                    val = jnp.where(valid, val, -jnp.inf)
-                    max_val = jnp.maximum(acc[0], jnp.max(val, axis=-2))
+            def scan_k2(carry, k_qu_mask_idx):
+                k_block, k_valid, block_idx = k_qu_mask_idx
 
-                    diff = val - max_val[..., None, :]
-                    diff = jnp.where(jnp.isnan(diff), -jnp.inf, diff)
-                    acc_diff = acc[0] - max_val
-                    acc_diff = jnp.where(jnp.isnan(acc_diff), -jnp.inf, acc_diff)
+                start_idx = jnp.minimum(jnp.maximum(0, block_idx - W), num_blocks - slice_size)
 
-                    sum_exp = acc[1] * _exp_for_tpu(acc_diff) + jnp.sum(_exp_for_tpu(diff), axis=-2)
-                    return (max_val, sum_exp)
+                q_band = jax.lax.dynamic_slice_in_dim(Q_b, start_idx, slice_size, axis=0)
+                u_band = jax.lax.dynamic_slice_in_dim(u_b, start_idx, slice_size, axis=0)
+                q_mask_band = jax.lax.dynamic_slice_in_dim(q_mask_b, start_idx, slice_size, axis=0)
 
-                return jax.lax.cond(is_valid, true_fn, lambda _: acc, None), None
+                abs_indices = start_idx + local_offsets
+                mask = jnp.abs(abs_indices - block_idx) <= W
 
-            init_acc = (jnp.full((B, H, BLOCK), -float('inf')), jnp.zeros((B, H, BLOCK)))
-            final_acc, _ = jax.lax.scan(scan_q2, init_acc, (q_band, u_band, q_mask_band, mask))
+                def scan_q2(acc, elements):
+                    q_block, u_block, q_valid, is_valid = elements
 
-            sum_exp = jnp.maximum(final_acc[1], 1e-10)
-            v_new = -(final_acc[0] + jnp.log(sum_exp))
-            v_new = jnp.where(k_valid, v_new, 0.0)
-            return None, v_new
+                    def true_fn(_):
+                        S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block, k_block) * scale
+                        valid = q_valid[..., :, None] & k_valid[..., None, :]
+                        val = S_block + u_block[..., :, None]
+                        val = jnp.where(valid, val, -jnp.inf)
+                        max_val = jnp.maximum(acc[0], jnp.max(val, axis=-2))
 
-        _, v_new_b = jax.lax.scan(scan_k2, None, (K_b, k_mask_b, jnp.arange(num_blocks)))
-        v_new = v_new_b.transpose(1, 2, 0, 3).reshape(B, H, L)
+                        diff = val - max_val[..., None, :]
+                        diff = jnp.where(jnp.isnan(diff), -jnp.inf, diff)
+                        acc_diff = acc[0] - max_val
+                        acc_diff = jnp.where(jnp.isnan(acc_diff), -jnp.inf, acc_diff)
 
-        return _gauge_fix_potentials(u_new, v_new, q_mask, k_mask)
+                        sum_exp = acc[1] * _exp_for_tpu(acc_diff) + jnp.sum(_exp_for_tpu(diff), axis=-2)
+                        return (max_val, sum_exp)
 
-    return jax.lax.fori_loop(0, n_iters, body_fn, (u, v))
+                    return jax.lax.cond(is_valid, true_fn, lambda _: acc, None), None
+
+                init_acc = (jnp.full((B, H, BLOCK), -float("inf")), jnp.zeros((B, H, BLOCK)))
+                final_acc, _ = jax.lax.scan(scan_q2, init_acc, (q_band, u_band, q_mask_band, mask))
+
+                sum_exp = jnp.maximum(final_acc[1], 1e-10)
+                v_new = -(final_acc[0] + jnp.log(sum_exp))
+                v_new = jnp.where(k_valid, v_new, 0.0)
+                return None, v_new
+
+            _, v_new_b = jax.lax.scan(scan_k2, None, (K_b, k_mask_b, jnp.arange(num_blocks)))
+            v_new = v_new_b.transpose(1, 2, 0, 3).reshape(B, H, L)
+
+            return _gauge_fix_potentials(u_new, v_new, q_mask, k_mask)
+
+        return jax.lax.fori_loop(0, int(stage_iters), body_fn, state)
+
+    state = (u, v)
+    for stage_epsilon, stage_iters in _epsilon_stage_schedule(
+        n_iters,
+        epsilon,
+        epsilon_scaling_steps,
+        epsilon_scaling_factor,
+    ):
+        state = run_stage(state, _score_scale(D, stage_epsilon), stage_iters)
+    return state
 
 
 # ============================================================================
 # Forward Pass: Pallas Tile Kernel
 # ============================================================================
 
-def tile_sinkhorn_kernel(q_ref, k_ref, v_ref, u_ref, v_pot_ref, q_mask_ref, k_mask_ref, o_ref):
+def tile_sinkhorn_kernel(q_ref, k_ref, v_ref, u_ref, v_pot_ref, q_mask_ref, k_mask_ref, scale_ref, o_ref):
     """Single-tile forward: logits -> Sinkhorn weights -> output."""
     q = q_ref[...]
     k = k_ref[...]
@@ -285,21 +347,21 @@ def tile_sinkhorn_kernel(q_ref, k_ref, v_ref, u_ref, v_pot_ref, q_mask_ref, k_ma
     v_pot = v_pot_ref[..., 0]
     q_mask = q_mask_ref[...]
     k_mask = k_mask_ref[...]
-
-    D = q.shape[-1]
-    logits = jnp.dot(q, k.T) / jnp.sqrt(D)
+    scale = scale_ref[0]
+    logits = jnp.dot(q, k.T) * scale
     log_alpha = logits + u[:, None] + v_pot[None, :]
     log_alpha = jnp.where(k_mask[None, :], log_alpha, -jnp.inf)
     out = jnp.dot(_exp_for_tpu(log_alpha), v)
     o_ref[...] = jnp.where(q_mask[:, None], out, 0.0)
 
 
-def _apply_transport_plan(Q, K, V, u_out, v_out, band_width, q_mask, k_mask):
+def _apply_transport_plan(Q, K, V, u_out, v_out, band_width, q_mask, k_mask, score_scale):
     """Apply a masked banded transport plan to values using Pallas tile kernels."""
     B, H, L, D = Q.shape
     block_size = 128
     num_blocks, W, slice_size = _resolve_block_layout(L, block_size, band_width)
     head_dim = D
+    scale_arr = jnp.asarray([score_scale], dtype=Q.dtype)
 
     q_blocks = Q.reshape(B, H, num_blocks, block_size, head_dim)
     k_blocks = K.reshape(B, H, num_blocks, block_size, head_dim)
@@ -325,10 +387,11 @@ def _apply_transport_plan(Q, K, V, u_out, v_out, band_width, q_mask, k_mask):
                 pl.BlockSpec(block_shape=v_pot_tile.shape, index_map=lambda: (0, 0)),
                 pl.BlockSpec(block_shape=q_mask_tile.shape, index_map=lambda: (0,)),
                 pl.BlockSpec(block_shape=k_mask_tile.shape, index_map=lambda: (0,)),
+                pl.BlockSpec(block_shape=(1,), index_map=lambda: (0,)),
             ],
             out_specs=pl.BlockSpec(block_shape=out_shape.shape, index_map=lambda: (0, 0)),
             **kw,
-        )(q_tile, k_tile, v_tile, u_tile, v_pot_tile, q_mask_tile, k_mask_tile)
+        )(q_tile, k_tile, v_tile, u_tile, v_pot_tile, q_mask_tile, k_mask_tile, scale_arr)
 
     def scan_kv_blocks(acc, elements):
         k_tile, v_tile, v_pot_tile, k_mask_tile, is_valid = elements
@@ -379,7 +442,7 @@ def _apply_transport_plan(Q, K, V, u_out, v_out, band_width, q_mask, k_mask):
 # reducing the kernel signature to 7 inputs (well within TPU v6e VMEM limits).
 
 def dq_kernel_multi(
-    Q_ref, K_ref, V_ref, M_data_ref, N_data_ref, dO_ref, W_ref, dQ_ref
+    Q_ref, K_ref, V_ref, M_data_ref, N_data_ref, dO_ref, W_ref, scale_ref, dQ_ref
 ):
     """
     Fused Pallas kernel: compute dQ using the multi-transport-plan formula.
@@ -399,8 +462,7 @@ def dq_kernel_multi(
     del_u2_m = m_data[:, 4]
     q_mask_m = m_data[:, 5] > 0.5
 
-    D = q_block.shape[-1]
-    scale = 1.0 / jnp.sqrt(D)
+    scale = scale_ref[0]
 
     N = K_ref.shape[0]
     BLOCK_N = 128
@@ -470,7 +532,7 @@ def dq_kernel_multi(
 
 
 def dk_dv_kernel_multi(
-    Q_ref, K_ref, V_ref, M_data_ref, N_data_ref, dO_ref, W_ref, dK_ref, dV_ref
+    Q_ref, K_ref, V_ref, M_data_ref, N_data_ref, dO_ref, W_ref, scale_ref, dK_ref, dV_ref
 ):
     """
     Fused Pallas kernel: compute dK, dV using the multi-transport-plan formula.
@@ -488,12 +550,11 @@ def dk_dv_kernel_multi(
     del_v1_n = n_data[:, 4]
     k_mask_n = n_data[:, 5] > 0.5
 
-    D = k_block.shape[-1]
     M = Q_ref.shape[0]
     BLOCK_M = 128
     UNROLL = 4
     iters = M // BLOCK_M
-    scale = 1.0 / jnp.sqrt(D)
+    scale = scale_ref[0]
 
     n = pl.program_id(0)
     start_block = jnp.maximum(0, n - W)
@@ -560,7 +621,7 @@ def dk_dv_kernel_multi(
     dV_ref[...] = dv_acc
 
 
-def pallas_sinkhorn_bwd_fused(Q, K, V, dO, M_data, N_data, band_width):
+def pallas_sinkhorn_bwd_fused(Q, K, V, dO, M_data, N_data, band_width, score_scale):
     """Launch fused Pallas kernels over a single (batch, head) slice."""
     M, D = Q.shape
     N, E = V.shape
@@ -568,6 +629,7 @@ def pallas_sinkhorn_bwd_fused(Q, K, V, dO, M_data, N_data, band_width):
     BLOCK = 128
     _, W_val, _ = _resolve_block_layout(M, BLOCK, band_width)
     W_arr = jnp.array([W_val], dtype=jnp.int32)
+    scale_arr = jnp.asarray([score_scale], dtype=Q.dtype)
 
     is_cpu = jax.devices()[0].platform == "cpu"
     kw = {"interpret": True} if is_cpu else {}
@@ -585,10 +647,11 @@ def pallas_sinkhorn_bwd_fused(Q, K, V, dO, M_data, N_data, band_width):
             pl.BlockSpec(index_map=lambda m: (0, 0), block_shape=(N, C)),
             pl.BlockSpec(index_map=lambda m: (m, 0), block_shape=(BLOCK, E)),
             pl.BlockSpec(index_map=lambda m: (0,), block_shape=(1,)),
+            pl.BlockSpec(index_map=lambda m: (0,), block_shape=(1,)),
         ],
         out_specs=pl.BlockSpec(index_map=lambda m: (m, 0), block_shape=(BLOCK, D)),
         **kw,
-    )(Q, K, V, M_data, N_data, dO, W_arr)
+    )(Q, K, V, M_data, N_data, dO, W_arr, scale_arr)
 
     grid_dk_dv = (N // BLOCK,)
     dK_f, dV_f = pl.pallas_call(
@@ -603,13 +666,14 @@ def pallas_sinkhorn_bwd_fused(Q, K, V, dO, M_data, N_data, band_width):
             pl.BlockSpec(index_map=lambda n: (n, 0), block_shape=(BLOCK, C)),
             pl.BlockSpec(index_map=lambda n: (0, 0), block_shape=(M, E)),
             pl.BlockSpec(index_map=lambda n: (0,), block_shape=(1,)),
+            pl.BlockSpec(index_map=lambda n: (0,), block_shape=(1,)),
         ],
         out_specs=[
             pl.BlockSpec(index_map=lambda n: (n, 0), block_shape=(BLOCK, D)),
             pl.BlockSpec(index_map=lambda n: (n, 0), block_shape=(BLOCK, E)),
         ],
         **kw,
-    )(Q, K, V, M_data, N_data, dO, W_arr)
+    )(Q, K, V, M_data, N_data, dO, W_arr, scale_arr)
 
     return dQ_f, dK_f, dV_f
 
@@ -738,12 +802,12 @@ def _tail_refinement_schedule(
     band_width,
     q_mask,
     k_mask,
+    score_scale,
 ):
     """Compute fixed- or residual-adaptive refinement steps from stopped base duals."""
     B, H, L, _D = Q.shape
     q_mask = _canonicalize_mask(q_mask, B, H, L, "q_mask")
     k_mask = _canonicalize_mask(k_mask, B, H, L, "k_mask")
-    scale = 1.0 / jnp.sqrt(Q.shape[-1])
     BLOCK = 128
     num_blocks, W, slice_size = _resolve_block_layout(L, BLOCK, band_width)
 
@@ -752,7 +816,7 @@ def _tail_refinement_schedule(
 
     def body_fn(_i, state):
         u_in, v_in = state
-        return _banded_compute_next_uv(Q, K, u_in, v_in, scale, BLOCK, num_blocks, W, slice_size, q_mask, k_mask)
+        return _banded_compute_next_uv(Q, K, u_in, v_in, score_scale, BLOCK, num_blocks, W, slice_size, q_mask, k_mask)
 
     if refine_tolerance is None:
         u_tail, v_tail = jax.lax.fori_loop(0, int(refine_steps), body_fn, (u_init, v_init))
@@ -780,12 +844,11 @@ def _tail_refinement_schedule(
     return u_tail, v_tail
 
 
-def _fixed_refinement_history(Q, K, u0, v0, refine_steps, band_width, q_mask, k_mask):
+def _fixed_refinement_history(Q, K, u0, v0, refine_steps, band_width, q_mask, k_mask, score_scale):
     """Recompute the fixed-depth tail states used by the surrogate."""
     B, H, L, _D = Q.shape
     q_mask = _canonicalize_mask(q_mask, B, H, L, "q_mask")
     k_mask = _canonicalize_mask(k_mask, B, H, L, "k_mask")
-    scale = 1.0 / jnp.sqrt(Q.shape[-1])
     BLOCK = 128
     num_blocks, W, slice_size = _resolve_block_layout(L, BLOCK, band_width)
 
@@ -798,7 +861,7 @@ def _fixed_refinement_history(Q, K, u0, v0, refine_steps, band_width, q_mask, k_
             K,
             u_curr,
             v_curr,
-            scale,
+            score_scale,
             BLOCK,
             num_blocks,
             W,
@@ -822,12 +885,14 @@ def _tail_refinement_surrogate_forward(
     band_width,
     q_mask,
     k_mask,
+    epsilon,
     apply_mode="pallas",
 ):
     """Forward map for the tail-refinement estimator with stopped base potentials."""
     B, H, L, _D = Q.shape
     q_mask = _canonicalize_mask(q_mask, B, H, L, "q_mask")
     k_mask = _canonicalize_mask(k_mask, B, H, L, "k_mask")
+    score_scale = _score_scale(Q.shape[-1], epsilon)
     u_tail, v_tail = _tail_refinement_schedule(
         Q,
         K,
@@ -838,14 +903,14 @@ def _tail_refinement_surrogate_forward(
         band_width=band_width,
         q_mask=q_mask,
         k_mask=k_mask,
+        score_scale=score_scale,
     )
     if apply_mode == "pallas":
-        return _apply_transport_plan(Q, K, V, u_tail, v_tail, band_width, q_mask, k_mask)
+        return _apply_transport_plan(Q, K, V, u_tail, v_tail, band_width, q_mask, k_mask, score_scale)
     if apply_mode == "jax":
-        scale = 1.0 / jnp.sqrt(Q.shape[-1])
         BLOCK = 128
         num_blocks, W, slice_size = _resolve_block_layout(L, BLOCK, band_width)
-        return _banded_transport_apply(Q, K, V, u_tail, v_tail, scale, BLOCK, num_blocks, W, slice_size, q_mask, k_mask)
+        return _banded_transport_apply(Q, K, V, u_tail, v_tail, score_scale, BLOCK, num_blocks, W, slice_size, q_mask, k_mask)
     raise ValueError(f"Unsupported apply_mode={apply_mode!r}.")
 
 
@@ -859,13 +924,26 @@ def _sinkhorn_tail_forward_impl(
     k_mask=None,
     refine_steps=2,
     refine_tolerance=None,
+    epsilon=1.0,
+    epsilon_scaling_steps=0,
+    epsilon_scaling_factor=2.0,
     apply_mode="pallas",
 ):
     """Shared forward map for exact autodiff and custom-VJP tail refinement."""
     B, H, L, _D = Q.shape
     q_mask = _canonicalize_mask(q_mask, B, H, L, "q_mask")
     k_mask = _canonicalize_mask(k_mask, B, H, L, "k_mask")
-    u0, v0 = compute_global_uv(Q, K, n_iters=n_iters, band_width=band_width, q_mask=q_mask, k_mask=k_mask)
+    u0, v0 = compute_global_uv(
+        Q,
+        K,
+        n_iters=n_iters,
+        band_width=band_width,
+        q_mask=q_mask,
+        k_mask=k_mask,
+        epsilon=epsilon,
+        epsilon_scaling_steps=epsilon_scaling_steps,
+        epsilon_scaling_factor=epsilon_scaling_factor,
+    )
     out = _tail_refinement_surrogate_forward(
         Q,
         K,
@@ -877,6 +955,7 @@ def _sinkhorn_tail_forward_impl(
         band_width=band_width,
         q_mask=q_mask,
         k_mask=k_mask,
+        epsilon=epsilon,
         apply_mode=apply_mode,
     )
     return out, (u0, v0, Q, K, V, q_mask, k_mask)
@@ -892,6 +971,9 @@ def exact_sinkhorn_attention(
     k_mask=None,
     refine_steps=2,
     refine_tolerance=None,
+    epsilon=1.0,
+    epsilon_scaling_steps=0,
+    epsilon_scaling_factor=2.0,
 ):
     """Exact autodiff reference path for the masked banded tail-refinement forward."""
     out, _ = _sinkhorn_tail_forward_impl(
@@ -904,6 +986,9 @@ def exact_sinkhorn_attention(
         k_mask=k_mask,
         refine_steps=refine_steps,
         refine_tolerance=refine_tolerance,
+        epsilon=epsilon,
+        epsilon_scaling_steps=epsilon_scaling_steps,
+        epsilon_scaling_factor=epsilon_scaling_factor,
         apply_mode="jax",
     )
     return out
@@ -919,6 +1004,9 @@ def sinkhorn_attention(
     k_mask=None,
     refine_steps=2,
     refine_tolerance=None,
+    epsilon=1.0,
+    epsilon_scaling_steps=0,
+    epsilon_scaling_factor=2.0,
     gradient_mode="tail_refinement",
 ):
     """Public Sinkhorn attention API with estimator and exact-autodiff modes."""
@@ -933,6 +1021,9 @@ def sinkhorn_attention(
             k_mask=k_mask,
             refine_steps=refine_steps,
             refine_tolerance=refine_tolerance,
+            epsilon=epsilon,
+            epsilon_scaling_steps=epsilon_scaling_steps,
+            epsilon_scaling_factor=epsilon_scaling_factor,
         )
     if gradient_mode in ("tail_refinement", "custom_vjp"):
         return pallas_flash_sinkhorn(
@@ -945,17 +1036,20 @@ def sinkhorn_attention(
             k_mask=k_mask,
             refine_steps=refine_steps,
             refine_tolerance=refine_tolerance,
+            epsilon=epsilon,
+            epsilon_scaling_steps=epsilon_scaling_steps,
+            epsilon_scaling_factor=epsilon_scaling_factor,
         )
     raise ValueError(f"Unsupported gradient_mode={gradient_mode!r}.")
 
 
 
-def _pallas_refinement_bwd_k2(band_width, res, g):
+def _pallas_refinement_bwd_k2(band_width, epsilon, res, g):
     """Multi-Transport-Plan backward with sequential Batch mapping."""
     u0, v0, Q, K, V, q_mask, k_mask = res
     dO = g
 
-    scale = 1.0 / jnp.sqrt(Q.shape[-1])
+    scale = _score_scale(Q.shape[-1], epsilon)
     BLOCK = 128
     M = Q.shape[-2]
     num_blocks, W, slice_size = _resolve_block_layout(M, BLOCK, band_width)
@@ -1019,7 +1113,7 @@ def _pallas_refinement_bwd_k2(band_width, res, g):
     # Sequential map to avoid VMEM OOM
     def h_map_fn(inputs):
         Q_h, K_h, V_h, dO_h, M_data_h, N_data_h = inputs
-        return jax.lax.map(lambda x: pallas_sinkhorn_bwd_fused(x[0], x[1], x[2], x[3], x[4], x[5], band_width), 
+        return jax.lax.map(lambda x: pallas_sinkhorn_bwd_fused(x[0], x[1], x[2], x[3], x[4], x[5], band_width, scale), 
                            (Q_h, K_h, V_h, dO_h, M_data_h, N_data_h))
     
     dQ, dK, dV = jax.lax.map(h_map_fn, (Q, K, V, dO, M_data, N_data))
@@ -1087,9 +1181,8 @@ def _fixed_refinement_dual_cotangents(u_hist, v_hist, g_u, g_v, matvec_row, matv
     return du_hist, dv_hist
 
 
-def _fixed_refinement_qk_pullback(Q, K, V, dO, u_hist, v_hist, du_hist, dv_hist, band_width, q_mask, k_mask):
+def _fixed_refinement_qk_pullback(Q, K, V, dO, u_hist, v_hist, du_hist, dv_hist, band_width, q_mask, k_mask, scale):
     """Accumulate dQ and dK from the orbit-factorized fixed-K staircase."""
-    scale = 1.0 / jnp.sqrt(Q.shape[-1])
     BLOCK = 128
     num_blocks, W, slice_size = _resolve_block_layout(Q.shape[-2], BLOCK, band_width)
     refine_steps = len(u_hist) - 1
@@ -1158,17 +1251,17 @@ def _fixed_refinement_qk_pullback(Q, K, V, dO, u_hist, v_hist, du_hist, dv_hist,
     return dQ, dK
 
 
-def _pallas_refinement_bwd_fixed_k(band_width, res, g, refine_steps):
+def _pallas_refinement_bwd_fixed_k(band_width, epsilon, res, g, refine_steps):
     """Fixed-depth tail-refinement backward using orbit-factorized staircase plans."""
     u0, v0, Q, K, V, q_mask, k_mask = res
     dO = g
 
-    scale = 1.0 / jnp.sqrt(Q.shape[-1])
+    scale = _score_scale(Q.shape[-1], epsilon)
     BLOCK = 128
     M = Q.shape[-2]
     num_blocks, W, slice_size = _resolve_block_layout(M, BLOCK, band_width)
 
-    u_hist, v_hist = _fixed_refinement_history(Q, K, u0, v0, refine_steps, band_width, q_mask, k_mask)
+    u_hist, v_hist = _fixed_refinement_history(Q, K, u0, v0, refine_steps, band_width, q_mask, k_mask, scale)
 
     def matvec_row(u_a, v_b, vec):
         return _banded_matvec_P(Q, K, u_a, v_b, vec, scale, BLOCK, num_blocks, W, slice_size, q_mask, k_mask, "row")
@@ -1192,7 +1285,20 @@ def _pallas_refinement_bwd_fixed_k(band_width, res, g, refine_steps):
         k_mask,
     )
     du_hist, dv_hist = _fixed_refinement_dual_cotangents(u_hist, v_hist, g_u, g_v, matvec_row, matvec_col)
-    dQ, dK = _fixed_refinement_qk_pullback(Q, K, V, dO, u_hist, v_hist, du_hist, dv_hist, band_width, q_mask, k_mask)
+    dQ, dK = _fixed_refinement_qk_pullback(
+        Q,
+        K,
+        V,
+        dO,
+        u_hist,
+        v_hist,
+        du_hist,
+        dv_hist,
+        band_width,
+        q_mask,
+        k_mask,
+        scale,
+    )
     return dQ, dK, dV
 
 
@@ -1200,13 +1306,23 @@ def _pallas_refinement_bwd_fixed_k(band_width, res, g, refine_steps):
 # Public API: Custom VJP Wiring
 # ============================================================================
 
-def pallas_sinkhorn_bwd_full(n_iters, band_width, refine_steps, refine_tolerance, res, g):
+def pallas_sinkhorn_bwd_full(
+    n_iters,
+    band_width,
+    refine_steps,
+    refine_tolerance,
+    epsilon,
+    epsilon_scaling_steps,
+    epsilon_scaling_factor,
+    res,
+    g,
+):
     """Backward for the tail-refinement estimator with a K=2 optimized fast path."""
-    del n_iters
+    del n_iters, epsilon_scaling_steps, epsilon_scaling_factor
     if int(refine_steps) == 2 and refine_tolerance is None:
-        dQ, dK, dV = _pallas_refinement_bwd_k2(band_width, res, g)
+        dQ, dK, dV = _pallas_refinement_bwd_k2(band_width, epsilon, res, g)
     elif refine_tolerance is None:
-        dQ, dK, dV = _pallas_refinement_bwd_fixed_k(band_width, res, g, int(refine_steps))
+        dQ, dK, dV = _pallas_refinement_bwd_fixed_k(band_width, epsilon, res, g, int(refine_steps))
     else:
         u0, v0, Q, K, V, q_mask, k_mask = res
 
@@ -1222,6 +1338,7 @@ def pallas_sinkhorn_bwd_full(n_iters, band_width, refine_steps, refine_tolerance
                 band_width=band_width,
                 q_mask=q_mask,
                 k_mask=k_mask,
+                epsilon=epsilon,
                 apply_mode="jax",
             )
 
@@ -1230,7 +1347,7 @@ def pallas_sinkhorn_bwd_full(n_iters, band_width, refine_steps, refine_tolerance
     return dQ, dK, dV, None, None
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(3, 4, 7, 8))
+@partial(jax.custom_vjp, nondiff_argnums=(3, 4, 7, 8, 9, 10, 11))
 def pallas_flash_sinkhorn(
     Q,
     K,
@@ -1241,6 +1358,9 @@ def pallas_flash_sinkhorn(
     k_mask=None,
     refine_steps=2,
     refine_tolerance=None,
+    epsilon=1.0,
+    epsilon_scaling_steps=0,
+    epsilon_scaling_factor=2.0,
 ):
     """Masked banded Sinkhorn attention with a configurable tail-refinement VJP."""
     out_O, _ = _sinkhorn_tail_forward_impl(
@@ -1253,6 +1373,9 @@ def pallas_flash_sinkhorn(
         k_mask=k_mask,
         refine_steps=refine_steps,
         refine_tolerance=refine_tolerance,
+        epsilon=epsilon,
+        epsilon_scaling_steps=epsilon_scaling_steps,
+        epsilon_scaling_factor=epsilon_scaling_factor,
         apply_mode="pallas",
     )
     return out_O

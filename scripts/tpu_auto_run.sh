@@ -12,6 +12,17 @@ NODE_ID="sinkhorn-benchmark-cluster"
 RESOURCE_ID="sinkhorn-queue"
 BUCKET_NAME="sinkhorn-neurips"
 GCS_CKPT_DIR="gs://$BUCKET_NAME/checkpoints"
+SINKHORN_MAX_HOURS="${SINKHORN_MAX_HOURS:-3.0}"
+FLASH_MAX_HOURS="${FLASH_MAX_HOURS:-3.0}"
+SINKHORN_GRADIENT_MODE="${SINKHORN_GRADIENT_MODE:-tail_refinement}"
+SINKHORN_REFINE_STEPS="${SINKHORN_REFINE_STEPS:-2}"
+SINKHORN_EPSILON="${SINKHORN_EPSILON:-1.0}"
+SINKHORN_EPSILON_SCALING_STEPS="${SINKHORN_EPSILON_SCALING_STEPS:-0}"
+SINKHORN_EPSILON_SCALING_FACTOR="${SINKHORN_EPSILON_SCALING_FACTOR:-2.0}"
+PROJECTION_MANIFOLD="${PROJECTION_MANIFOLD:-stiefel_qk}"
+GAP_MODE="${GAP_MODE:-none}"
+METRIC_EVERY="${METRIC_EVERY:-50}"
+AUTOTUNE_MAX_PER_DEVICE_BATCH_SIZE="${AUTOTUNE_MAX_PER_DEVICE_BATCH_SIZE:-8}"
 ACTIVE_ACCOUNT="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null || true)"
 SOURCE_COMMIT="${SOURCE_COMMIT:-$(git -C "$REPO_ROOT" rev-parse HEAD)}"
 SOURCE_ARCHIVE="${SOURCE_ARCHIVE:-/tmp/sinkhorn-aligner-${SOURCE_COMMIT}.tar.gz}"
@@ -116,8 +127,8 @@ gcloud compute tpus tpu-vm ssh $NODE_ID --project=$PROJECT_ID --zone=$ZONE --wor
   set -euo pipefail && \
   export PATH=\"\$PATH:/home/\$USER/.local/bin\" && \
   cd sinkhorn-aligner && \
-  python3 -u src/benchmarks/benchmark_pfam_training.py --method sinkhorn_ot --max_hours 3.0 --data_dir data/pfam_shards --gcs_ckpt_dir $GCS_CKPT_DIR --band_width 1024 --n_iters 15 --sinkhorn_gradient_mode tail_refinement --sinkhorn_refine_steps 2 --projection_manifold stiefel_qk --gap_mode none --metric_every 50 --autotune_batch_size --autotune_max_per_device_batch_size 8 --batch_size_file checkpoints/pfam_batch_size.json --checkpoint_every 250 && \
-  python3 -u src/benchmarks/benchmark_pfam_training.py --method flash_attention --max_hours 3.0 --data_dir data/pfam_shards --gcs_ckpt_dir $GCS_CKPT_DIR --band_width 1024 --n_iters 15 --projection_manifold stiefel_qk --gap_mode none --metric_every 50 --batch_size_file checkpoints/pfam_batch_size.json --checkpoint_every 250" --quiet --ssh-flag="-o StrictHostKeyChecking=no" --ssh-flag="-o UserKnownHostsFile=/dev/null"
+  python3 -u src/benchmarks/benchmark_pfam_training.py --method sinkhorn_ot --max_hours $SINKHORN_MAX_HOURS --data_dir data/pfam_shards --gcs_ckpt_dir $GCS_CKPT_DIR --band_width 1024 --n_iters 15 --sinkhorn_gradient_mode $SINKHORN_GRADIENT_MODE --sinkhorn_refine_steps $SINKHORN_REFINE_STEPS --sinkhorn_epsilon $SINKHORN_EPSILON --sinkhorn_epsilon_scaling_steps $SINKHORN_EPSILON_SCALING_STEPS --sinkhorn_epsilon_scaling_factor $SINKHORN_EPSILON_SCALING_FACTOR --projection_manifold $PROJECTION_MANIFOLD --gap_mode $GAP_MODE --metric_every $METRIC_EVERY --autotune_batch_size --autotune_max_per_device_batch_size $AUTOTUNE_MAX_PER_DEVICE_BATCH_SIZE --batch_size_file checkpoints/pfam_batch_size.json --checkpoint_every 250 && \
+  python3 -u src/benchmarks/benchmark_pfam_training.py --method flash_attention --max_hours $FLASH_MAX_HOURS --data_dir data/pfam_shards --gcs_ckpt_dir $GCS_CKPT_DIR --band_width 1024 --n_iters 15 --projection_manifold $PROJECTION_MANIFOLD --gap_mode $GAP_MODE --metric_every $METRIC_EVERY --batch_size_file checkpoints/pfam_batch_size.json --checkpoint_every 250" --quiet --ssh-flag="-o StrictHostKeyChecking=no" --ssh-flag="-o UserKnownHostsFile=/dev/null"
 
 if [ $? -ne 0 ]; then
   echo "✗ Training script failed. Logs should be above."
