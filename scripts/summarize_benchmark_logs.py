@@ -19,6 +19,14 @@ HEADER_PATTERNS = {
     "sinkhorn_epsilon_scaling_factor": re.compile(
         r"^\s+sinkhorn epsilon scaling factor: (?P<value>[-+]?\d+(?:\.\d+)?)$"
     ),
+    "train_reconstruction_weight": re.compile(
+        r"^\s+train reconstruction weight: (?P<value>[-+]?\d+(?:\.\d+)?)$"
+    ),
+    "train_sparse_ce_weight": re.compile(r"^\s+train sparse CE weight: (?P<value>[-+]?\d+(?:\.\d+)?)$"),
+    "train_monotonicity_weight": re.compile(
+        r"^\s+train monotonicity weight: (?P<value>[-+]?\d+(?:\.\d+)?)$"
+    ),
+    "gap_mode": re.compile(r"^\s+gap mode: (?P<value>\S+)$"),
 }
 
 STEP_PATTERN = re.compile(
@@ -82,6 +90,16 @@ def parse_log(path: Path) -> dict:
             if "sinkhorn_epsilon_scaling_factor" in header
             else None
         ),
+        "train_reconstruction_weight": (
+            float(header["train_reconstruction_weight"]) if "train_reconstruction_weight" in header else None
+        ),
+        "train_sparse_ce_weight": (
+            float(header["train_sparse_ce_weight"]) if "train_sparse_ce_weight" in header else None
+        ),
+        "train_monotonicity_weight": (
+            float(header["train_monotonicity_weight"]) if "train_monotonicity_weight" in header else None
+        ),
+        "gap_mode": header.get("gap_mode"),
         "last_step": last["step"],
         "last_loss": last["loss"],
         "last_ce": last["ce"],
@@ -138,25 +156,28 @@ def main() -> int:
 
     rows = sorted((parse_log(path) for path in unique_paths), key=_rank_key)
     header = (
-        f"{'Run':<18} {'K':>2} {'eps':>5} {'scale':>5} {'fac':>4} {'bs':>3} "
-        f"{'step':>6} {'loss':>8} {'CE':>8} {'Mono':>8} {'Ex/s':>8} {'best CE':>8}"
+        f"{'Run':<20} {'K':>2} {'eps':>5} {'scale':>5} {'fac':>4} {'gap':<13} "
+        f"{'r':>4} {'ce':>4} {'mono':>5} {'bs':>3} {'step':>6} {'loss':>8} {'CE':>8} {'Mono':>8} {'Ex/s':>8}"
     )
     print(header)
     print("-" * len(header))
     for row in rows:
         print(
-            f"{row['run']:<18} "
+            f"{row['run']:<20} "
             f"{_format_optional(row['sinkhorn_refine_steps'], 'd'):>2} "
             f"{_format_optional(row['sinkhorn_epsilon'], '.2f'):>5} "
             f"{_format_optional(row['sinkhorn_epsilon_scaling_steps'], 'd'):>5} "
             f"{_format_optional(row['sinkhorn_epsilon_scaling_factor'], '.2f'):>4} "
+            f"{(row['gap_mode'] or 'n/a'):<13} "
+            f"{_format_optional(row['train_reconstruction_weight'], '.2f'):>4} "
+            f"{_format_optional(row['train_sparse_ce_weight'], '.2f'):>4} "
+            f"{_format_optional(row['train_monotonicity_weight'], '.2f'):>5} "
             f"{_format_optional(row['per_device_batch'], 'd'):>3} "
             f"{row['last_step']:>6} "
             f"{row['last_loss']:>8.4f} "
             f"{_format_optional(row['last_ce'], '.4f'):>8} "
             f"{_format_optional(row['last_mono'], '.4f'):>8} "
-            f"{row['last_ex_s']:>8.2f} "
-            f"{_format_optional(row['best_ce'], '.4f'):>8}"
+            f"{row['last_ex_s']:>8.2f}"
         )
     return 0
 

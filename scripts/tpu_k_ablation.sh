@@ -14,6 +14,9 @@ BUCKET_NAME="${BUCKET_NAME:-sinkhorn-neurips}"
 GCS_CKPT_ROOT="${GCS_CKPT_ROOT:-gs://$BUCKET_NAME/checkpoints_k_ablation}"
 K_VALUES="${K_VALUES:-2 4}"
 MAX_HOURS_PER_RUN="${MAX_HOURS_PER_RUN:-0.25}"
+TRAIN_RECONSTRUCTION_WEIGHT="${TRAIN_RECONSTRUCTION_WEIGHT:-1.0}"
+TRAIN_SPARSE_CE_WEIGHT="${TRAIN_SPARSE_CE_WEIGHT:-0.0}"
+TRAIN_MONOTONICITY_WEIGHT="${TRAIN_MONOTONICITY_WEIGHT:-0.0}"
 ACTIVE_ACCOUNT="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null || true)"
 SOURCE_COMMIT="${SOURCE_COMMIT:-$(git -C "$REPO_ROOT" rev-parse HEAD)}"
 SOURCE_ARCHIVE="${SOURCE_ARCHIVE:-/tmp/sinkhorn-aligner-${SOURCE_COMMIT}.tar.gz}"
@@ -112,6 +115,9 @@ gcloud compute tpus tpu-vm ssh "$NODE_ID" --project="$PROJECT_ID" --zone="$ZONE"
       --sinkhorn_epsilon 1.0 \
       --sinkhorn_epsilon_scaling_steps 0 \
       --sinkhorn_epsilon_scaling_factor 2.0 \
+      --train_reconstruction_weight $TRAIN_RECONSTRUCTION_WEIGHT \
+      --train_sparse_ce_weight $TRAIN_SPARSE_CE_WEIGHT \
+      --train_monotonicity_weight $TRAIN_MONOTONICITY_WEIGHT \
       --projection_manifold stiefel_qk \
       --gap_mode none \
       --metric_every 50 \

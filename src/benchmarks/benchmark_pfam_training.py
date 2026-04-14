@@ -378,6 +378,83 @@ def monotonicity_violation_metric(barycenters, active_mask):
     return jnp.sum(jnp.where(pair_mask[:, None, :], violation, 0.0)) / denom
 
 
+def _alignment_loss_terms(
+    method,
+    Q,
+    K,
+    V,
+    target_cols,
+    target_mask,
+    q_mask,
+    k_mask,
+    n_iters,
+    band_width,
+    sinkhorn_gradient_mode,
+    sinkhorn_refine_steps,
+    sinkhorn_refine_tolerance,
+    sinkhorn_epsilon,
+    sinkhorn_epsilon_scaling_steps,
+    sinkhorn_epsilon_scaling_factor,
+):
+    safe_cols, active_mask = _prepare_sparse_supervision(target_cols, target_mask, q_mask, k_mask)
+    target_v = _batch_take_rows(V, safe_cols)
+
+    if method == "sinkhorn_ot":
+        outputs = sinkhorn_outputs(
+            Q,
+            K,
+            V,
+            q_mask=q_mask,
+            k_mask=k_mask,
+            n_iters=n_iters,
+            band_width=band_width,
+            gradient_mode=sinkhorn_gradient_mode,
+            refine_steps=sinkhorn_refine_steps,
+            refine_tolerance=sinkhorn_refine_tolerance,
+            epsilon=sinkhorn_epsilon,
+            epsilon_scaling_steps=sinkhorn_epsilon_scaling_steps,
+            epsilon_scaling_factor=sinkhorn_epsilon_scaling_factor,
+        )
+        ce_loss = sparse_ce_metric(
+            Q,
+            K,
+            target_cols,
+            target_mask,
+            q_mask,
+            k_mask,
+            n_iters,
+            band_width,
+            sinkhorn_epsilon,
+            sinkhorn_epsilon_scaling_steps,
+            sinkhorn_epsilon_scaling_factor,
+        )
+        barycenters = sinkhorn_alignment_barycenters(
+            Q,
+            K,
+            q_mask,
+            k_mask,
+            n_iters,
+            band_width,
+            sinkhorn_epsilon,
+            sinkhorn_epsilon_scaling_steps,
+            sinkhorn_epsilon_scaling_factor,
+        )
+    else:
+        outputs = flash_attention_outputs(Q, K, V, q_mask, k_mask, band_width=band_width)
+        ce_loss = flash_sparse_ce_metric(Q, K, target_cols, target_mask, q_mask, k_mask, band_width)
+        barycenters = flash_alignment_barycenters(Q, K, q_mask, k_mask, band_width)
+
+    sq_error = jnp.sum(jnp.square(outputs - target_v), axis=-1)
+    denom = jnp.maximum(jnp.sum(active_mask) * Q.shape[1], 1)
+    reconstruction_loss = jnp.sum(jnp.where(active_mask[:, None, :], sq_error, 0.0)) / denom
+    monotonicity_loss = monotonicity_violation_metric(barycenters, target_mask)
+    return {
+        "reconstruction": reconstruction_loss,
+        "sparse_ce": ce_loss,
+        "monotonicity": monotonicity_loss,
+    }
+
+
 def sinkhorn_outputs(
     Q,
     K,
@@ -427,6 +504,9 @@ def output_reconstruction_loss(
     sinkhorn_epsilon,
     sinkhorn_epsilon_scaling_steps,
     sinkhorn_epsilon_scaling_factor,
+    train_reconstruction_weight,
+    train_sparse_ce_weight,
+    train_monotonicity_weight,
     gap_mode,
     params,
 ):
@@ -442,29 +522,29 @@ def output_reconstruction_loss(
         gap_mode,
     )
     band_width = _effective_band_width(band_width, gap_mode, target_cols.shape[-1] - DUSTBIN_BLOCK_SIZE)
-    safe_cols, active_mask = _prepare_sparse_supervision(target_cols, target_mask, q_mask, k_mask)
-    target_v = _batch_take_rows(V, safe_cols)
-    if method == "sinkhorn_ot":
-        outputs = sinkhorn_outputs(
-            Q,
-            K,
-            V,
-            q_mask=q_mask,
-            k_mask=k_mask,
-            n_iters=n_iters,
-            band_width=band_width,
-            gradient_mode=sinkhorn_gradient_mode,
-            refine_steps=sinkhorn_refine_steps,
-            refine_tolerance=sinkhorn_refine_tolerance,
-            epsilon=sinkhorn_epsilon,
-            epsilon_scaling_steps=sinkhorn_epsilon_scaling_steps,
-            epsilon_scaling_factor=sinkhorn_epsilon_scaling_factor,
-        )
-    else:
-        outputs = flash_attention_outputs(Q, K, V, q_mask, k_mask, band_width=band_width)
-    sq_error = jnp.sum(jnp.square(outputs - target_v), axis=-1)
-    denom = jnp.maximum(jnp.sum(active_mask) * Q.shape[1], 1)
-    return jnp.sum(jnp.where(active_mask[:, None, :], sq_error, 0.0)) / denom
+    loss_terms = _alignment_loss_terms(
+        method,
+        Q,
+        K,
+        V,
+        target_cols,
+        target_mask,
+        q_mask,
+        k_mask,
+        n_iters,
+        band_width,
+        sinkhorn_gradient_mode,
+        sinkhorn_refine_steps,
+        sinkhorn_refine_tolerance,
+        sinkhorn_epsilon,
+        sinkhorn_epsilon_scaling_steps,
+        sinkhorn_epsilon_scaling_factor,
+    )
+    return (
+        train_reconstruction_weight * loss_terms["reconstruction"]
+        + train_sparse_ce_weight * loss_terms["sparse_ce"]
+        + train_monotonicity_weight * loss_terms["monotonicity"]
+    )
 
 
 def sparse_ce_metric(
@@ -534,6 +614,9 @@ def build_train_step(
     sinkhorn_epsilon,
     sinkhorn_epsilon_scaling_steps,
     sinkhorn_epsilon_scaling_factor,
+    train_reconstruction_weight,
+    train_sparse_ce_weight,
+    train_monotonicity_weight,
     projection_manifold,
     gap_mode,
 ):
@@ -558,6 +641,9 @@ def build_train_step(
                 sinkhorn_epsilon,
                 sinkhorn_epsilon_scaling_steps,
                 sinkhorn_epsilon_scaling_factor,
+                train_reconstruction_weight,
+                train_sparse_ce_weight,
+                train_monotonicity_weight,
                 gap_mode,
                 model_params,
             )
@@ -687,6 +773,9 @@ def autotune_per_device_batch_size(
     sinkhorn_epsilon,
     sinkhorn_epsilon_scaling_steps,
     sinkhorn_epsilon_scaling_factor,
+    train_reconstruction_weight,
+    train_sparse_ce_weight,
+    train_monotonicity_weight,
     projection_manifold,
     gap_mode,
     max_per_device_batch_size,
@@ -720,6 +809,9 @@ def autotune_per_device_batch_size(
                 sinkhorn_epsilon,
                 sinkhorn_epsilon_scaling_steps,
                 sinkhorn_epsilon_scaling_factor,
+                train_reconstruction_weight,
+                train_sparse_ce_weight,
+                train_monotonicity_weight,
                 projection_manifold,
                 gap_mode,
             )
@@ -776,6 +868,9 @@ def train_pfam(
     sinkhorn_epsilon=1.0,
     sinkhorn_epsilon_scaling_steps=0,
     sinkhorn_epsilon_scaling_factor=2.0,
+    train_reconstruction_weight=1.0,
+    train_sparse_ce_weight=0.0,
+    train_monotonicity_weight=0.0,
     projection_manifold="none",
     gap_mode="none",
 ):
@@ -801,6 +896,14 @@ def train_pfam(
         raise ValueError("sinkhorn_epsilon_scaling_steps must be non-negative.")
     if sinkhorn_epsilon_scaling_factor < 1.0:
         raise ValueError("sinkhorn_epsilon_scaling_factor must be at least 1.0.")
+    if train_reconstruction_weight < 0:
+        raise ValueError("train_reconstruction_weight must be non-negative.")
+    if train_sparse_ce_weight < 0:
+        raise ValueError("train_sparse_ce_weight must be non-negative.")
+    if train_monotonicity_weight < 0:
+        raise ValueError("train_monotonicity_weight must be non-negative.")
+    if train_reconstruction_weight + train_sparse_ce_weight + train_monotonicity_weight <= 0:
+        raise ValueError("At least one training loss weight must be positive.")
     if gap_mode not in ("none", "dustbin_block"):
         raise ValueError(f"Unsupported gap_mode={gap_mode!r}.")
 
@@ -860,6 +963,9 @@ def train_pfam(
             sinkhorn_epsilon=sinkhorn_epsilon,
             sinkhorn_epsilon_scaling_steps=sinkhorn_epsilon_scaling_steps,
             sinkhorn_epsilon_scaling_factor=sinkhorn_epsilon_scaling_factor,
+            train_reconstruction_weight=train_reconstruction_weight,
+            train_sparse_ce_weight=train_sparse_ce_weight,
+            train_monotonicity_weight=train_monotonicity_weight,
             projection_manifold=projection_manifold,
             gap_mode=gap_mode,
             max_per_device_batch_size=int(autotune_max_per_device_batch_size),
@@ -889,6 +995,9 @@ def train_pfam(
         sinkhorn_epsilon,
         sinkhorn_epsilon_scaling_steps,
         sinkhorn_epsilon_scaling_factor,
+        train_reconstruction_weight,
+        train_sparse_ce_weight,
+        train_monotonicity_weight,
         projection_manifold,
         gap_mode,
     )
@@ -924,6 +1033,9 @@ def train_pfam(
             print(f"  sinkhorn epsilon: {sinkhorn_epsilon}")
             print(f"  sinkhorn epsilon scaling steps: {sinkhorn_epsilon_scaling_steps}")
             print(f"  sinkhorn epsilon scaling factor: {sinkhorn_epsilon_scaling_factor}")
+        print(f"  train reconstruction weight: {train_reconstruction_weight}")
+        print(f"  train sparse CE weight: {train_sparse_ce_weight}")
+        print(f"  train monotonicity weight: {train_monotonicity_weight}")
         print(f"  projection manifold: {projection_manifold}")
         print(f"  gap mode: {gap_mode}")
         print(f"  metric every: {metric_every}")
@@ -1058,6 +1170,24 @@ if __name__ == "__main__":
         help="Multiplicative ratio between adjacent epsilon-scaling stages (must be >= 1).",
     )
     parser.add_argument(
+        "--train_reconstruction_weight",
+        type=float,
+        default=1.0,
+        help="Weight for the output-reconstruction term in the training objective.",
+    )
+    parser.add_argument(
+        "--train_sparse_ce_weight",
+        type=float,
+        default=0.0,
+        help="Weight for sparse alignment cross-entropy in the training objective.",
+    )
+    parser.add_argument(
+        "--train_monotonicity_weight",
+        type=float,
+        default=0.0,
+        help="Weight for the row-barycenter monotonicity penalty in the training objective.",
+    )
+    parser.add_argument(
         "--projection_manifold",
         choices=["none", "stiefel_qk"],
         default="none",
@@ -1092,6 +1222,9 @@ if __name__ == "__main__":
         sinkhorn_epsilon=args.sinkhorn_epsilon,
         sinkhorn_epsilon_scaling_steps=args.sinkhorn_epsilon_scaling_steps,
         sinkhorn_epsilon_scaling_factor=args.sinkhorn_epsilon_scaling_factor,
+        train_reconstruction_weight=args.train_reconstruction_weight,
+        train_sparse_ce_weight=args.train_sparse_ce_weight,
+        train_monotonicity_weight=args.train_monotonicity_weight,
         projection_manifold=args.projection_manifold,
         gap_mode=args.gap_mode,
     )
