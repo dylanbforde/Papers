@@ -32,9 +32,14 @@ trap cleanup EXIT
 
 # 1. Start the queue
 echo "Step 1: Queuing TPU..."
-gcloud compute tpus queued-resources create $RESOURCE_ID \
-  --project=$PROJECT_ID --zone=$ZONE --node-id=$NODE_ID \
-  --accelerator-type=v6e-8 --runtime-version=tpu-ubuntu2204-base --quiet
+EXISTING_STATE="$(gcloud compute tpus queued-resources describe $RESOURCE_ID --project=$PROJECT_ID --zone=$ZONE --format='value(state.state)' 2>/dev/null || true)"
+if [ -n "$EXISTING_STATE" ]; then
+  echo "✓ Reusing existing queued resource $RESOURCE_ID (state: $EXISTING_STATE)"
+else
+  gcloud compute tpus queued-resources create $RESOURCE_ID \
+    --project=$PROJECT_ID --zone=$ZONE --node-id=$NODE_ID \
+    --accelerator-type=v6e-8 --runtime-version=tpu-ubuntu2204-base --quiet
+fi
 
 # 2. Wait until ACTIVE
 echo "Step 2: Waiting for TPU to become ACTIVE..."
