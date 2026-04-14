@@ -7,3 +7,7 @@
 ## 2024-05-24 - [Dual-Tensor Packing Strategy]
 **Learning:** The paper claimed a "single tensor" with $C=8$ channels for the packing strategy, but the codebase actually utilizes two distinct tensors (`M_data` for query-side and `N_data` for key-side), each with 8 channels, to pack potential histories and gradient intermediates without overloading a single tensor.
 **Action:** Always verify memory mapping architecture claims in the text against the actual JAX Pallas kernel inputs, specifically looking for split query/key state representations.
+
+## 2024-04-14 - Base Reference Plan Alignment
+**Learning:** Hardware-efficient factorization mathematically relies on $P^{(2,2)}$ as the base reference plan, which strictly corresponds to the 'P22' variable in 'src/ot_kernel.py'.
+**Action:** Always verify variable subscripts in equations against the base tensor materialized in the optimized Pallas kernel implementation.
