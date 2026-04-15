@@ -15,16 +15,20 @@ It contains:
 All block sizes are aligned to (mod 8, mod 128) for TPU v6e Trillium compatibility.
 """
 
+import functools
+import importlib
+from functools import partial
+from typing import Any
+
 import jax
 import jax.numpy as jnp
 from jax.experimental import pallas as pl
 
+pltpu: Any | None
 try:
-    from jax.experimental.pallas import tpu as pltpu
-except ImportError:
+    pltpu = importlib.import_module("jax.experimental.pallas.tpu")
+except ModuleNotFoundError:
     pltpu = None
-import functools
-from functools import partial
 
 
 # ============================================================================
@@ -374,7 +378,6 @@ def _apply_transport_plan(Q, K, V, u_out, v_out, band_width, q_mask, k_mask, sco
     def compute_tile(q_tile, k_tile, v_tile, u_tile, v_pot_tile, q_mask_tile, k_mask_tile):
         out_shape = jax.ShapeDtypeStruct((block_size, head_dim), Q.dtype)
         is_cpu = jax.devices()[0].platform == "cpu"
-        kw = {"interpret": True} if is_cpu else {}
         return pl.pallas_call(
             functools.partial(tile_sinkhorn_kernel),
             out_shape=out_shape,
@@ -390,7 +393,7 @@ def _apply_transport_plan(Q, K, V, u_out, v_out, band_width, q_mask, k_mask, sco
                 pl.BlockSpec(block_shape=(1,), index_map=lambda: (0,)),
             ],
             out_specs=pl.BlockSpec(block_shape=out_shape.shape, index_map=lambda: (0, 0)),
-            **kw,
+            interpret=is_cpu,
         )(q_tile, k_tile, v_tile, u_tile, v_pot_tile, q_mask_tile, k_mask_tile, scale_arr)
 
     def scan_kv_blocks(acc, elements):
@@ -632,7 +635,6 @@ def pallas_sinkhorn_bwd_fused(Q, K, V, dO, M_data, N_data, band_width, score_sca
     scale_arr = jnp.asarray([score_scale], dtype=Q.dtype)
 
     is_cpu = jax.devices()[0].platform == "cpu"
-    kw = {"interpret": True} if is_cpu else {}
 
     grid_dq = (M // BLOCK,)
     dQ_f = pl.pallas_call(
@@ -650,7 +652,7 @@ def pallas_sinkhorn_bwd_fused(Q, K, V, dO, M_data, N_data, band_width, score_sca
             pl.BlockSpec(index_map=lambda m: (0,), block_shape=(1,)),
         ],
         out_specs=pl.BlockSpec(index_map=lambda m: (m, 0), block_shape=(BLOCK, D)),
-        **kw,
+        interpret=is_cpu,
     )(Q, K, V, M_data, N_data, dO, W_arr, scale_arr)
 
     grid_dk_dv = (N // BLOCK,)
@@ -672,7 +674,7 @@ def pallas_sinkhorn_bwd_fused(Q, K, V, dO, M_data, N_data, band_width, score_sca
             pl.BlockSpec(index_map=lambda n: (n, 0), block_shape=(BLOCK, D)),
             pl.BlockSpec(index_map=lambda n: (n, 0), block_shape=(BLOCK, E)),
         ],
-        **kw,
+        interpret=is_cpu,
     )(Q, K, V, M_data, N_data, dO, W_arr, scale_arr)
 
     return dQ_f, dK_f, dV_f

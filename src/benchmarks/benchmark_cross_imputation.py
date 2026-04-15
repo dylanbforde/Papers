@@ -15,10 +15,13 @@ Because the loss is computed over the Output matrix O, JAX analytically
 routes gradients through our custom, highly optimized Pallas backward bindings.
 """
 
+import importlib
 import os
 import sys
 import time
 import argparse
+from typing import Any
+
 import numpy as np
 
 import jax
@@ -27,7 +30,7 @@ import optax
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import ot_kernel
-from benchmark_wallclock_training import download_ortholog_pairs
+from benchmarks.benchmark_wallclock_training import download_ortholog_pairs
 
 # ==============================================================================
 # MUON Optimizer
@@ -59,9 +62,18 @@ def muon_optimizer(learning_rate):
 # REAL DATA: DNA Feature Preparation
 # ==============================================================================
 
+def _load_hf_modules() -> tuple[Any, Any, Any, Any]:
+    torch_module = importlib.import_module("torch")
+    transformers = importlib.import_module("transformers")
+    return (
+        torch_module,
+        transformers.AutoTokenizer,
+        transformers.AutoModel,
+        transformers.AutoConfig,
+    )
+
 def prepare_real_ortholog_dataset(data_dir, model_name, seq_len, pad_granularity=128):
-    import torch
-    from transformers import AutoTokenizer, AutoModel, AutoConfig
+    torch_module, AutoTokenizer, AutoModel, AutoConfig = _load_hf_modules()
 
     pairs = download_ortholog_pairs(data_dir, seq_len)
     if not pairs:
@@ -81,7 +93,7 @@ def prepare_real_ortholog_dataset(data_dir, model_name, seq_len, pad_granularity
 
     def embed_batch(sequences):
         inputs = tokenizer(sequences, return_tensors="pt", padding=True, truncation=True, max_length=seq_len)
-        with torch.no_grad():
+        with torch_module.no_grad():
             outputs = model(**inputs)
         emb = outputs.last_hidden_state.numpy()
         B, L_tok, D = emb.shape

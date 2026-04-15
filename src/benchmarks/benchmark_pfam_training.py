@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 import warnings
+from typing import cast
 
 import numpy as np
 
@@ -85,17 +86,20 @@ class PfamShardDataset:
     def sample_batch(self, batch_size):
         shard_idx = int(self.rng.integers(0, self.total_shards))
         self._load_shard(shard_idx)
+        shard_data = self.curr_shard_data
+        if shard_data is None:
+            raise RuntimeError(f"Failed to load shard {shard_idx}.")
 
-        num_in_shard = self.curr_shard_data["emb1"].shape[0]
+        num_in_shard = shard_data["emb1"].shape[0]
         replace = batch_size > num_in_shard
         indices = self.rng.choice(num_in_shard, batch_size, replace=replace)
 
-        emb1 = self.curr_shard_data["emb1"][indices][:, None, :, :]
-        emb2 = self.curr_shard_data["emb2"][indices][:, None, :, :]
-        target_cols = self.curr_shard_data["target_cols"][indices]
-        target_mask = self.curr_shard_data["target_mask"][indices]
-        q_mask = self.curr_shard_data["q_mask"][indices]
-        k_mask = self.curr_shard_data["k_mask"][indices]
+        emb1 = shard_data["emb1"][indices][:, None, :, :]
+        emb2 = shard_data["emb2"][indices][:, None, :, :]
+        target_cols = shard_data["target_cols"][indices]
+        target_mask = shard_data["target_mask"][indices]
+        q_mask = shard_data["q_mask"][indices]
+        k_mask = shard_data["k_mask"][indices]
         return emb1, emb2, target_cols, target_mask, q_mask, k_mask
 
 
@@ -113,16 +117,20 @@ def muzzle_orthogonalize(grad, steps=5):
 
 
 def muon_optimizer(lr):
-    def init_fn(params):
+    def init_fn(params: optax.Params) -> optax.EmptyState:
         return optax.EmptyState()
 
-    def update_fn(grads, state, params=None):
+    def update_fn(
+        grads: optax.Updates,
+        state: optax.EmptyState,
+        params: optax.Params | None = None,
+    ) -> tuple[optax.Updates, optax.EmptyState]:
         del params
         updates = jax.tree_util.tree_map(muzzle_orthogonalize, grads)
         updates = jax.tree_util.tree_map(lambda x: -lr * x, updates)
         return updates, state
 
-    return optax.GradientTransformation(init_fn, update_fn)
+    return optax.GradientTransformation(init_fn, cast(optax.TransformUpdateFn, update_fn))
 
 
 def stiefel_qr_retraction(matrix):

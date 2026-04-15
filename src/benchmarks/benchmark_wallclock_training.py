@@ -32,12 +32,14 @@ Usage:
         --method sinkhorn_ot --max_hours 0.01 --seq_len 256 --no_gcs
 """
 
+import importlib
 import os
 import sys
 import time
 import json
 import csv
 import argparse
+from typing import Any, cast
 
 import numpy as np
 
@@ -54,6 +56,17 @@ if "TPU_WORKER_HOSTNAMES" in os.environ:
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import ot_kernel
+
+
+def _load_hf_modules() -> tuple[Any, Any, Any, Any]:
+    torch_module = importlib.import_module("torch")
+    transformers = importlib.import_module("transformers")
+    return (
+        torch_module,
+        transformers.AutoTokenizer,
+        transformers.AutoModel,
+        transformers.AutoConfig,
+    )
 
 
 # ==============================================================================
@@ -277,8 +290,7 @@ def prepare_dataset(data_dir, model_name, seq_len, pad_granularity=128):
         targets: (N, L, L) ground-truth alignment matrices
         seq_len: actual padded sequence length
     """
-    import torch
-    from transformers import AutoTokenizer, AutoModel, AutoConfig
+    torch_module, AutoTokenizer, AutoModel, AutoConfig = _load_hf_modules()
 
     # 1. Download ortholog pairs
     pairs = download_ortholog_pairs(data_dir, seq_len)
@@ -329,7 +341,7 @@ def prepare_dataset(data_dir, model_name, seq_len, pad_granularity=128):
 
     def embed_batch(sequences):
         inputs = tokenizer(sequences, return_tensors="pt", padding=True, truncation=True, max_length=seq_len)
-        with torch.no_grad():
+        with torch_module.no_grad():
             outputs = model(**inputs)
         emb = outputs.last_hidden_state.numpy()
         B, L_tok, D = emb.shape
@@ -422,7 +434,7 @@ def save_checkpoint(params, step, method, gcs_bucket, elapsed_time, local_dir="/
     data['metadata_elapsed'] = np.array(elapsed_time)
     
     ckpt_path = os.path.join(ckpt_dir, "params.npz")
-    np.savez(ckpt_path, **data)
+    cast(Any, np.savez)(ckpt_path, **data)
     
     if gcs_bucket:
         gcs_path = f"gs://{gcs_bucket}/checkpoints/{method}/step_{step:06d}/params.npz"

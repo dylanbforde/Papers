@@ -22,21 +22,21 @@ Usage:
     python benchmark_long_context_alignment.py --model_name "facebook/esm2_t6_8M_UR50D" --vocab protein
 """
 
+import importlib
 import os
 import sys
 import time
 import json
 import argparse
 import datetime
+from typing import Any
+
 import numpy as np
 
 import jax
 import jax.numpy as jnp
 import optax
 from jax.sharding import Mesh
-
-import torch
-from transformers import AutoTokenizer, AutoModel, AutoConfig
 
 # Initialize JAX multi-host distributed cluster (only required for Multi-TPU pod slices > 8 chips)
 if "MEGATRON_WORKER" in os.environ or ("TPU_WORKER_HOSTNAMES" in os.environ and len(os.environ['TPU_WORKER_HOSTNAMES'].split(",")) > 1):
@@ -88,7 +88,18 @@ def muon_optimizer(learning_rate):
 # ==============================================================================
 _FOUNDATION_MODEL_CACHE = {}
 
+def _load_hf_modules() -> tuple[Any, Any, Any, Any]:
+    torch_module = importlib.import_module("torch")
+    transformers = importlib.import_module("transformers")
+    return (
+        torch_module,
+        transformers.AutoTokenizer,
+        transformers.AutoModel,
+        transformers.AutoConfig,
+    )
+
 def get_foundation_embeddings(sequences, model_name):
+    torch_module, AutoTokenizer, AutoModel, AutoConfig = _load_hf_modules()
 
     if model_name in _FOUNDATION_MODEL_CACHE:
         tokenizer, model = _FOUNDATION_MODEL_CACHE[model_name]
@@ -108,7 +119,7 @@ def get_foundation_embeddings(sequences, model_name):
         _FOUNDATION_MODEL_CACHE[model_name] = (tokenizer, model)
 
     inputs = tokenizer(sequences, return_tensors="pt", padding=True)
-    with torch.no_grad():
+    with torch_module.no_grad():
         outputs = model(**inputs)
         
     hidden_states = outputs.last_hidden_state.numpy()
