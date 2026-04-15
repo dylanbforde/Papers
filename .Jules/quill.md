@@ -7,3 +7,7 @@
 ## 2024-05-24 - [Dual-Tensor Packing Strategy]
 **Learning:** The paper claimed a "single tensor" with $C=8$ channels for the packing strategy, but the codebase actually utilizes two distinct tensors (`M_data` for query-side and `N_data` for key-side), each with 8 channels, to pack potential histories and gradient intermediates without overloading a single tensor.
 **Action:** Always verify memory mapping architecture claims in the text against the actual JAX Pallas kernel inputs, specifically looking for split query/key state representations.
+
+## 2024-05-24 - [Variable Mapping & Code Sync]
+**Learning:** The hardware-efficient factorization for multi-transport Sinkhorn equations mathematically relies on $P^{(2,2)}$ as the base reference plan, which corresponds strictly to the `P22` variable in `src/ot_kernel.py`. The original paper incorrectly used $P^{(1,1)}$.
+**Action:** When synchronizing mathematical equations with codebase behavior, cross-reference core tensor and variable names directly (like `P22` -> $P^{(2,2)}$) to ensure equations match the implemented optimization strategy.
