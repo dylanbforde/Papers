@@ -19,6 +19,7 @@ HEADER_PATTERNS = {
     "sinkhorn_epsilon_scaling_factor": re.compile(
         r"^\s+sinkhorn epsilon scaling factor: (?P<value>[-+]?\d+(?:\.\d+)?)$"
     ),
+    "band_width": re.compile(r"^\s+band width: (?P<value>\d+)$"),
     "train_reconstruction_weight": re.compile(
         r"^\s+train reconstruction weight: (?P<value>[-+]?\d+(?:\.\d+)?)$"
     ),
@@ -27,6 +28,7 @@ HEADER_PATTERNS = {
         r"^\s+train monotonicity weight: (?P<value>[-+]?\d+(?:\.\d+)?)$"
     ),
     "gap_mode": re.compile(r"^\s+gap mode: (?P<value>\S+)$"),
+    "support_reconstruction": re.compile(r"^\s+support reconstruction: (?P<value>\S+)$"),
 }
 
 STEP_PATTERN = re.compile(
@@ -90,6 +92,7 @@ def parse_log(path: Path) -> dict:
             if "sinkhorn_epsilon_scaling_factor" in header
             else None
         ),
+        "band_width": int(header["band_width"]) if "band_width" in header else None,
         "train_reconstruction_weight": (
             float(header["train_reconstruction_weight"]) if "train_reconstruction_weight" in header else None
         ),
@@ -100,6 +103,7 @@ def parse_log(path: Path) -> dict:
             float(header["train_monotonicity_weight"]) if "train_monotonicity_weight" in header else None
         ),
         "gap_mode": header.get("gap_mode"),
+        "support_reconstruction": header.get("support_reconstruction"),
         "last_step": last["step"],
         "last_loss": last["loss"],
         "last_ce": last["ce"],
@@ -156,7 +160,7 @@ def main() -> int:
 
     rows = sorted((parse_log(path) for path in unique_paths), key=_rank_key)
     header = (
-        f"{'Run':<20} {'K':>2} {'eps':>5} {'scale':>5} {'fac':>4} {'gap':<13} "
+        f"{'Run':<20} {'K':>2} {'eps':>5} {'scale':>5} {'fac':>4} {'band':>5} {'gap':<13} {'support':<16} "
         f"{'r':>4} {'ce':>4} {'mono':>5} {'bs':>3} {'step':>6} {'loss':>8} {'CE':>8} {'Mono':>8} {'Ex/s':>8}"
     )
     print(header)
@@ -168,7 +172,9 @@ def main() -> int:
             f"{_format_optional(row['sinkhorn_epsilon'], '.2f'):>5} "
             f"{_format_optional(row['sinkhorn_epsilon_scaling_steps'], 'd'):>5} "
             f"{_format_optional(row['sinkhorn_epsilon_scaling_factor'], '.2f'):>4} "
+            f"{_format_optional(row['band_width'], 'd'):>5} "
             f"{(row['gap_mode'] or 'n/a'):<13} "
+            f"{(row['support_reconstruction'] or 'n/a'):<16} "
             f"{_format_optional(row['train_reconstruction_weight'], '.2f'):>4} "
             f"{_format_optional(row['train_sparse_ce_weight'], '.2f'):>4} "
             f"{_format_optional(row['train_monotonicity_weight'], '.2f'):>5} "

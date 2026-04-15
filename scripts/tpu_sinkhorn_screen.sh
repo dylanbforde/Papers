@@ -16,7 +16,7 @@ METRIC_EVERY="${METRIC_EVERY:-25}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-100}"
 AUTOTUNE_MAX_PER_DEVICE_BATCH_SIZE="${AUTOTUNE_MAX_PER_DEVICE_BATCH_SIZE:-8}"
 GCS_DATA_PREFIX="${GCS_DATA_PREFIX:-gs://$BUCKET_NAME/pfam_shards}"
-SCREEN_CONFIGS="${SCREEN_CONFIGS:-k2_eps1:2:1.0:0:2.0:none:1.0:0.0:0.0,k4_eps1:4:1.0:0:2.0:none:1.0:0.0:0.0,muot_dustbin_mono:2:1.0:0:2.0:dustbin_block:1.0:0.0:0.05,muot_dustbin_hybrid:2:1.0:0:2.0:dustbin_block:0.5:0.5:0.05}"
+SCREEN_CONFIGS="${SCREEN_CONFIGS:-k2_eps1:2:1.0:0:2.0:1024:none:none:1.0:0.0:0.0,k4_eps1:4:1.0:0:2.0:1024:none:none:1.0:0.0:0.0,muot_dustbin_mono:2:1.0:0:2.0:1024:none:dustbin_block:1.0:0.0:0.05,muot_dustbin_hybrid:2:1.0:0:2.0:1024:none:dustbin_block:0.5:0.5:0.05,narrow128_diag:2:1.0:0:2.0:128:none:none:1.0:0.0:0.0,narrow128_transport:2:1.0:0:2.0:128:transport_scout:none:1.0:0.0:0.0}"
 ACTIVE_ACCOUNT="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null || true)"
 SOURCE_COMMIT="${SOURCE_COMMIT:-$(git -C "$REPO_ROOT" rev-parse HEAD)}"
 SOURCE_ARCHIVE="${SOURCE_ARCHIVE:-/tmp/sinkhorn-aligner-${SOURCE_COMMIT}.tar.gz}"
@@ -100,7 +100,9 @@ gcloud compute tpus tpu-vm ssh "$NODE_ID" --project="$PROJECT_ID" --zone="$ZONE"
   mkdir -p logs screen_checkpoints && \
   IFS=',' read -r -a CONFIG_ENTRIES <<< \"$SCREEN_CONFIGS\" && \
   for ENTRY in \"\${CONFIG_ENTRIES[@]}\"; do \
-    IFS=':' read -r RUN_TAG REFINE_STEPS EPSILON EPSILON_SCALING_STEPS EPSILON_SCALING_FACTOR GAP_MODE_CFG TRAIN_RECONSTRUCTION_WEIGHT TRAIN_SPARSE_CE_WEIGHT TRAIN_MONOTONICITY_WEIGHT <<< \"\$ENTRY\" && \
+    IFS=':' read -r RUN_TAG REFINE_STEPS EPSILON EPSILON_SCALING_STEPS EPSILON_SCALING_FACTOR BAND_WIDTH_CFG SUPPORT_RECONSTRUCTION_CFG GAP_MODE_CFG TRAIN_RECONSTRUCTION_WEIGHT TRAIN_SPARSE_CE_WEIGHT TRAIN_MONOTONICITY_WEIGHT <<< \"\$ENTRY\" && \
+    BAND_WIDTH_CFG=\"\${BAND_WIDTH_CFG:-1024}\" && \
+    SUPPORT_RECONSTRUCTION_CFG=\"\${SUPPORT_RECONSTRUCTION_CFG:-none}\" && \
     GAP_MODE_CFG=\"\${GAP_MODE_CFG:-none}\" && \
     TRAIN_RECONSTRUCTION_WEIGHT=\"\${TRAIN_RECONSTRUCTION_WEIGHT:-1.0}\" && \
     TRAIN_SPARSE_CE_WEIGHT=\"\${TRAIN_SPARSE_CE_WEIGHT:-0.0}\" && \
@@ -111,13 +113,14 @@ gcloud compute tpus tpu-vm ssh "$NODE_ID" --project="$PROJECT_ID" --zone="$ZONE"
       --max_hours $MAX_HOURS_PER_RUN \
       --data_dir data/pfam_shards \
       --ckpt_dir screen_checkpoints/\$RUN_TAG \
-      --band_width 1024 \
+      --band_width \$BAND_WIDTH_CFG \
       --n_iters 15 \
       --sinkhorn_gradient_mode tail_refinement \
       --sinkhorn_refine_steps \$REFINE_STEPS \
       --sinkhorn_epsilon \$EPSILON \
       --sinkhorn_epsilon_scaling_steps \$EPSILON_SCALING_STEPS \
       --sinkhorn_epsilon_scaling_factor \$EPSILON_SCALING_FACTOR \
+      --support_reconstruction \$SUPPORT_RECONSTRUCTION_CFG \
       --train_reconstruction_weight \$TRAIN_RECONSTRUCTION_WEIGHT \
       --train_sparse_ce_weight \$TRAIN_SPARSE_CE_WEIGHT \
       --train_monotonicity_weight \$TRAIN_MONOTONICITY_WEIGHT \

@@ -55,6 +55,7 @@ def _loss(
     epsilon=1.0,
     epsilon_scaling_steps=0,
     epsilon_scaling_factor=2.0,
+    support_reconstruction="none",
 ):
     out = fn(
         q,
@@ -70,6 +71,7 @@ def _loss(
         epsilon_scaling_steps=epsilon_scaling_steps,
         epsilon_scaling_factor=epsilon_scaling_factor,
         gradient_mode=gradient_mode,
+        support_reconstruction=support_reconstruction,
     )
     return jnp.sum(out * target) / out.size
 
@@ -89,6 +91,7 @@ def _grad_case(
     epsilon=1.0,
     epsilon_scaling_steps=0,
     epsilon_scaling_factor=2.0,
+    support_reconstruction="none",
 ):
     def tail_loss(q_, k_, v_):
         return _loss(
@@ -107,6 +110,7 @@ def _grad_case(
             epsilon,
             epsilon_scaling_steps,
             epsilon_scaling_factor,
+            support_reconstruction,
         )
 
     def exact_loss(q_, k_, v_):
@@ -126,6 +130,7 @@ def _grad_case(
             epsilon,
             epsilon_scaling_steps,
             epsilon_scaling_factor,
+            support_reconstruction,
         )
 
     tail_out = ot_kernel.sinkhorn_attention(
@@ -142,6 +147,7 @@ def _grad_case(
         epsilon_scaling_steps=epsilon_scaling_steps,
         epsilon_scaling_factor=epsilon_scaling_factor,
         gradient_mode="tail_refinement",
+        support_reconstruction=support_reconstruction,
     )
     exact_out = ot_kernel.sinkhorn_attention(
         q,
@@ -157,6 +163,7 @@ def _grad_case(
         epsilon_scaling_steps=epsilon_scaling_steps,
         epsilon_scaling_factor=epsilon_scaling_factor,
         gradient_mode="exact_autodiff",
+        support_reconstruction=support_reconstruction,
     )
     tail_val, tail_grads = jax.value_and_grad(tail_loss, argnums=(0, 1, 2))(q, k, v)
     exact_val, exact_grads = jax.value_and_grad(exact_loss, argnums=(0, 1, 2))(q, k, v)
@@ -233,6 +240,39 @@ def _epsilon_scaling_case(q, k, v, q_mask, k_mask, band_width):
     }
 
 
+def _offdiag_transport_support_case(seed, length, dim, band_width, shift):
+    key = jax.random.PRNGKey(seed)
+    base_key, noise_key = jax.random.split(key)
+    k = jax.random.normal(base_key, (1, 1, length, dim), dtype=jnp.float32)
+    target_cols = jnp.clip(jnp.arange(length, dtype=jnp.int32) + int(shift), 0, length - 1)
+    q = jnp.take(k, target_cols, axis=-2) + 0.01 * jax.random.normal(noise_key, k.shape, dtype=k.dtype)
+    q_mask = jnp.ones((1, 1, length), dtype=bool)
+    k_mask = jnp.ones((1, 1, length), dtype=bool)
+
+    diag_mask = ot_kernel.materialize_support_mask(
+        q,
+        k,
+        band_width=band_width,
+        q_mask=q_mask,
+        k_mask=k_mask,
+        support_reconstruction="none",
+    )
+    scout_mask = ot_kernel.materialize_support_mask(
+        q,
+        k,
+        band_width=band_width,
+        q_mask=q_mask,
+        k_mask=k_mask,
+        support_reconstruction="transport_scout",
+    )
+    rows = jnp.arange(length, dtype=jnp.int32)
+    return {
+        "diagonal_support_recall": float(jnp.mean(diag_mask[rows, target_cols].astype(jnp.float32))),
+        "transport_scout_support_recall": float(jnp.mean(scout_mask[rows, target_cols].astype(jnp.float32))),
+        "shift_tokens": int(shift),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=0)
@@ -243,6 +283,7 @@ def main():
     parser.add_argument("--grad_tol", type=float, default=2e-4)
     parser.add_argument("--out_tol", type=float, default=1e-6)
     parser.add_argument("--orth_tol", type=float, default=1e-5)
+    parser.add_argument("--support_gain_tol", type=float, default=0.25)
     args = parser.parse_args()
 
     q, k, v, target, q_mask, k_mask, params = _make_inputs(args.seed, args.length, args.dim)
@@ -287,7 +328,28 @@ def main():
             4,
             None,
         ),
+        "transport_scout_grad": _grad_case(
+            "transport_scout_grad",
+            q,
+            k,
+            v,
+            target,
+            q_mask,
+            k_mask,
+            args.n_iters,
+            args.band_width,
+            2,
+            None,
+            support_reconstruction="transport_scout",
+        ),
         "epsilon_scaling": _epsilon_scaling_case(q, k, v, q_mask, k_mask, args.band_width),
+        "offdiag_support": _offdiag_transport_support_case(
+            args.seed + 17,
+            max(args.length, 512),
+            args.dim,
+            args.band_width,
+            shift=max(args.band_width * 8, 256),
+        ),
         "stiefel_projection": _stiefel_case(params),
     }
 
@@ -298,7 +360,7 @@ def main():
     if module_agreement["src_vs_pallas_max_abs"] > args.out_tol:
         failures.append(f"src_vs_pallas_max_abs={module_agreement['src_vs_pallas_max_abs']}")
 
-    for case_name in ("k2_fast_path", "adaptive_reference", "fixed_k_orbit"):
+    for case_name in ("k2_fast_path", "adaptive_reference", "fixed_k_orbit", "transport_scout_grad"):
         case = report[case_name]
         if case["output_max_abs"] > args.out_tol:
             failures.append(f"{case_name}.output_max_abs={case['output_max_abs']}")
@@ -313,6 +375,13 @@ def main():
         failures.append(f"W_k_orth_max_abs={stiefel['W_k_orth_max_abs']}")
     if stiefel["W_v_change_max_abs"] != 0.0:
         failures.append(f"W_v_change_max_abs={stiefel['W_v_change_max_abs']}")
+
+    offdiag = report["offdiag_support"]
+    if offdiag["transport_scout_support_recall"] < offdiag["diagonal_support_recall"] + args.support_gain_tol:
+        failures.append(
+            "offdiag_support_recall_gain="
+            f"{offdiag['transport_scout_support_recall'] - offdiag['diagonal_support_recall']}"
+        )
 
     print(json.dumps(report, indent=2, sort_keys=True))
     if failures:

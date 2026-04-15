@@ -344,6 +344,7 @@ def sinkhorn_alignment_barycenters(
     epsilon,
     epsilon_scaling_steps,
     epsilon_scaling_factor,
+    support_reconstruction,
 ):
     scale = 1.0 / (jnp.sqrt(Q.shape[-1]) * epsilon)
     u, v = ot_kernel.compute_global_uv(
@@ -356,11 +357,19 @@ def sinkhorn_alignment_barycenters(
         epsilon=epsilon,
         epsilon_scaling_steps=epsilon_scaling_steps,
         epsilon_scaling_factor=epsilon_scaling_factor,
+        support_reconstruction=support_reconstruction,
     )
     logits = jnp.einsum("bhmd,bhnd->bhmn", Q, K) * scale
     logits = logits + u[..., :, None] + v[..., None, :]
     logits = jnp.where(k_mask[:, None, None, :], logits, -jnp.inf)
-    band = _length_band_mask(Q.shape[-2], band_width)
+    band = ot_kernel.materialize_support_mask(
+        Q,
+        K,
+        band_width=band_width,
+        q_mask=q_mask,
+        k_mask=k_mask,
+        support_reconstruction=support_reconstruction,
+    )
     if band is not None:
         logits = jnp.where(band[None, None, :, :], logits, -jnp.inf)
     weights = jnp.where(q_mask[:, None, :, None], jnp.exp(logits), 0.0)
@@ -395,6 +404,7 @@ def _alignment_loss_terms(
     sinkhorn_epsilon,
     sinkhorn_epsilon_scaling_steps,
     sinkhorn_epsilon_scaling_factor,
+    support_reconstruction,
 ):
     safe_cols, active_mask = _prepare_sparse_supervision(target_cols, target_mask, q_mask, k_mask)
     target_v = _batch_take_rows(V, safe_cols)
@@ -414,6 +424,7 @@ def _alignment_loss_terms(
             epsilon=sinkhorn_epsilon,
             epsilon_scaling_steps=sinkhorn_epsilon_scaling_steps,
             epsilon_scaling_factor=sinkhorn_epsilon_scaling_factor,
+            support_reconstruction=support_reconstruction,
         )
         ce_loss = sparse_ce_metric(
             Q,
@@ -427,6 +438,7 @@ def _alignment_loss_terms(
             sinkhorn_epsilon,
             sinkhorn_epsilon_scaling_steps,
             sinkhorn_epsilon_scaling_factor,
+            support_reconstruction,
         )
         barycenters = sinkhorn_alignment_barycenters(
             Q,
@@ -438,6 +450,7 @@ def _alignment_loss_terms(
             sinkhorn_epsilon,
             sinkhorn_epsilon_scaling_steps,
             sinkhorn_epsilon_scaling_factor,
+            support_reconstruction,
         )
     else:
         outputs = flash_attention_outputs(Q, K, V, q_mask, k_mask, band_width=band_width)
@@ -469,6 +482,7 @@ def sinkhorn_outputs(
     epsilon,
     epsilon_scaling_steps,
     epsilon_scaling_factor,
+    support_reconstruction,
 ):
     return ot_kernel.sinkhorn_attention(
         Q,
@@ -484,6 +498,7 @@ def sinkhorn_outputs(
         epsilon_scaling_steps=epsilon_scaling_steps,
         epsilon_scaling_factor=epsilon_scaling_factor,
         gradient_mode=gradient_mode,
+        support_reconstruction=support_reconstruction,
     )
 
 
@@ -504,6 +519,7 @@ def output_reconstruction_loss(
     sinkhorn_epsilon,
     sinkhorn_epsilon_scaling_steps,
     sinkhorn_epsilon_scaling_factor,
+    support_reconstruction,
     train_reconstruction_weight,
     train_sparse_ce_weight,
     train_monotonicity_weight,
@@ -539,6 +555,7 @@ def output_reconstruction_loss(
         sinkhorn_epsilon,
         sinkhorn_epsilon_scaling_steps,
         sinkhorn_epsilon_scaling_factor,
+        support_reconstruction,
     )
     return (
         train_reconstruction_weight * loss_terms["reconstruction"]
@@ -559,6 +576,7 @@ def sparse_ce_metric(
     epsilon,
     epsilon_scaling_steps,
     epsilon_scaling_factor,
+    support_reconstruction,
 ):
     # Exact sparse CE metric computed from masked potentials; expensive, optional.
     u, v = ot_kernel.compute_global_uv(
@@ -571,6 +589,7 @@ def sparse_ce_metric(
         epsilon=epsilon,
         epsilon_scaling_steps=epsilon_scaling_steps,
         epsilon_scaling_factor=epsilon_scaling_factor,
+        support_reconstruction=support_reconstruction,
     )
 
     scale = 1.0 / (jnp.sqrt(Q.shape[-1]) * epsilon)
@@ -580,8 +599,19 @@ def sparse_ce_metric(
     log_pos = jnp.sum(Q * matched_k, axis=-1) * scale + u + matched_v
 
     if band_width is not None:
-        row_idx = jnp.arange(Q.shape[-2], dtype=safe_cols.dtype)[None, :]
-        in_band = jnp.abs(row_idx - safe_cols) <= int(band_width)
+        band = ot_kernel.materialize_support_mask(
+            Q,
+            K,
+            band_width=band_width,
+            q_mask=q_mask,
+            k_mask=k_mask,
+            support_reconstruction=support_reconstruction,
+        )
+        in_band = jnp.take_along_axis(
+            jnp.broadcast_to(band[None, :, :], (Q.shape[0],) + band.shape),
+            safe_cols[..., None],
+            axis=-1,
+        )[..., 0]
         log_pos = jnp.where(in_band[:, None, :], log_pos, -1e9)
 
     denom = jnp.maximum(jnp.sum(active_mask) * Q.shape[1], 1)
@@ -614,6 +644,7 @@ def build_train_step(
     sinkhorn_epsilon,
     sinkhorn_epsilon_scaling_steps,
     sinkhorn_epsilon_scaling_factor,
+    support_reconstruction,
     train_reconstruction_weight,
     train_sparse_ce_weight,
     train_monotonicity_weight,
@@ -641,6 +672,7 @@ def build_train_step(
                 sinkhorn_epsilon,
                 sinkhorn_epsilon_scaling_steps,
                 sinkhorn_epsilon_scaling_factor,
+                support_reconstruction,
                 train_reconstruction_weight,
                 train_sparse_ce_weight,
                 train_monotonicity_weight,
@@ -670,6 +702,7 @@ def build_metric_step(
     sinkhorn_epsilon,
     sinkhorn_epsilon_scaling_steps,
     sinkhorn_epsilon_scaling_factor,
+    support_reconstruction,
 ):
     @functools.partial(jax.pmap, axis_name="devices")
     def metric_step(params, emb_q, emb_k, target_cols, target_mask, q_mask, k_mask):
@@ -699,6 +732,7 @@ def build_metric_step(
                 sinkhorn_epsilon,
                 sinkhorn_epsilon_scaling_steps,
                 sinkhorn_epsilon_scaling_factor,
+                support_reconstruction,
             )
             barycenters = sinkhorn_alignment_barycenters(
                 Q,
@@ -710,6 +744,7 @@ def build_metric_step(
                 sinkhorn_epsilon,
                 sinkhorn_epsilon_scaling_steps,
                 sinkhorn_epsilon_scaling_factor,
+                support_reconstruction,
             )
         else:
             ce_metric = flash_sparse_ce_metric(Q, K, target_cols, target_mask, q_mask, k_mask, band_width_eff)
@@ -773,6 +808,7 @@ def autotune_per_device_batch_size(
     sinkhorn_epsilon,
     sinkhorn_epsilon_scaling_steps,
     sinkhorn_epsilon_scaling_factor,
+    support_reconstruction,
     train_reconstruction_weight,
     train_sparse_ce_weight,
     train_monotonicity_weight,
@@ -809,6 +845,7 @@ def autotune_per_device_batch_size(
                 sinkhorn_epsilon,
                 sinkhorn_epsilon_scaling_steps,
                 sinkhorn_epsilon_scaling_factor,
+                support_reconstruction,
                 train_reconstruction_weight,
                 train_sparse_ce_weight,
                 train_monotonicity_weight,
@@ -868,6 +905,7 @@ def train_pfam(
     sinkhorn_epsilon=1.0,
     sinkhorn_epsilon_scaling_steps=0,
     sinkhorn_epsilon_scaling_factor=2.0,
+    support_reconstruction="none",
     train_reconstruction_weight=1.0,
     train_sparse_ce_weight=0.0,
     train_monotonicity_weight=0.0,
@@ -896,6 +934,8 @@ def train_pfam(
         raise ValueError("sinkhorn_epsilon_scaling_steps must be non-negative.")
     if sinkhorn_epsilon_scaling_factor < 1.0:
         raise ValueError("sinkhorn_epsilon_scaling_factor must be at least 1.0.")
+    if support_reconstruction not in ("none", "affine_scout", "transport_scout"):
+        raise ValueError(f"Unsupported support_reconstruction={support_reconstruction!r}.")
     if train_reconstruction_weight < 0:
         raise ValueError("train_reconstruction_weight must be non-negative.")
     if train_sparse_ce_weight < 0:
@@ -963,6 +1003,7 @@ def train_pfam(
             sinkhorn_epsilon=sinkhorn_epsilon,
             sinkhorn_epsilon_scaling_steps=sinkhorn_epsilon_scaling_steps,
             sinkhorn_epsilon_scaling_factor=sinkhorn_epsilon_scaling_factor,
+            support_reconstruction=support_reconstruction,
             train_reconstruction_weight=train_reconstruction_weight,
             train_sparse_ce_weight=train_sparse_ce_weight,
             train_monotonicity_weight=train_monotonicity_weight,
@@ -995,6 +1036,7 @@ def train_pfam(
         sinkhorn_epsilon,
         sinkhorn_epsilon_scaling_steps,
         sinkhorn_epsilon_scaling_factor,
+        support_reconstruction,
         train_reconstruction_weight,
         train_sparse_ce_weight,
         train_monotonicity_weight,
@@ -1010,6 +1052,7 @@ def train_pfam(
             sinkhorn_epsilon,
             sinkhorn_epsilon_scaling_steps,
             sinkhorn_epsilon_scaling_factor,
+            support_reconstruction,
         )
         if metric_every and metric_every > 0
         else None
@@ -1033,6 +1076,7 @@ def train_pfam(
             print(f"  sinkhorn epsilon: {sinkhorn_epsilon}")
             print(f"  sinkhorn epsilon scaling steps: {sinkhorn_epsilon_scaling_steps}")
             print(f"  sinkhorn epsilon scaling factor: {sinkhorn_epsilon_scaling_factor}")
+            print(f"  support reconstruction: {support_reconstruction}")
         print(f"  train reconstruction weight: {train_reconstruction_weight}")
         print(f"  train sparse CE weight: {train_sparse_ce_weight}")
         print(f"  train monotonicity weight: {train_monotonicity_weight}")
@@ -1170,6 +1214,12 @@ if __name__ == "__main__":
         help="Multiplicative ratio between adjacent epsilon-scaling stages (must be >= 1).",
     )
     parser.add_argument(
+        "--support_reconstruction",
+        choices=["none", "affine_scout", "transport_scout"],
+        default="none",
+        help="Optional row-wise band reconstruction. transport_scout estimates an off-diagonal centerline from a coarse block-level Sinkhorn scout.",
+    )
+    parser.add_argument(
         "--train_reconstruction_weight",
         type=float,
         default=1.0,
@@ -1222,6 +1272,7 @@ if __name__ == "__main__":
         sinkhorn_epsilon=args.sinkhorn_epsilon,
         sinkhorn_epsilon_scaling_steps=args.sinkhorn_epsilon_scaling_steps,
         sinkhorn_epsilon_scaling_factor=args.sinkhorn_epsilon_scaling_factor,
+        support_reconstruction=args.support_reconstruction,
         train_reconstruction_weight=args.train_reconstruction_weight,
         train_sparse_ce_weight=args.train_sparse_ce_weight,
         train_monotonicity_weight=args.train_monotonicity_weight,
