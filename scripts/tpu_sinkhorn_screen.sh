@@ -24,6 +24,7 @@ SOURCE_COMMIT="${SOURCE_COMMIT:-$(git -C "$REPO_ROOT" rev-parse HEAD)}"
 SOURCE_ARCHIVE="${SOURCE_ARCHIVE:-/tmp/sinkhorn-aligner-${SOURCE_COMMIT}.tar.gz}"
 ARTIFACT_DEST="${GCS_ARTIFACT_PREFIX%/}/$RUN_ID"
 ARTIFACTS_SYNCED=0
+DELETE_WAITING_QUEUE_ON_EXIT="${DELETE_WAITING_QUEUE_ON_EXIT:-0}"
 
 if [ -z "$ACTIVE_ACCOUNT" ]; then
   echo "✗ No active gcloud account found. Run 'gcloud auth login' or 'gcloud config set account ACCOUNT' before launching TPU jobs."
@@ -63,6 +64,12 @@ sync_artifacts() {
 cleanup() {
   local exit_code=$?
   sync_artifacts || true
+  local status
+  status="$(gcloud compute tpus queued-resources describe "$RESOURCE_ID" --project="$PROJECT_ID" --zone="$ZONE" --format='value(state.state)' 2>/dev/null || true)"
+  if [ "$status" = "WAITING_FOR_RESOURCES" ] && [ "$DELETE_WAITING_QUEUE_ON_EXIT" != "1" ]; then
+    echo "[$(date)] Preserving queued resource $RESOURCE_ID (state: $status). Set DELETE_WAITING_QUEUE_ON_EXIT=1 to force deletion while waiting."
+    return "$exit_code"
+  fi
   echo "[$(date)] Initiating mandatory cleanup to stop billing..."
   gcloud compute tpus queued-resources delete "$RESOURCE_ID" --project="$PROJECT_ID" --zone="$ZONE" --force --quiet || true
   echo "[$(date)] Cleanup complete."

@@ -15,5 +15,7 @@ dependencies = [
     "chex",
     "ml-collections",
     "ott-jax",
-    "grain-nightly"
+    "grain-nightly",
+    "tool>=0.8.0",
+    "ruff>=0.15.10",
 ]
