@@ -1,3 +1,6 @@
 ## 2024-05-24 - Faster Tensor Packing with jnp.pad
 **Learning:** When packing multiple tensors together where some channels need to be padded with zeros (e.g. for hardware alignment mod-8), using `jnp.stack` with multiple `jnp.zeros_like()` calls forces JAX to allocate large explicitly zeroed arrays. Using `jnp.stack` only on active variables and then padding the last dimension with `jnp.pad(active, ((0, 0), ..., (0, N)))` bypasses these allocations and translates to much faster slice-update ops in XLA (up to ~1.8x faster on CPU during JIT).
 **Action:** When creating mod-N padded tensor structures for kernels, always prefer `jnp.pad` over explicit `jnp.zeros_like` stacking.
+## 2024-05-24 - Pallas Kernel Outer Pre-Scaling Optimization
+**Learning:** Pre-scaling query (`q`) and key (`k`) blocks by a constant factor (like `1/sqrt(D)`) outside of inner loops and before computing attention dot products/einsums replaces $O(M \times N)$ scaling operations with $O(M \times D)$ or $O(N \times D)$, saving FLOPs and compute cycles.
+**Action:** When working with Pallas or custom JAX attention kernels, always pre-scale `q` or `k` blocks before performing `jnp.einsum` or `jnp.dot` to avoid scaling the full attention matrix.
