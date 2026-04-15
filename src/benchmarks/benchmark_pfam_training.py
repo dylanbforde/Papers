@@ -819,6 +819,7 @@ def autotune_per_device_batch_size(
     # Budget-aware autotune: a handful of compile+run attempts at the start.
     local_device_count = jax.local_device_count()
     devices = jax.local_devices()
+    last_error = {"batch_size": None, "exception": None}
 
     def try_size(per_device_batch_size: int) -> bool:
         local_batch_size = per_device_batch_size * local_device_count
@@ -856,11 +857,13 @@ def autotune_per_device_batch_size(
                 params_r, opt_state_r, emb_q_p, emb_k_p, target_cols_p, target_mask_p, q_mask_p, k_mask_p
             )
             jax.block_until_ready(loss)
-        except Exception:
+        except Exception as exc:
+            last_error["batch_size"] = per_device_batch_size
+            last_error["exception"] = exc
             return False
         return True
 
-    best = 1
+    best = 0
     candidate = 1
     while candidate <= max_per_device_batch_size:
         ok = try_size(candidate)
@@ -880,6 +883,16 @@ def autotune_per_device_batch_size(
             low = mid
         else:
             high = mid - 1
+
+    if best == 0:
+        detail = "unknown error"
+        if last_error["exception"] is not None:
+            exc = last_error["exception"]
+            detail = f"{type(exc).__name__}: {exc}"
+        raise RuntimeError(
+            "Autotune failed even at per_device_batch_size=1. "
+            f"Last error at batch size {last_error['batch_size']}: {detail}"
+        ) from last_error["exception"]
 
     return low
 

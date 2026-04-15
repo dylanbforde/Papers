@@ -4,7 +4,7 @@ set -euo pipefail
 
 PROJECT_ID="${PROJECT_ID:-sinkhorn-neurips}"
 ZONE="${ZONE:-us-east5-a}"
-RESOURCE_ID="${1:-${RESOURCE_ID:-sinkhorn-k-ablation-queue}}"
+RESOURCE_ID="${1:-${RESOURCE_ID:-sinkhorn-screen-queue}}"
 
 gcloud compute tpus queued-resources describe "$RESOURCE_ID" \
   --project="$PROJECT_ID" \

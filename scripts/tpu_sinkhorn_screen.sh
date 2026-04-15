@@ -16,20 +16,57 @@ METRIC_EVERY="${METRIC_EVERY:-25}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-100}"
 AUTOTUNE_MAX_PER_DEVICE_BATCH_SIZE="${AUTOTUNE_MAX_PER_DEVICE_BATCH_SIZE:-8}"
 GCS_DATA_PREFIX="${GCS_DATA_PREFIX:-gs://$BUCKET_NAME/pfam_shards}"
+GCS_ARTIFACT_PREFIX="${GCS_ARTIFACT_PREFIX:-gs://$BUCKET_NAME/sinkhorn_screen}"
+RUN_ID="${RUN_ID:-screen_$(date -u +%Y%m%dT%H%M%SZ)}"
 SCREEN_CONFIGS="${SCREEN_CONFIGS:-k2_eps1:2:1.0:0:2.0:1024:none:none:1.0:0.0:0.0,k4_eps1:4:1.0:0:2.0:1024:none:none:1.0:0.0:0.0,muot_dustbin_mono:2:1.0:0:2.0:1024:none:dustbin_block:1.0:0.0:0.05,muot_dustbin_hybrid:2:1.0:0:2.0:1024:none:dustbin_block:0.5:0.5:0.05,narrow128_diag:2:1.0:0:2.0:128:none:none:1.0:0.0:0.0,narrow128_transport:2:1.0:0:2.0:128:transport_scout:none:1.0:0.0:0.0}"
 ACTIVE_ACCOUNT="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null || true)"
 SOURCE_COMMIT="${SOURCE_COMMIT:-$(git -C "$REPO_ROOT" rev-parse HEAD)}"
 SOURCE_ARCHIVE="${SOURCE_ARCHIVE:-/tmp/sinkhorn-aligner-${SOURCE_COMMIT}.tar.gz}"
+ARTIFACT_DEST="${GCS_ARTIFACT_PREFIX%/}/$RUN_ID"
+ARTIFACTS_SYNCED=0
 
 if [ -z "$ACTIVE_ACCOUNT" ]; then
   echo "✗ No active gcloud account found. Run 'gcloud auth login' or 'gcloud config set account ACCOUNT' before launching TPU jobs."
   exit 1
 fi
 
+sync_artifacts() {
+  if [ "$ARTIFACTS_SYNCED" -eq 1 ]; then
+    return 0
+  fi
+
+  local status
+  status="$(gcloud compute tpus queued-resources describe "$RESOURCE_ID" --project="$PROJECT_ID" --zone="$ZONE" --format='value(state.state)' 2>/dev/null || true)"
+  if [ "$status" != "ACTIVE" ]; then
+    echo "[$(date)] Skipping artifact sync (queue state: ${status:-unknown})."
+    return 0
+  fi
+
+  echo "[$(date)] Syncing screen artifacts to $ARTIFACT_DEST ..."
+  if gcloud compute tpus tpu-vm ssh "$NODE_ID" --project="$PROJECT_ID" --zone="$ZONE" --command="
+    set -euo pipefail && \
+    export PATH=\"\$PATH:/home/\$USER/.local/bin\" && \
+    if [ ! -d sinkhorn-aligner ]; then
+      echo 'No source snapshot found on leader; skipping artifact sync.' && exit 0
+    fi && \
+    cd sinkhorn-aligner && \
+    mkdir -p logs screen_checkpoints && \
+    printf 'run_id=%s\nresource_id=%s\nnode_id=%s\nsource_commit=%s\n' '$RUN_ID' '$RESOURCE_ID' '$NODE_ID' '$SOURCE_COMMIT' > screen_run_metadata.txt && \
+    gsutil -m cp -r logs screen_checkpoints screen_run_metadata.txt '$ARTIFACT_DEST/'" --quiet --ssh-flag="-o StrictHostKeyChecking=no" --ssh-flag="-o UserKnownHostsFile=/dev/null"; then
+    echo "[$(date)] Screen artifacts synced to $ARTIFACT_DEST"
+    ARTIFACTS_SYNCED=1
+  else
+    echo "[$(date)] Warning: failed to sync screen artifacts to $ARTIFACT_DEST"
+  fi
+}
+
 cleanup() {
+  local exit_code=$?
+  sync_artifacts || true
   echo "[$(date)] Initiating mandatory cleanup to stop billing..."
-  gcloud compute tpus queued-resources delete "$RESOURCE_ID" --project="$PROJECT_ID" --zone="$ZONE" --force --quiet
+  gcloud compute tpus queued-resources delete "$RESOURCE_ID" --project="$PROJECT_ID" --zone="$ZONE" --force --quiet || true
   echo "[$(date)] Cleanup complete."
+  return "$exit_code"
 }
 trap cleanup EXIT
 

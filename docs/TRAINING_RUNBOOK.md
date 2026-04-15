@@ -1,132 +1,103 @@
-# Wall-Clock Training Deployment Runbook
+# TPU Training Deployment Runbook
 
-You have two options:
-1. **🚀 One-Click Automated Run** (Recommended) — Run one script and go to sleep. It waits for capacity, installs everything, runs the full 5-hour experiment, and shuts down.
-2. **Step-by-Step Manual Run** — Copy-paste each command manually.
+The current production TPU workflow is a two-stage Pfam pipeline:
+1. Run a short Sinkhorn-only screen on Pfam shards with `scripts/tpu_sinkhorn_screen.sh`.
+2. Promote the winning config into the full Pfam Sinkhorn-vs-Flash run with `scripts/tpu_auto_run.sh`.
 
----
-
-## 🚀 Option 1: One-Click Automated Run
-
-Use this if you don't want to wait around for the TPU to become active.
-
-1. **Prepare your SSH agent** (so the script can clone via SSH):
-   ```bash
-   eval `ssh-agent -s`
-   ssh-add ~/.ssh/id_ed25519  # replace with your key path
-   ```
-
-2. **Run the master script**:
-   ```bash
-   # Clone the repo locally first (if you haven't)
-   git clone git@github.com:dylanbforde/sinkhorn-aligner.git
-   cd sinkhorn-aligner
-
-   # Run the automated deployment script
-   chmod +x scripts/tpu_auto_run.sh
-   ./scripts/tpu_auto_run.sh
-   ```
-
-3. **Go to sleep.** The script will block until capacity is available, run the 5-hour experiment, and shut the TPU down when finished.
-
-   > [!TIP]
-   > **Preemption-Proof**: I have updated the benchmark script to be **auto-resuming**. If Google preempts your Spot TPU (takes it back) after 2 hours, simply run the script again tomorrow. It will automatically load your latest GCS checkpoint, restore your weights, and resume exactly where it left off (accounting for the already-spent 2 hours of budget).
+The older ortholog-DNA wall-clock script is retained as a legacy comparator, but it is not the primary TPU benchmark path anymore.
 
 ---
 
-## Option 2: Step-by-Step Manual Run
+## Recommended Flow
 
-## 0. Initial Setup (Run Once)
+### 1. Verify project and bucket
 
-Set your project context and ensure the bucket exists:
 ```bash
-# Set your project
 gcloud config set project sinkhorn-neurips
-
-# Create the bucket (if not already created)
-gcloud storage buckets create gs://sinkhorn-neurips-data --location=us-east5
+gcloud storage buckets create gs://sinkhorn-neurips --location=us-east5 || true
 ```
 
-## 1. Queue the TPU (auto-provisions when capacity is available)
+### 2. Launch the Pfam screen
+
+This script:
+- waits for `sinkhorn-screen-queue` to become active,
+- uploads an exact source snapshot from your current checkout,
+- runs the short Sinkhorn config sweep on Pfam shards,
+- syncs `logs/` and `screen_checkpoints/` to GCS before deleting the queue.
 
 ```bash
-gcloud compute tpus queued-resources create sinkhorn-queue \
-  --node-id=sinkhorn-benchmark-cluster \
+./scripts/tpu_sinkhorn_screen.sh
+```
+
+Useful overrides:
+
+```bash
+MAX_HOURS_PER_RUN=0.25 ./scripts/tpu_sinkhorn_screen.sh
+AUTOTUNE_MAX_PER_DEVICE_BATCH_SIZE=4 ./scripts/tpu_sinkhorn_screen.sh
+RESOURCE_ID=my-screen-queue NODE_ID=my-screen-cluster ./scripts/tpu_sinkhorn_screen.sh
+```
+
+While the queue is waiting:
+
+```bash
+./scripts/tpu_queue_status.sh sinkhorn-screen-queue
+```
+
+Screen artifacts land under:
+
+```bash
+gs://sinkhorn-neurips/sinkhorn_screen/<run-id>/
+```
+
+### 3. Promote the winning config into the full run
+
+Set the winning Sinkhorn config via environment variables, then launch the automated production run:
+
+```bash
+SINKHORN_REFINE_STEPS=2 \
+SINKHORN_EPSILON=1.0 \
+SUPPORT_RECONSTRUCTION=none \
+GAP_MODE=none \
+TRAIN_RECONSTRUCTION_WEIGHT=1.0 \
+TRAIN_SPARSE_CE_WEIGHT=0.0 \
+TRAIN_MONOTONICITY_WEIGHT=0.0 \
+./scripts/tpu_auto_run.sh
+```
+
+This script:
+- waits for `sinkhorn-queue`,
+- uploads the current local source snapshot,
+- fetches Pfam shards from GCS,
+- runs Sinkhorn first, then Flash, with GCS checkpointing enabled.
+
+Production checkpoints land under:
+
+```bash
+gs://sinkhorn-neurips/checkpoints/
+```
+
+---
+
+## Manual Status Checks
+
+```bash
+./scripts/tpu_queue_status.sh sinkhorn-screen-queue
+./scripts/tpu_queue_status.sh sinkhorn-queue
+```
+
+If you need the raw `gcloud` call:
+
+```bash
+gcloud compute tpus queued-resources describe sinkhorn-screen-queue \
+  --project=sinkhorn-neurips \
   --zone=us-east5-a \
-  --accelerator-type=v6e-8 \
-  --runtime-version=tpu-ubuntu2204-base \
-  --spot
+  --format="yaml(name,state.state,state.stateInitiatedTime)"
 ```
 
-## 2. Wait until ACTIVE (Copy-paste this loop)
+---
 
-This script will block and check every 30 seconds. Once it says "ACTIVE", you can proceed to Step 3.
+## Notes
 
-```bash
-while true; do
-  STATUS=$(gcloud compute tpus queued-resources describe sinkhorn-queue --zone=us-east5-a --format="value(state.state)")
-  echo "[$(date)] TPU Status: $STATUS"
-  [[ "$STATUS" == "ACTIVE" ]] && echo "✓ TPU is ACTIVE!" && break
-  sleep 30
-done
-```
-
-## 3. Install dependencies
-
-```bash
-gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=us-east5-a --worker=all --command="sudo apt-get update && sudo apt-get install python3-pip -y && pip install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html && pip install optax transformers torch"
-```
-
-## 4. SSH in and clone repo
-
-**Important**: Make sure your local SSH agent is running and has your GitHub key added so it can be forwarded to the TPU VM.
-```bash
-# On your local machine (Cloud Shell), start agent and add your key
-eval `ssh-agent -s`
-ssh-add ~/.ssh/id_ed25519  # Replace with your actual key path
-```
-
-Now SSH into the TPU VM with agent forwarding enabled:
-```bash
-gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=us-east5-a --ssh-flag="-A"
-```
-
-Then from inside the TPU VM:
-```bash
-git clone git@github.com:dylanbforde/sinkhorn-aligner.git
-```
-
-## 5. Run Full Experiment (5 hours total)
-
-**Why chain them?** Chaining both methods into one command ensures you hold the TPU hardware for the full 5 hours. If you run them separately and the machine shuts down, you might not be able to get it back due to capacity limits.
-
-```bash
-gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=us-east5-a --worker=all --command="\
-  cd sinkhorn-aligner && \
-  python src/benchmarks/benchmark_wallclock_training.py --method sinkhorn_ot --max_hours 2.5 && \
-  python src/benchmarks/benchmark_wallclock_training.py --method flash_attention --max_hours 2.5; \
-  sudo shutdown -h now"
-```
-*The command will run Sinkhorn OT first, then Flash Attention, then shut down the VM automatically.*
-
-## 6. Download results & checkpoints
-
-Once the VM is shut down (SSH will disconnect), pull everything to your local machine:
-
-```bash
-# Pull results (CSV loss curves and JSON summaries)
-gcloud storage cp -r gs://sinkhorn-neurips-data/results/ ./results/
-
-# Pull checkpoints (optional)
-gcloud storage cp -r gs://sinkhorn-neurips-data/checkpoints/ ./checkpoints/
-```
-
-## 7. Delete the queue & cluster (stop all charges)
-
-```bash
-# Delete the queued resource
-gcloud compute tpus queued-resources delete sinkhorn-queue --zone=us-east5-a --force
-
-# Delete the TPU VM itself
-gcloud compute tpus tpu-vm delete sinkhorn-benchmark-cluster --zone=us-east5-a --quiet
-```
+- The automation scripts use `git archive` from your local checkout. You do not need to clone from GitHub on the TPU VM.
+- `scripts/tpu_sinkhorn_screen.sh` now preserves screen logs/checkpoints before teardown. Review the synced GCS artifacts before promoting a config.
+- `src/benchmarks/benchmark_wallclock_training.py` remains available for the legacy ortholog-DNA benchmark, but it is no longer the repo’s primary TPU workflow.

@@ -18,3 +18,4 @@
 - Avoid conflating approximations (e.g., truncated k=2 unrolling) with exact solutions in descriptions.
 - Use multi-seed runs for all statistical claims.
 - Any new implementation should seamlessly support scaling out to TPU/GPU pods.
+- Treat the **Pfam shard pipeline** (`benchmark_pfam_training.py`, `scripts/tpu_sinkhorn_screen.sh`, `scripts/tpu_auto_run.sh`) as the current production TPU benchmark path. The ortholog-DNA wall-clock script is retained as a legacy comparator, not the primary training workflow.

@@ -1,8 +1,14 @@
 # Google Cloud Platform (GCP) TPU Deployment Guide
 
-This guide covers everything you need to run both the **latency benchmark** (`benchmark_long_context_alignment.py`) and the **wall-clock training experiment** (`benchmark_wallclock_training.py`) on a Google Cloud TPU v6e (Trillium) instance for the NeurIPS paper.
+This guide covers everything you need to run the **latency benchmark** (`benchmark_long_context_alignment.py`) and the current **Pfam training workflow** (`benchmark_pfam_training.py` plus the TPU automation scripts) on a Google Cloud TPU v6e (Trillium) instance for the NeurIPS paper.
 
 Because you have never used GCP before, this guide assumes zero prior cloud experience.
+
+The current production TPU workflow is:
+1. `scripts/tpu_sinkhorn_screen.sh` for the short Sinkhorn-only Pfam screen.
+2. `scripts/tpu_auto_run.sh` for the promoted Pfam Sinkhorn-vs-Flash run.
+
+The older ortholog-DNA wall-clock benchmark remains in the repository as a legacy comparator, but it is not the primary TPU training path anymore.
 
 ---
 
@@ -46,21 +52,9 @@ gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=us-east5-a
 
 Now you are inside the leader TPU machine. To execute standard code across all hosts in a pod simultaneously (which is required if using slices larger than 8 chips), you use the `--worker=all` flag with your `gcloud` commands.
 
-To distribute your code to all hosts in the cluster natively, you must use a GitHub **Personal Access Token (PAT)**. This allows the non-interactive `--worker=all` command to bypass browser authentication.
+For the current benchmark workflow, you do **not** need to clone from GitHub on the TPU VM. The automation scripts package your exact local checkout with `git archive`, upload that snapshot, and unpack it on the TPU workers. That keeps the TPU run pinned to the source commit you launched.
 
-**CRITICAL SECURITY WARNING:** NEVER hardcode or commit your actual PAT into any scripts or markdown files in this repository. Always use placeholders like `YOUR_PAT_TOKEN` in documentation. 
-
-1. Go to Github.com → Settings → Developer Settings → Personal Access Tokens → Generate new token (classic). Give it the `repo` scope.
-2. Run this command from your Cloud Shell, placing your PAT securely into the cloning URL (replace `YOUR_GITHUB_USERNAME:YOUR_PAT_TOKEN` with your actual credentials):
-
-```bash
-gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=us-east5-a --worker=all --command="git clone https://YOUR_GITHUB_USERNAME:YOUR_PAT_TOKEN@github.com/dylanbforde/sinkhorn-aligner.git"
-```
-
-Whenever updates are pushed to the repository in the future, simply pull them instantly across the cluster:
-```bash
-gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=us-east5-a --worker=all --command="cd sinkhorn-aligner && git pull"
-```
+If you still want to work manually on the VM, you can clone or copy the repo yourself, but the recommended path is to let `scripts/tpu_sinkhorn_screen.sh` and `scripts/tpu_auto_run.sh` handle source transfer.
 
 ## 5. Environment Setup (The Magic JAX Command)
 Google Cloud TPU VMs come with Ubuntu, but you must install the **TPU-specific version of JAX** so the library knows how to compile the Pallas kernels for the distributed mesh. You must execute this setup across **ALL** workers in the pod.
@@ -84,51 +78,59 @@ gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=us-east5-a --wo
 - **Cost**: A `v6e-8` pod costs ~$10–12/hr. The latency benchmark costs roughly **~$2.00**.
 - Outputs Table 1 data (Flash Attention vs Sinkhorn OT latency at 1K/4K/8K/16K). Hardware telemetry goes to `/tmp/tensorboard_profiles_DATE/`.
 
-## 6.1 Running the Wall-Clock Training Experiment
-This is the full 2.5-hour training comparison: Flash Attention vs Sinkhorn OT on real human/mouse orthologous DNA sequences. Both methods train for equal wall-clock time; we compare loss curves.
+## 6.1 Running the Current Pfam Training Workflow
+The current TPU training path is a two-stage Pfam workflow on precomputed shards.
 
-### Step 1: Pull the latest code
+### Step 1: Run the short Sinkhorn screen
+
 ```bash
-gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=us-east5-a --worker=all --command="cd sinkhorn-aligner && git pull"
+./scripts/tpu_sinkhorn_screen.sh
 ```
 
-### Step 2: Run Sinkhorn OT training (2.5 hours)
+This queues `sinkhorn-screen-queue`, uploads your exact local source snapshot, runs the short Pfam screen, and syncs `logs/` plus `screen_checkpoints/` to GCS before tearing the queue down.
+
+Check queue state while waiting:
+
 ```bash
-gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=us-east5-a --worker=all --command="cd sinkhorn-aligner && python src/benchmarks/benchmark_wallclock_training.py --method sinkhorn_ot --max_hours 2.5"
+./scripts/tpu_queue_status.sh sinkhorn-screen-queue
 ```
 
-### Step 3: Run Flash Attention training (2.5 hours)
+### Step 2: Promote the winning config into the full Pfam run
+
+Set the winning configuration through environment variables and launch:
+
 ```bash
-gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=us-east5-a --worker=all --command="cd sinkhorn-aligner && python src/benchmarks/benchmark_wallclock_training.py --method flash_attention --max_hours 2.5"
+SINKHORN_REFINE_STEPS=2 \
+SINKHORN_EPSILON=1.0 \
+SUPPORT_RECONSTRUCTION=none \
+GAP_MODE=none \
+TRAIN_RECONSTRUCTION_WEIGHT=1.0 \
+TRAIN_SPARSE_CE_WEIGHT=0.0 \
+TRAIN_MONOTONICITY_WEIGHT=0.0 \
+./scripts/tpu_auto_run.sh
 ```
+
+This queues `sinkhorn-queue`, uploads the local snapshot, fetches Pfam shards from GCS, runs Sinkhorn first, then Flash, and checkpoints to GCS so reruns can resume.
 
 ### What to expect:
-- **First run**: The script auto-downloads 30 orthologous gene CDS pairs from the Ensembl REST API (~2 min), embeds them with the Nucleotide Transformer, then begins training. Subsequent runs use cached data from `./data/dna_orthologs/`.
-- **Batch size**: Auto-detected via binary search to maximize TPU memory utilization.
-- **Sequence length**: 8,192bp by default (padded to mod-128 for Pallas).
-- **Checkpoints**: Saved every 100 steps to `gs://sinkhorn-neurips-data/checkpoints/{method}/`.
-- **Results**: Loss curve CSV and JSON summary saved to `gs://sinkhorn-neurips-data/results/`.
-- **Total time**: ~5 hours for both methods (2.5h each, run sequentially).
-- **Cost**: At ~$10–12/hr for v6e-8, expect roughly **~$50–60** for the full experiment.
+- **Data source**: precomputed Pfam shard dataset stored under `gs://sinkhorn-neurips/pfam_shards/`.
+- **Screen artifacts**: synced to `gs://sinkhorn-neurips/sinkhorn_screen/<run-id>/`.
+- **Production checkpoints**: synced to `gs://sinkhorn-neurips/checkpoints/`.
+- **Batch size**: auto-tuned per device at startup; failures now surface explicitly instead of silently falling back.
+- **Total time**: screen depends on `MAX_HOURS_PER_RUN` and number of configs; the main run depends on `SINKHORN_MAX_HOURS` and `FLASH_MAX_HOURS`.
 
-### Step 4: Retrieve results
-Pull the loss curves and checkpoints to your local machine:
+### Manual fallback
+
+If you need to invoke the trainer directly on an already-active TPU slice:
+
 ```bash
-# Loss curves and summaries
-gcloud storage cp -r gs://sinkhorn-neurips-data/results/ ./results/
-
-# Model checkpoints (optional — can be large)
-gcloud storage cp -r gs://sinkhorn-neurips-data/checkpoints/ ./checkpoints/
+gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=us-east5-a --worker=all --command="\
+  cd sinkhorn-aligner && \
+  python src/benchmarks/benchmark_pfam_training.py --method sinkhorn_ot --max_hours 0.25 --data_dir data/pfam_shards --autotune_batch_size"
 ```
 
-### Optional flags:
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--seq_len` | `8192` | Sequence length (will be padded to mod-128) |
-| `--lr` | `1e-3` | Learning rate |
-| `--D_proj` | `64` | Projection dimension for Q/K/V heads |
-| `--checkpoint_every` | `100` | Steps between GCS checkpoints |
-| `--no_gcs` | off | Disable GCS upload (local only, for testing) |
+## 6.2 Legacy Ortholog-DNA Wall-Clock Benchmark
+`src/benchmarks/benchmark_wallclock_training.py` remains available for the older ortholog-DNA comparison. It is no longer the recommended TPU workflow, but it is now consistent with gradient descent after the optimizer-sign fix.
 
 ### ⚠️ Billing Safety: Auto-shutdown on completion/failure
 If the Python script crashes, the TPU VM **stays running** and you keep paying ~$10-12/hr. To protect against this (especially for overnight runs), wrap the command so the **TPU auto-deletes itself** when the script finishes or fails:
@@ -168,12 +170,12 @@ When you transition from running the benchmark profiling script to doing an actu
 TPU VMs have very little persistent disk space. All large datasets, checkpoints, and benchmark results should be read from and written to a Google Cloud Storage (GCS) Bucket.
 1. **Create the Bucket**: Run this in your local Cloud Shell:
    ```bash
-   gcloud storage buckets create gs://sinkhorn-neurips-data --location=europe-west4
+   gcloud storage buckets create gs://sinkhorn-neurips --location=europe-west4
    ```
 2. **Where is my data?**: You can visually explore, upload, and download files from this bucket anytime by visiting [console.cloud.google.com/storage](https://console.cloud.google.com/storage) in your web browser.
 3. **Downloading to your laptop**: To pull all training runs from the cloud bucket to your local machine:
    ```bash
-   gcloud storage cp -r gs://sinkhorn-neurips-data/results ./local_folder
+   gcloud storage cp -r gs://sinkhorn-neurips/results ./local_folder
    ```
 
 ## 6.7 Determining TPU Batch Sizes (Gradient Accumulation)

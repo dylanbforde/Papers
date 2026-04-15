@@ -36,14 +36,21 @@ This repository contains the reference implementation of **Block-Wise Differenti
   - compares Sinkhorn OT vs Flash Attention,
   - intended for 1K → 16K+ context scaling experiments.
 - `src/benchmarks/benchmark_wallclock_training.py`
-  - fixed wall-clock training comparison on real human/mouse orthologous CDS,
-  - uses Needleman–Wunsch-derived pairwise alignment targets,
-  - compares convergence behavior of Sinkhorn OT vs Flash Attention.
+  - legacy fixed wall-clock comparison on human/mouse orthologous CDS,
+  - retained for historical/local comparisons after the optimizer-sign fix,
+  - not the primary TPU production workflow.
 - `src/benchmarks/benchmark_pfam_training.py`
-  - supervised PFAM alignment training utilities,
+  - supervised Pfam alignment training utilities,
   - optional **Stiefel QR projection** on Q/K heads,
   - optional monotonicity and sparse CE terms,
   - configurable Sinkhorn refinement controls.
+- `scripts/tpu_sinkhorn_screen.sh`
+  - queues a TPU v6e-8 slice,
+  - runs a short Sinkhorn-only config screen on Pfam shards,
+  - syncs logs/checkpoints to GCS before teardown.
+- `scripts/tpu_auto_run.sh`
+  - runs the promoted Pfam Sinkhorn vs Flash comparison on TPU,
+  - checkpoints to GCS for restartability.
 
 ---
 
@@ -84,7 +91,7 @@ out = sinkhorn_attention(
 
 ---
 
-## Benchmarks already run (repository-reported)
+## Current Benchmark Workflows
 
 ### 1) Long-context latency benchmark
 
@@ -98,12 +105,12 @@ The repository currently reports TPU v6e-1 latency trends (Table 1 style) showin
 | 8192 | Sinkhorn OT (Ours) | 711.66 | 5662.79 | Success |
 | 16384 | Sinkhorn OT (Ours) | 1264.84 | 7401.55 | Success |
 
-### 2) Wall-clock training benchmark
+### 2) Pfam screening and production benchmark
 
-`docs/GCP_DEPLOYMENT_GUIDE.md` documents a **2.5h vs 2.5h** training protocol:
-- train Sinkhorn OT for 2.5 hours,
-- train Flash Attention for 2.5 hours,
-- compare loss curves under equal wall-clock budget on real orthologous DNA data.
+The current TPU workflow is:
+- run a short Sinkhorn-only screen on Pfam shards to select the best config by sparse CE,
+- promote the selected config into the main Pfam Sinkhorn vs Flash comparison,
+- checkpoint to GCS and preserve logs/checkpoints before queue teardown.
 
 ---
 
@@ -125,7 +132,25 @@ python src/benchmarks/benchmark_long_context_alignment.py \
   --vocab protein
 ```
 
-### Wall-clock training
+### Pfam screen
+
+```bash
+./scripts/tpu_sinkhorn_screen.sh
+```
+
+Check queue state while it is waiting for capacity:
+
+```bash
+./scripts/tpu_queue_status.sh sinkhorn-screen-queue
+```
+
+### Pfam production run
+
+```bash
+./scripts/tpu_auto_run.sh
+```
+
+### Legacy ortholog-DNA wall-clock benchmark
 
 ```bash
 # Prepare data
@@ -143,7 +168,7 @@ python src/benchmarks/benchmark_wallclock_training.py --method sinkhorn_ot --max
 ## Current development focus (updated roadmap)
 
 1. **Stabilize and standardize pairwise benchmark reporting**
-   - keep wall-clock pairwise as the core regression gate for correctness + training stability,
+   - keep the Pfam screen + promoted production run as the core regression gate for correctness + training stability,
    - add clearer seed-averaged summaries and metric dashboards.
 
 2. **Translate benchmark wins toward biological/clinical relevance**
