@@ -340,15 +340,16 @@ def compute_global_uv(
 
 def tile_sinkhorn_kernel(q_ref, k_ref, v_ref, u_ref, v_pot_ref, q_mask_ref, k_mask_ref, scale_ref, o_ref):
     """Single-tile forward: logits -> Sinkhorn weights -> output."""
-    q = q_ref[...]
+    scale = scale_ref[0]
+    # MACH ⚡: Pre-scaled query block by constant factor outside of inner loops and dot products. This replaces O(M x N) scaling operations with O(M x D), significantly saving FLOPs and compute cycles.
+    q = q_ref[...] * scale
     k = k_ref[...]
     v = v_ref[...]
     u = u_ref[..., 0]   # v6e: unpack trailing dim
     v_pot = v_pot_ref[..., 0]
     q_mask = q_mask_ref[...]
     k_mask = k_mask_ref[...]
-    scale = scale_ref[0]
-    logits = jnp.dot(q, k.T) * scale
+    logits = jnp.dot(q, k.T)
     log_alpha = logits + u[:, None] + v_pot[None, :]
     log_alpha = jnp.where(k_mask[None, :], log_alpha, -jnp.inf)
     out = jnp.dot(_exp_for_tpu(log_alpha), v)
@@ -451,7 +452,9 @@ def dq_kernel_multi(
     dS_{mn} = P22*Z - P22*g_v - P21*del_u2 - P11*del_v1 - P10*del_u1
     dQ_m = sum_n dS_{mn} * K_n * scale
     """
-    q_block = Q_ref[...]     # (BLOCK, D)
+    scale = scale_ref[0]
+    # MACH ⚡: Pre-scaled query block by constant factor outside of inner loops and einsums. This replaces O(M x N) scaling operations with O(M x D), significantly saving FLOPs and compute cycles.
+    q_block = Q_ref[...] * scale     # (BLOCK, D)
     do_block = dO_ref[...]   # (BLOCK, E)
     m_data = M_data_ref[...] # (BLOCK, 8)
     W = W_ref[0]
@@ -461,8 +464,6 @@ def dq_kernel_multi(
     del_u1_m = m_data[:, 3]
     del_u2_m = m_data[:, 4]
     q_mask_m = m_data[:, 5] > 0.5
-
-    scale = scale_ref[0]
 
     N = K_ref.shape[0]
     BLOCK_N = 128
@@ -507,7 +508,7 @@ def dq_kernel_multi(
             valid = q_mask_m[:, None] & k_mask_n[None, :]
 
             # Score matrix
-            s_block = jnp.einsum("md,nd->mn", q_block, k_block) * scale
+            s_block = jnp.einsum("md,nd->mn", q_block, k_block)
             P22 = jnp.where(valid, safe_exp(s_block + u2_m[:, None] + v2_n[None, :]), 0.0)
             z_block = jnp.einsum("me,ne->mn", do_block, v_mat_block)
 
@@ -538,7 +539,9 @@ def dk_dv_kernel_multi(
     Fused Pallas kernel: compute dK, dV using the multi-transport-plan formula.
     Executes entirely in TPU VMEM with banded iteration.
     """
-    k_block = K_ref[...]       # (BLOCK, D)
+    scale = scale_ref[0]
+    # MACH ⚡: Pre-scaled key block by constant factor outside of inner loops and einsums. This replaces O(N x M) scaling operations with O(N x D), significantly saving FLOPs and compute cycles.
+    k_block = K_ref[...] * scale       # (BLOCK, D)
     v_mat_block = V_ref[...]   # (BLOCK, E)
     n_data = N_data_ref[...]   # (BLOCK, 8)
     W = W_ref[0]
@@ -554,7 +557,6 @@ def dk_dv_kernel_multi(
     BLOCK_M = 128
     UNROLL = 4
     iters = M // BLOCK_M
-    scale = scale_ref[0]
 
     n = pl.program_id(0)
     start_block = jnp.maximum(0, n - W)
@@ -592,7 +594,7 @@ def dk_dv_kernel_multi(
             valid = k_mask_n[:, None] & q_mask_m[None, :]
 
             # Score matrix
-            s_block_T = jnp.einsum("nd,md->nm", k_block, q_block) * scale
+            s_block_T = jnp.einsum("nd,md->nm", k_block, q_block)
             P22_T = jnp.where(valid, safe_exp(s_block_T + v2_n[:, None] + u2_m[None, :]), 0.0)
             z_block_T = jnp.einsum("ne,me->nm", v_mat_block, do_block)
             
