@@ -51,6 +51,10 @@ This repository contains the reference implementation of **Block-Wise Differenti
 - `scripts/tpu_auto_run.sh`
   - runs the promoted Pfam Sinkhorn vs Flash comparison on TPU,
   - checkpoints to GCS for restartability.
+- `scripts/tpu_multi_zone_race.sh`
+  - races queued TPU requests across multiple zones,
+  - keeps the first zone that becomes `ACTIVE`,
+  - deletes losing queues before handing off to the chosen launcher.
 
 ---
 
@@ -136,6 +140,22 @@ python src/benchmarks/benchmark_long_context_alignment.py \
 
 ```bash
 ./scripts/tpu_sinkhorn_screen.sh
+```
+
+### Multi-zone Pfam screen race
+
+Prefer same-region zones first to avoid unnecessary cross-region data movement:
+
+```bash
+RACE_ZONES="us-east5-a us-east5-b" \
+./scripts/tpu_multi_zone_race.sh scripts/tpu_sinkhorn_screen.sh
+```
+
+Detached version:
+
+```bash
+RACE_ZONES="us-east5-a us-east5-b" \
+./scripts/start_tpu_job_detached.sh scripts/tpu_multi_zone_race.sh scripts/tpu_sinkhorn_screen.sh
 ```
 
 Check queue state while it is waiting for capacity:
