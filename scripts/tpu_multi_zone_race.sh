@@ -29,6 +29,9 @@ RACE_POLL_INTERVAL_SECS="${RACE_POLL_INTERVAL_SECS:-60}"
 ACCELERATOR_TYPE="${ACCELERATOR_TYPE:-v6e-8}"
 RUNTIME_VERSION="${RUNTIME_VERSION:-tpu-ubuntu2204-base}"
 PRESERVE_RACE_QUEUES_ON_EXIT="${PRESERVE_RACE_QUEUES_ON_EXIT:-0}"
+EXISTING_ZONE="${EXISTING_ZONE:-}"
+EXISTING_RESOURCE_ID="${EXISTING_RESOURCE_ID:-}"
+EXISTING_NODE_ID="${EXISTING_NODE_ID:-}"
 
 case "$(basename "$LAUNCHER")" in
   tpu_sinkhorn_screen.sh)
@@ -69,11 +72,19 @@ sanitize_zone() {
 
 resource_for_zone() {
   local zone="$1"
+  if [ -n "$EXISTING_ZONE" ] && [ "$zone" = "$EXISTING_ZONE" ] && [ -n "$EXISTING_RESOURCE_ID" ]; then
+    echo "$EXISTING_RESOURCE_ID"
+    return
+  fi
   echo "${RESOURCE_BASE}-$(sanitize_zone "$zone")"
 }
 
 node_for_zone() {
   local zone="$1"
+  if [ -n "$EXISTING_ZONE" ] && [ "$zone" = "$EXISTING_ZONE" ] && [ -n "$EXISTING_NODE_ID" ]; then
+    echo "$EXISTING_NODE_ID"
+    return
+  fi
   echo "${NODE_BASE}-$(sanitize_zone "$zone")"
 }
 
@@ -125,6 +136,9 @@ echo "  Zones: ${ZONES[*]}"
 echo "  Project: $PROJECT_ID"
 echo "  Resource base: $RESOURCE_BASE"
 echo "  Node base: $NODE_BASE"
+if [ -n "$EXISTING_ZONE" ]; then
+  echo "  Existing queue: $EXISTING_ZONE -> ${EXISTING_RESOURCE_ID:-unset} / ${EXISTING_NODE_ID:-unset}"
+fi
 
 for zone in "${ZONES[@]}"; do
   resource_id="$(resource_for_zone "$zone")"
