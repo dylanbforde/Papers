@@ -9,3 +9,7 @@
 ## 2026-04-09 - [Hoisting Loop-Invariant Operations from Inner Loops]
 **Learning:** In nested multi-transport dS equations, potential arrays corresponding to the block index of the outer loop (e.g., `u1_m`, `u2_m` when outer looping over `m`) are invariant to the inner unrolled loop. Leaving exponentiations of these invariant arrays inside the inner loop wastes cycles recomputing the exact same array operations repeatedly.
 **Action:** Always inspect the indices of the inner unrolled loops in Pallas kernels. Hoist any operations (especially expensive ones like `jnp.exp`) that depend strictly on the outer loop block index out of the inner loop, minimizing redundant compute overhead.
+
+## 2026-04-16 - [Factoring Multi-Transport Updates in Refinement Pullbacks]
+**Learning:** In the `_fixed_refinement_qk_pullback` kernel, looping over refinement steps and accumulating multi-transport equations requires repeatedly scaling by `P_base` inside the loop. This results in 2 * `refine_steps` full-block FMA operations involving a massive `(batch, heads, BLOCK, band_size)` variable, which heavily pressures SRAM bandwidth.
+**Action:** Exploit the distributive property to factor `P_base` entirely out of the refinement loop. Accumulate only the scaled differences inside the loop into a small scalar/tensor (`ds_diff = 0.0`), and perform a single nested broadcast multiplication (`P_base * (Z_block - ds_diff)`) at the end. This mathematically equivalent refactor drastically reduces raw compute cycles and memory operations.

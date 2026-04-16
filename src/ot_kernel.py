@@ -1554,7 +1554,7 @@ def _fixed_refinement_qk_pullback(
         P_base = jnp.where(valid, P_base, 0.0)
 
         Z_block = jnp.matmul(do_block, V_band.transpose(0, 1, 3, 2))
-        ds_block = P_base * Z_block
+        ds_diff = 0.0
 
         for t in range(refine_steps, 0, -1):
             u_t_block = jax.lax.dynamic_slice_in_dim(u_hist[t], i * BLOCK, BLOCK, axis=-1)
@@ -1567,19 +1567,13 @@ def _fixed_refinement_qk_pullback(
             col_scale_same = _exp_for_tpu(v_t_band - v_base_band)
             col_scale_prev = _exp_for_tpu(v_prev_band - v_base_band)
 
-            ds_block = ds_block - (
-                P_base
-                * row_scale[..., :, None]
-                * col_scale_same[..., None, :]
-                * dv_t_band[..., None, :]
-            )
-            ds_block = ds_block - (
-                P_base
-                * row_scale[..., :, None]
-                * col_scale_prev[..., None, :]
-                * du_t_block[..., :, None]
+            ds_diff = ds_diff + row_scale[..., :, None] * (
+                col_scale_same[..., None, :] * dv_t_band[..., None, :]
+                + col_scale_prev[..., None, :] * du_t_block[..., :, None]
             )
 
+        # MACH ⚡: Factored P_base out of the refinement loop and grouped the multi-transport updates using distributive properties. This replaces 2*refine_steps full-block FMA operations with a single nested broadcast multiplication, significantly saving SRAM bandwidth.
+        ds_block = P_base * (Z_block - ds_diff)
         ds_block = jnp.where(valid, ds_block, 0.0)
         dQ_block = jnp.einsum("bhmn,bhnd->bhmd", ds_block, k_band) * scale
         dK_contrib = jnp.einsum("bhmn,bhmd->bhnd", ds_block, q_block) * scale
