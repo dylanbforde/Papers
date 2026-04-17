@@ -501,11 +501,14 @@ def compute_global_uv(
                 v_band = jax.lax.dynamic_slice_in_dim(v_b, start_idx, profile["row_slice_size"], axis=0)
                 k_mask_band = jax.lax.dynamic_slice_in_dim(k_mask_b, start_idx, profile["row_slice_size"], axis=0)
 
+                # BOLT ⚡: Pre-scaled q_block to replace O(M*N) scaling with O(M*D).
+                q_block_scaled = q_block * scale
+
                 def scan_k(acc, elements):
                     k_block, v_block, k_valid, is_valid = elements
 
                     def true_fn(_):
-                        S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block, k_block) * scale
+                        S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block_scaled, k_block)
                         valid = q_valid[..., :, None] & k_valid[..., None, :]
                         val = S_block + v_block[..., None, :]
                         val = jnp.where(valid, val, -jnp.inf)
@@ -543,11 +546,14 @@ def compute_global_uv(
                 u_band = jax.lax.dynamic_slice_in_dim(u_b, start_idx, profile["col_slice_size"], axis=0)
                 q_mask_band = jax.lax.dynamic_slice_in_dim(q_mask_b, start_idx, profile["col_slice_size"], axis=0)
 
+                # BOLT ⚡: Pre-scaled k_block to replace O(M*N) scaling with O(M*D).
+                k_block_scaled = k_block * scale
+
                 def scan_q2(acc, elements):
                     q_block, u_block, q_valid, is_valid = elements
 
                     def true_fn(_):
-                        S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block, k_block) * scale
+                        S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block, k_block_scaled)
                         valid = q_valid[..., :, None] & k_valid[..., None, :]
                         val = S_block + u_block[..., :, None]
                         val = jnp.where(valid, val, -jnp.inf)
@@ -603,7 +609,9 @@ def tile_sinkhorn_kernel(q_ref, k_ref, v_ref, u_ref, v_pot_ref, q_mask_ref, k_ma
     q_mask = q_mask_ref[...]
     k_mask = k_mask_ref[...]
     scale = scale_ref[0]
-    logits = jnp.dot(q, k.T) * scale
+    # BOLT ⚡: Pre-scaled q to replace O(M*N) scaling with O(M*D).
+    q_scaled = q * scale
+    logits = jnp.dot(q_scaled, k.T)
     log_alpha = logits + u[:, None] + v_pot[None, :]
     log_alpha = jnp.where(k_mask[None, :], log_alpha, -jnp.inf)
     out = jnp.dot(_exp_for_tpu(log_alpha), v)
@@ -737,6 +745,9 @@ def dq_kernel_multi(
 # MACH ⚡: Hoisted loop-invariant exponentiated potential differences out of the inner unrolled loop.
         exp_du12 = _exp_for_tpu(u1_m - u2_m)
 
+        # BOLT ⚡: Pre-scaled q_block to replace O(M*N) scaling with O(M*D).
+        q_block_scaled = q_block * scale
+
         for u_i in range(UNROLL):
             k_idx = i * UNROLL + u_i
             off = k_idx * BLOCK_N
@@ -760,7 +771,7 @@ def dq_kernel_multi(
             valid = q_mask_m[:, None] & k_mask_n[None, :]
 
             # Score matrix
-            s_block = jnp.einsum("md,nd->mn", q_block, k_block) * scale
+            s_block = jnp.einsum("md,nd->mn", q_block_scaled, k_block)
             P22 = jnp.where(valid, safe_exp(s_block + u2_m[:, None] + v2_n[None, :]), 0.0)
             z_block = jnp.einsum("me,ne->mn", do_block, v_mat_block)
 
@@ -825,6 +836,9 @@ def dk_dv_kernel_multi(
         exp_dv12_n = _exp_for_tpu(v1_n - v2_n)
         exp_dv01_n = _exp_for_tpu(v0_n - v1_n)
 
+        # BOLT ⚡: Pre-scaled k_block to replace O(M*N) scaling with O(M*D).
+        k_block_scaled = k_block * scale
+
         for u_i in range(UNROLL):
             m_idx = i * UNROLL + u_i
             off = m_idx * BLOCK_M
@@ -845,7 +859,7 @@ def dk_dv_kernel_multi(
             valid = k_mask_n[:, None] & q_mask_m[None, :]
 
             # Score matrix
-            s_block_T = jnp.einsum("nd,md->nm", k_block, q_block) * scale
+            s_block_T = jnp.einsum("nd,md->nm", k_block_scaled, q_block)
             P22_T = jnp.where(valid, safe_exp(s_block_T + v2_n[:, None] + u2_m[None, :]), 0.0)
             z_block_T = jnp.einsum("ne,me->nm", v_mat_block, do_block)
             
