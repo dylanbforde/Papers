@@ -1546,7 +1546,11 @@ def _fixed_refinement_qk_pullback(
         V_band = jax.lax.dynamic_slice_in_dim(V, start_idx * BLOCK, profile["row_slice_size"] * BLOCK, axis=-2)
         k_mask_band = jax.lax.dynamic_slice_in_dim(k_mask, start_idx * BLOCK, profile["row_slice_size"] * BLOCK, axis=-1)
 
-        S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block, k_band) * scale
+        # MACH ⚡: Pre-scaled q_block and k_band by scale outside of einsums to replace 3 O(M*N) scaling operations with 2 O(M*D)/O(N*D) operations, saving FLOPs and compute cycles.
+        q_block_scaled = q_block * scale
+        k_band_scaled = k_band * scale
+
+        S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block_scaled, k_band)
         P_base = _exp_for_tpu(S_block + u_base_block[..., :, None] + v_base_band[..., None, :])
         abs_indices = start_idx + jnp.arange(profile["row_slice_size"] * BLOCK) // BLOCK
         block_mask = block_mask[abs_indices % profile["row_slice_size"]]
@@ -1581,8 +1585,8 @@ def _fixed_refinement_qk_pullback(
             )
 
         ds_block = jnp.where(valid, ds_block, 0.0)
-        dQ_block = jnp.einsum("bhmn,bhnd->bhmd", ds_block, k_band) * scale
-        dK_contrib = jnp.einsum("bhmn,bhmd->bhnd", ds_block, q_block) * scale
+        dQ_block = jnp.einsum("bhmn,bhnd->bhmd", ds_block, k_band_scaled)
+        dK_contrib = jnp.einsum("bhmn,bhmd->bhnd", ds_block, q_block_scaled)
 
         dQ = jax.lax.dynamic_update_slice_in_dim(dQ, dQ_block, i * BLOCK, axis=-2)
         dK_padded = jnp.zeros_like(K)
