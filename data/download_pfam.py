@@ -27,6 +27,8 @@ import numpy as np
 
 PFAM_SEED_URL = "https://ftp.ebi.ac.uk/pub/databases/Pfam/current_release/Pfam-A.seed.gz"
 PFAM_SEED_FILENAME = "Pfam-A.seed.gz"
+GAP_CHARS = set(".-~")
+REMOVE_GAPS_TRANS = str.maketrans("", "", ".-~")
 
 def download_pfam_seed(cache_dir: str) -> str:
     os.makedirs(cache_dir, exist_ok=True)
@@ -60,12 +62,11 @@ def parse_stockholm_families(gz_path: str):
                     sequences.append((parts[0], parts[1]))
 
 def extract_alignment(s1, s2):
-    gap_chars = set(".-~")
     r1, r2, pairs = [], [], []
     i, j = 0, 0
     for col in range(len(s1)):
         c1, c2 = s1[col], s2[col]
-        g1, g2 = c1 in gap_chars, c2 in gap_chars
+        g1, g2 = c1 in GAP_CHARS, c2 in GAP_CHARS
         if not g1 and not g2:
             pairs.append((i, j))
             r1.append(c1)
@@ -140,7 +141,7 @@ def process_sharded(gz_path, out_dir, shard_size=500, max_pairs=50000, max_len=1
             break
         valid = []
         for name, ali in family["sequences"]:
-            raw = "".join(c for c in ali if c not in set(".-~"))
+            raw = ali.translate(REMOVE_GAPS_TRANS)
             if 128 <= len(raw) <= max_len:
                 valid.append((name, ali, raw))
 
