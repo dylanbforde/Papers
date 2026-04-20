@@ -44,17 +44,17 @@ from typing import Any, cast
 import numpy as np
 
 import jax
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from jax_tpu_init import maybe_initialize_jax_distributed
+
+
+maybe_initialize_jax_distributed(jax)
+
+
 import jax.numpy as jnp
 import optax
 
-# Initialize JAX distributed for multi-TPU
-if "TPU_WORKER_HOSTNAMES" in os.environ:
-    try:
-        jax.distributed.initialize()
-    except Exception:
-        pass
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import ot_kernel
 
 

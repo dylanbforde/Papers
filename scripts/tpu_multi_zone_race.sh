@@ -27,7 +27,7 @@ ACTIVE_ACCOUNT="${ACTIVE_ACCOUNT:-$(gcloud config get-value account 2>/dev/null 
 RACE_ZONES="${RACE_ZONES:-us-east5-a us-east5-b}"
 RACE_POLL_INTERVAL_SECS="${RACE_POLL_INTERVAL_SECS:-60}"
 ACCELERATOR_TYPE="${ACCELERATOR_TYPE:-v6e-8}"
-RUNTIME_VERSION="${RUNTIME_VERSION:-tpu-ubuntu2204-base}"
+RUNTIME_VERSION="${RUNTIME_VERSION:-v2-alpha-tpuv6e}"
 PRESERVE_RACE_QUEUES_ON_EXIT="${PRESERVE_RACE_QUEUES_ON_EXIT:-0}"
 EXISTING_ZONE="${EXISTING_ZONE:-}"
 EXISTING_RESOURCE_ID="${EXISTING_RESOURCE_ID:-}"
@@ -67,7 +67,7 @@ if [ "${#ZONES[@]}" -eq 0 ]; then
 fi
 
 sanitize_zone() {
-  echo "$1" | tr -c '[:alnum:]-' '-'
+  printf '%s' "$1" | tr -c '[:alnum:]-' '-'
 }
 
 resource_for_zone() {

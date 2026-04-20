@@ -10,11 +10,15 @@ PROJECT_ID="${PROJECT_ID:-sinkhorn-neurips}"
 ZONE="${ZONE:-us-east5-a}"
 NODE_ID="${NODE_ID:-sinkhorn-screen-cluster}"
 RESOURCE_ID="${RESOURCE_ID:-sinkhorn-screen-queue}"
+RUNTIME_VERSION="${RUNTIME_VERSION:-v2-alpha-tpuv6e}"
 BUCKET_NAME="${BUCKET_NAME:-sinkhorn-neurips}"
 MAX_HOURS_PER_RUN="${MAX_HOURS_PER_RUN:-0.20}"
 METRIC_EVERY="${METRIC_EVERY:-25}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-100}"
 AUTOTUNE_MAX_PER_DEVICE_BATCH_SIZE="${AUTOTUNE_MAX_PER_DEVICE_BATCH_SIZE:-8}"
+JAX_TPU_INSTALL_SPEC="${JAX_TPU_INSTALL_SPEC:-jax[tpu]}"
+JAX_TPU_PROBE_RETRIES="${JAX_TPU_PROBE_RETRIES:-10}"
+JAX_TPU_PROBE_SLEEP_SECS="${JAX_TPU_PROBE_SLEEP_SECS:-30}"
 GCS_DATA_PREFIX="${GCS_DATA_PREFIX:-gs://$BUCKET_NAME/pfam_shards}"
 GCS_ARTIFACT_PREFIX="${GCS_ARTIFACT_PREFIX:-gs://$BUCKET_NAME/sinkhorn_screen}"
 RUN_ID="${RUN_ID:-screen_$(date -u +%Y%m%dT%H%M%SZ)}"
@@ -84,7 +88,7 @@ if [ -n "$EXISTING_STATE" ]; then
 else
   gcloud compute tpus queued-resources create "$RESOURCE_ID" \
     --project="$PROJECT_ID" --zone="$ZONE" --node-id="$NODE_ID" \
-    --accelerator-type=v6e-8 --runtime-version=tpu-ubuntu2204-base --quiet
+    --accelerator-type=v6e-8 --runtime-version="$RUNTIME_VERSION" --quiet
 fi
 
 echo "Step 2: Waiting for TPU to become ACTIVE..."
@@ -113,7 +117,7 @@ gcloud compute tpus tpu-vm ssh "$NODE_ID" --project="$PROJECT_ID" --zone="$ZONE"
   export DEBIAN_FRONTEND=noninteractive && \
   sudo apt-get update -qq && sudo apt-get install -y -qq python3-pip && \
   export PATH=\"\$PATH:/home/\$USER/.local/bin\" && \
-  pip install -U -q jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html && \
+  pip install -U -q \"$JAX_TPU_INSTALL_SPEC\" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html && \
   pip install -U -q optax" --quiet --ssh-flag="-o StrictHostKeyChecking=no" --ssh-flag="-o UserKnownHostsFile=/dev/null"
 
 echo "Step 4: Packaging and uploading source snapshot at commit $SOURCE_COMMIT..."
@@ -136,10 +140,29 @@ gcloud compute tpus tpu-vm ssh "$NODE_ID" --project="$PROJECT_ID" --zone="$ZONE"
   mkdir -p data/pfam_shards && \
   gsutil -m cp -r $GCS_DATA_PREFIX/* data/pfam_shards/" --quiet --ssh-flag="-o StrictHostKeyChecking=no" --ssh-flag="-o UserKnownHostsFile=/dev/null"
 
+echo "Step 4c: Verifying JAX TPU runtime..."
+gcloud compute tpus tpu-vm ssh "$NODE_ID" --project="$PROJECT_ID" --zone="$ZONE" --worker=all --command="
+  set -euo pipefail && \
+  export PATH=\"\$PATH:/home/\$USER/.local/bin\" && \
+  export JAX_FORCE_TPU_INIT=true && \
+  cd sinkhorn-aligner && \
+  for ATTEMPT in \$(seq 1 $JAX_TPU_PROBE_RETRIES); do \
+    if python3 scripts/tpu_jax_probe.py; then \
+      exit 0; \
+    fi; \
+    if [ \"\$ATTEMPT\" -eq $JAX_TPU_PROBE_RETRIES ]; then \
+      echo \"✗ JAX TPU probe failed after $JAX_TPU_PROBE_RETRIES attempts.\" >&2; \
+      exit 1; \
+    fi; \
+    echo \"JAX TPU probe failed on attempt \$ATTEMPT/$JAX_TPU_PROBE_RETRIES. Retrying in $JAX_TPU_PROBE_SLEEP_SECS seconds...\" >&2; \
+    sleep $JAX_TPU_PROBE_SLEEP_SECS; \
+  done" --quiet --ssh-flag="-o StrictHostKeyChecking=no" --ssh-flag="-o UserKnownHostsFile=/dev/null"
+
 echo "Step 5: Starting short Sinkhorn configuration screen..."
 gcloud compute tpus tpu-vm ssh "$NODE_ID" --project="$PROJECT_ID" --zone="$ZONE" --worker=all --command="
   set -euo pipefail && \
   export PATH=\"\$PATH:/home/\$USER/.local/bin\" && \
+  export JAX_FORCE_TPU_INIT=true && \
   cd sinkhorn-aligner && \
   mkdir -p logs screen_checkpoints && \
   IFS=',' read -r -a CONFIG_ENTRIES <<< \"$SCREEN_CONFIGS\" && \
@@ -175,7 +198,14 @@ gcloud compute tpus tpu-vm ssh "$NODE_ID" --project="$PROJECT_ID" --zone="$ZONE"
       --autotune_max_per_device_batch_size $AUTOTUNE_MAX_PER_DEVICE_BATCH_SIZE \
       --batch_size_file screen_checkpoints/pfam_batch_size_\$RUN_TAG.json \
       --checkpoint_every $CHECKPOINT_EVERY 2>&1 | tee logs/\$RUN_TAG.log ; \
+    status=\${PIPESTATUS[0]} && \
+    if [ \"\$status\" -ne 0 ]; then \
+      echo \"✗ Screen config \$RUN_TAG failed with exit code \$status\" >&2; \
+      exit \$status; \
+    fi; \
   done && \
-  python3 scripts/summarize_benchmark_logs.py logs/*.log | tee logs/sinkhorn_screen_summary.txt" --quiet --ssh-flag="-o StrictHostKeyChecking=no" --ssh-flag="-o UserKnownHostsFile=/dev/null"
+  python3 scripts/summarize_benchmark_logs.py logs/*.log | tee logs/sinkhorn_screen_summary.txt ; \
+  summary_status=\${PIPESTATUS[0]} ; \
+  exit \$summary_status" --quiet --ssh-flag="-o StrictHostKeyChecking=no" --ssh-flag="-o UserKnownHostsFile=/dev/null"
 
 echo "✓ Sinkhorn screen complete!"

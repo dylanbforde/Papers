@@ -21,22 +21,19 @@ from typing import cast
 import numpy as np
 
 import jax
+
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from jax_tpu_init import maybe_initialize_jax_distributed
+
+
+maybe_initialize_jax_distributed(jax)
+
+
 import jax.numpy as jnp
 import optax
 from jax.experimental import multihost_utils
 
-
-if "MEGATRON_WORKER" in os.environ or (
-    "TPU_WORKER_HOSTNAMES" in os.environ
-    and len(os.environ["TPU_WORKER_HOSTNAMES"].split(",")) > 1
-):
-    try:
-        jax.distributed.initialize()
-    except Exception:
-        pass
-
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import ot_kernel
 
 

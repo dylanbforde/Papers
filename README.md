@@ -55,6 +55,10 @@ This repository contains the reference implementation of **Block-Wise Differenti
   - races queued TPU requests across multiple zones,
   - keeps the first zone that becomes `ACTIVE`,
   - deletes losing queues before handing off to the chosen launcher.
+- `scripts/tpu_screen_ensure.sh`
+  - one-shot operational helper for `command-center`,
+  - normalizes `gcloud`, cleans up the known broken stray race queues,
+  - resumes the canonical screen queue if it already exists or launches a fresh race if it does not.
 
 ---
 
@@ -157,6 +161,22 @@ Detached version:
 RACE_ZONES="us-east5-a us-east5-b" \
 ./scripts/start_tpu_job_detached.sh scripts/tpu_multi_zone_race.sh scripts/tpu_sinkhorn_screen.sh
 ```
+
+### One-shot screen recovery / launch
+
+On `command-center`, if you just want the machine to do the right thing with the current screen state:
+
+```bash
+GCLOUD_ACCOUNT=forde.dylan@gmail.com \
+RACE_ZONES="us-east5-a us-east5-b" \
+./scripts/tpu_screen_ensure.sh
+```
+
+This helper will:
+- keep an existing canonical `sinkhorn-screen-queue` in `us-east5-a`,
+- delete the known broken stray queues from the earlier buggy race wrapper if they exist,
+- restart the detached single-zone screen launcher if the canonical queue already exists,
+- otherwise launch a fresh detached same-region multi-zone race.
 
 Check queue state while it is waiting for capacity:
 

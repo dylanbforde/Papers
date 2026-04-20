@@ -22,6 +22,7 @@ gcloud storage buckets create gs://sinkhorn-neurips --location=us-east5 || true
 This script:
 - waits for `sinkhorn-screen-queue` to become active,
 - uploads an exact source snapshot from your current checkout,
+- runs a JAX TPU probe on the TPU VM before training,
 - runs the short Sinkhorn config sweep on Pfam shards,
 - syncs `logs/` and `screen_checkpoints/` to GCS before deleting the queue.
 
@@ -68,6 +69,7 @@ This script:
 - waits for `sinkhorn-queue`,
 - uploads the current local source snapshot,
 - fetches Pfam shards from GCS,
+- verifies the JAX TPU runtime before training,
 - runs Sinkhorn first, then Flash, with GCS checkpointing enabled.
 
 Production checkpoints land under:

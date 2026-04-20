@@ -31,9 +31,11 @@
 - Queued resources are zonal. Canonical screen resource: `sinkhorn-screen-queue` in `us-east5-a`. Use `scripts/tpu_queue_status.sh sinkhorn-screen-queue` or direct `gcloud compute tpus queued-resources describe ... --zone=us-east5-a`.
 - Older launcher behavior could delete a queued TPU on any shell exit because of `trap cleanup EXIT`. Current TPU launchers preserve resources that are still `WAITING_FOR_RESOURCES` by default. Set `DELETE_WAITING_QUEUE_ON_EXIT=1` only if deliberate teardown while waiting is desired.
 - Preferred detached launch pattern on `command-center`: `bash scripts/start_tpu_job_detached.sh scripts/tpu_sinkhorn_screen.sh` (or `... tpu_k_ablation.sh`, `... tpu_auto_run.sh`). This wrapper uses `nohup`, writes a log under `logs/`, and persists across SSH disconnects without requiring an attached terminal multiplexer.
+- Because the detached launcher runs under `nohup` on `command-center`, a local laptop sleeping or an SSH disconnect does not stop the TPU launcher. `tmux` is therefore optional for unattended runs. This does not protect against the `command-center` VM itself rebooting or being stopped.
 - For TPU scarcity, prefer the multi-zone race wrapper `scripts/tpu_multi_zone_race.sh`. Start with same-region zones (`us-east5-a us-east5-b`) so the first `ACTIVE` zone wins and the losers are deleted before handoff to the real launcher. This reduces queue latency without immediately introducing cross-region data locality issues.
 - `tmux` is optional, not required. If using `tmux` on `command-center`, export `TERM=xterm-256color` first because `xterm-kitty` is not recognized there.
 - The screen launcher log already includes queue status while the job is in Step 2 (`WAITING_FOR_RESOURCES` / `ACTIVE`), so separate queue polling is only needed for independent verification or after launcher disconnects.
+- Current stable recovery pattern: if `sinkhorn-screen-queue` already exists in `us-east5-a` and is still `WAITING_FOR_RESOURCES`, do not replace it with new queue experiments. Kill any stray helper wrapper, keep the canonical queue, and restart only the detached `scripts/tpu_sinkhorn_screen.sh` launcher so it reuses the existing queue.
 
 ## TPU Workflow Order
 - Preferred order is staged, not monolithic:

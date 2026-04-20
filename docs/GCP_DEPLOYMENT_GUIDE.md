@@ -39,7 +39,7 @@ In the Cloud Shell, run the following command to create your multi-TPU VM cluste
 gcloud compute tpus tpu-vm create sinkhorn-benchmark-cluster \
   --zone=us-central1-a \
   --accelerator-type=v6e-8 \
-  --version=tpu-ubuntu2204-base
+  --version=v2-alpha-tpuv6e
 ```
 *Note: `v6e-8` gives you 8 interconnected Trillium chips. If `us-central1-a` is out of capacity, try `--zone=us-east1-c` or `--zone=us-east5-a`. If all `v6e` (Trillium) chips are globally out of stock, you can swap the accelerator flag to `--accelerator-type=v5litepod-8` (v5e chips) or `--accelerator-type=v4-8` which run the exact same Pallas kernels!*
 
@@ -64,6 +64,12 @@ Run these exact commands in your local Cloud Shell (not SSH'd inside a single ho
 ```bash
 # Combine the entire installation block into one multi-worker execution command
 gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=us-east5-a --worker=all --command="sudo apt-get update && sudo apt-get install python3-pip -y && pip install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html && pip install optax transformers torch"
+```
+
+After installation, validate the runtime on the TPU host before starting a long run:
+
+```bash
+gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=us-east5-a --worker=all --command="cd sinkhorn-aligner && JAX_FORCE_TPU_INIT=true python3 scripts/tpu_jax_probe.py"
 ```
 
 ## 6. Running the Latency Benchmark
@@ -210,7 +216,7 @@ gcloud compute tpus queued-resources create sinkhorn-queue \
   --node-id=sinkhorn-benchmark-cluster \
   --zone=us-east5-a \
   --accelerator-type=v6e-8 \
-  --runtime-version=tpu-ubuntu2204-base
+  --runtime-version=v2-alpha-tpuv6e
 
 # Check status (will show WAITING_FOR_RESOURCES → PROVISIONING → ACTIVE)
 gcloud compute tpus queued-resources describe sinkhorn-queue --zone=us-east5-a
@@ -231,7 +237,7 @@ for ZONE in us-east5-a us-central1-a us-east1-c europe-west4-b; do
     --node-id=sinkhorn-cluster-${ZONE} \
     --zone=${ZONE} \
     --accelerator-type=v6e-8 \
-    --runtime-version=tpu-ubuntu2204-base
+    --runtime-version=v2-alpha-tpuv6e
 done
 ```
 
@@ -246,7 +252,7 @@ gcloud compute tpus queued-resources create sinkhorn-spot-queue \
   --node-id=sinkhorn-benchmark-cluster \
   --zone=us-east5-a \
   --accelerator-type=v6e-8 \
-  --runtime-version=tpu-ubuntu2204-base \
+  --runtime-version=v2-alpha-tpuv6e \
   --spot
 ```
 
@@ -255,7 +261,7 @@ Or create directly (if capacity is available right now):
 gcloud compute tpus tpu-vm create sinkhorn-benchmark-cluster \
   --zone=us-east5-a \
   --accelerator-type=v6e-8 \
-  --version=tpu-ubuntu2204-base \
+  --version=v2-alpha-tpuv6e \
   --spot
 ```
 
@@ -272,7 +278,7 @@ while true; do
     gcloud compute tpus tpu-vm create sinkhorn-benchmark-cluster \
       --zone=$ZONE \
       --accelerator-type=v6e-8 \
-      --version=tpu-ubuntu2204-base \
+      --version=v2-alpha-tpuv6e \
       --spot 2>&1
 
     if [ $? -eq 0 ]; then
