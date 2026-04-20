@@ -7,8 +7,7 @@ Optimized for high-throughput TPU training on A-grade hardware (v6e-8).
 
 Output Schema (Shards):
     - emb1, emb2: (N, L, D) float16
-    - alignment:  (N, L, L) float16
-    - mask1, mask2: (N, L) bool (padding info)
+    - target:     (N, L, L) float16
 
 Usage:
     python data/download_pfam.py --shard_size 500 --max_pairs 50000 --embed
@@ -20,6 +19,7 @@ import gzip
 import json
 import random
 import argparse
+import subprocess
 import urllib.request
 from typing import Any
 
@@ -94,16 +94,37 @@ def _load_embedder() -> tuple[Any, Any, Any]:
     model.eval()
     return torch_module, tokenizer, model
 
-def process_sharded(gz_path, out_dir, shard_size=500, max_pairs=50000, max_len=1024, embed=False):
+def _upload_to_gcs(local_path: str, bucket: str, object_name: str) -> None:
+    gcs_path = f"gs://{bucket}/pfam_shards/{object_name}"
+    print(f" ⬆ Uploading to {gcs_path}...")
+    result = subprocess.run(["gsutil", "cp", local_path, gcs_path], check=False)
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to upload {local_path} to {gcs_path}.")
+
+
+def process_sharded(
+    gz_path,
+    out_dir,
+    shard_size=500,
+    max_pairs=50000,
+    max_len=1024,
+    embed=True,
+    gcs_bucket=None,
+):
     os.makedirs(out_dir, exist_ok=True)
     rng = random.Random(42)
+
+    if not embed:
+        raise ValueError(
+            "Pfam shard generation requires embed=True because the training pipeline "
+            "expects precomputed emb1/emb2 tensors."
+        )
 
     torch_module: Any | None = None
     tokenizer: Any | None = None
     model: Any | None = None
-    if embed:
-        print("Loading ESM-2 8M for production embedding...")
-        torch_module, tokenizer, model = _load_embedder()
+    print("Loading ESM-2 8M for production embedding...")
+    torch_module, tokenizer, model = _load_embedder()
 
     pair_count, shard_count = 0, 0
     buffer = []
@@ -128,10 +149,8 @@ def process_sharded(gz_path, out_dir, shard_size=500, max_pairs=50000, max_len=1
         np.savez_compressed(path, emb1=emb1, emb2=emb2, target=targets)
         print(f" ✓ Saved Shard {shard_count} -> {name}")
 
-        if args.gcs_bucket:
-            gcs_path = f"gs://{args.gcs_bucket}/pfam_shards/{name}"
-            print(f" ⬆ Uploading to {gcs_path}...")
-            os.system(f"gsutil cp {path} {gcs_path}")
+        if gcs_bucket:
+            _upload_to_gcs(path, gcs_bucket, name)
 
         shard_count += 1
 
@@ -183,8 +202,8 @@ def process_sharded(gz_path, out_dir, shard_size=500, max_pairs=50000, max_len=1
             f,
         )
 
-    if args.gcs_bucket:
-        os.system(f"gsutil cp {meta_path} gs://{args.gcs_bucket}/pfam_shards/metadata.json")
+    if gcs_bucket:
+        _upload_to_gcs(meta_path, gcs_bucket, "metadata.json")
     print(f"✓ Pipeline Complete: {pair_count} pairs.")
 
 if __name__ == "__main__":
@@ -192,9 +211,21 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", type=str, default="./data/pfam_shards")
     parser.add_argument("--max_pairs", type=int, default=50000)
     parser.add_argument("--shard_size", type=int, default=500)
-    parser.add_argument("--embed", action="store_true")
+    parser.add_argument(
+        "--embed",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Generate training shards with precomputed ESM embeddings (required).",
+    )
     parser.add_argument("--gcs_bucket", type=str, help="Upload shards to this GCS bucket")
     args = parser.parse_args()
     
     path = download_pfam_seed("./data/cache")
-    process_sharded(path, args.output_dir, args.shard_size, args.max_pairs, embed=args.embed)
+    process_sharded(
+        path,
+        args.output_dir,
+        args.shard_size,
+        args.max_pairs,
+        embed=args.embed,
+        gcs_bucket=args.gcs_bucket,
+    )

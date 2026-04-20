@@ -398,7 +398,10 @@ def alignment_loss_sinkhorn(params, emb_q, emb_k, targets, band_width):
     u, v = ot_kernel.compute_global_uv(Q, K, n_iters=15, band_width=band_width)
     S = jnp.einsum("bhmd,bhnd->bhmn", Q, K) * scale
     log_P = S + u[..., :, None] + v[..., None, :]
-    P = jax.nn.softmax(log_P, axis=-1)
+    band = ot_kernel.materialize_support_mask(Q, K, band_width=band_width)
+    if band is not None:
+        log_P = jnp.where(band[None, None, :, :], log_P, -jnp.inf)
+    P = jnp.where(jnp.isfinite(log_P), jnp.exp(log_P), 0.0)
     P = jnp.clip(P, 1e-10, 1.0)
 
     loss = -jnp.mean(jnp.sum(targets[:, None, :, :] * jnp.log(P), axis=-1))

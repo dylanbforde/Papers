@@ -3,8 +3,9 @@ name = "path-model"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.10"
 dependencies = [
+    "numpy",
     "jax",
     "jaxlib",
     "flax",
@@ -16,6 +17,8 @@ dependencies = [
     "ml-collections",
     "ott-jax",
     "grain-nightly",
+    "torch",
+    "transformers",
     "tool>=0.8.0",
     "ruff>=0.15.10",
 ]

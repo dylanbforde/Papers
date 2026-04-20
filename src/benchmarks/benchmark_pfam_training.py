@@ -43,20 +43,68 @@ DUSTBIN_BLOCK_SIZE = 128
 class PfamShardDataset:
     def __init__(self, data_dir, seed=0):
         self.data_dir = data_dir
-        with open(os.path.join(data_dir, "metadata.json"), encoding="utf-8") as f:
-            self.metadata = json.load(f)
+        self.shard_files = self._discover_shard_files()
+        self.metadata = self._load_or_infer_metadata()
 
-        self.total_shards = self.metadata["total_shards"]
+        self.total_shards = len(self.shard_files)
         self.shard_size = self.metadata["shard_size"]
         self.curr_shard_idx = -1
         self.curr_shard_data = None
         self.rng = np.random.default_rng(seed)
 
+    def _discover_shard_files(self):
+        shard_files = sorted(
+            name
+            for name in os.listdir(self.data_dir)
+            if name.startswith("shard_") and name.endswith(".npz")
+        )
+        if not shard_files:
+            raise FileNotFoundError(f"No Pfam shard files found in {self.data_dir!r}.")
+        return shard_files
+
+    def _infer_metadata(self):
+        total_pairs = 0
+        shard_size = 0
+        for idx, shard_name in enumerate(self.shard_files):
+            shard_path = os.path.join(self.data_dir, shard_name)
+            with np.load(shard_path, allow_pickle=False) as shard:
+                current_pairs = int(shard["emb1"].shape[0])
+            if idx == 0:
+                shard_size = current_pairs
+            total_pairs += current_pairs
+        return {
+            "total_pairs": total_pairs,
+            "shard_size": shard_size,
+            "total_shards": len(self.shard_files),
+        }
+
+    def _load_or_infer_metadata(self):
+        metadata_path = os.path.join(self.data_dir, "metadata.json")
+        if os.path.exists(metadata_path):
+            with open(metadata_path, encoding="utf-8") as f:
+                metadata = json.load(f)
+        else:
+            metadata = self._infer_metadata()
+            with open(metadata_path, "w", encoding="utf-8") as f:
+                json.dump(metadata, f)
+            print(
+                f"Warning: metadata.json missing in {self.data_dir}. "
+                "Inferred dataset metadata from shard files."
+            )
+
+        if metadata.get("total_shards") != len(self.shard_files):
+            print(
+                f"Warning: metadata total_shards={metadata.get('total_shards')} "
+                f"but discovered {len(self.shard_files)} local shard files. "
+                "Using the discovered shard list."
+            )
+        return metadata
+
     def _load_shard(self, shard_idx):
         if self.curr_shard_idx == shard_idx:
             return
 
-        path = os.path.join(self.data_dir, f"shard_{shard_idx:03d}.npz")
+        path = os.path.join(self.data_dir, self.shard_files[shard_idx])
         with np.load(path, allow_pickle=False) as shard:
             emb1 = shard["emb1"]
             emb2 = shard["emb2"]

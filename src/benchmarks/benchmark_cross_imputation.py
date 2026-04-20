@@ -53,7 +53,7 @@ def muon_optimizer(learning_rate):
     def update_fn(updates, state, params=None):
         new_updates = jax.tree_util.tree_map(
             lambda g: newton_schulz_orthogonalize(g) if g.ndim >= 2 else g, updates)
-        new_updates = jax.tree_util.tree_map(lambda g: g * learning_rate, new_updates)
+        new_updates = jax.tree_util.tree_map(lambda g: -g * learning_rate, new_updates)
         return new_updates, state
     return optax.GradientTransformation(init_fn, update_fn)
 
