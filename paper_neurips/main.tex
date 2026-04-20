@@ -74,9 +74,10 @@ Starting from stopped-gradient potentials $u^{(0)}, v^{(0)}$, we recompute a sho
 For the $K=2$ tail-refinement surrogate, the VJP with respect to the score matrix $S$ decomposes into five source terms involving four transport matrices $P^{(a,b)} = \exp(S + u^{(a)} + v^{(b)})$.
 \end{proposition}
 
-\paragraph{Hardware-Efficient Factorization.} While the formulation involves four matrices, we observe that for fixed $S$, any $P^{(a,b)}$ can be recovered from a base plan $P^{(1,1)}$ via element-wise vector scaling: 
+% Updated to match code 2024-05-24: Use P^{(2,2)} as base reference plan to match `P22` variable in src/ot_kernel.py
+\paragraph{Hardware-Efficient Factorization.} While the formulation involves four matrices, we observe that for fixed $S$, any $P^{(a,b)}$ can be recovered from a base plan $P^{(2,2)}$ via element-wise vector scaling:
 \begin{equation}
-    P^{(a,b)} = P^{(1,1)} \odot \exp(u^{(a)} - u^{(1)}) \odot \exp(v^{(b)} - v^{(1)}).
+    P^{(a,b)} = P^{(2,2)} \odot \exp(u^{(a)} - u^{(2)}) \odot \exp(v^{(b)} - v^{(2)}).
 \end{equation}
 This factorization allows our Pallas kernels to compute the core $N^2$ transport coefficients only once, deriving the other terms through $O(N)$ operations. This reduces the computational overhead of the multi-transport pass from $4N^2$ to $\sim 1N^2$. The optimized TPU backward is exact for the $K=2$ surrogate because it reconstructs the remaining staircase plans by exact row/column rescaling rather than approximating them with a single plan. The same orbit-factorized idea also yields an explicit fixed-$K$ backward beyond $K=2$, while residual-adaptive refinement remains a reference path. Production TPU runs use the fixed $K=2$ kernel and exact autodiff through the same masked surrogate is used for verification on small problems. Appendix~\ref{app:proof} records the algebraic identities used by the kernel.
 
@@ -156,9 +157,9 @@ For any two transport matrices $P^{(a,b)}$ and $P^{(c,d)}$, the ratio of their e
 \begin{equation}
     \frac{P^{(a,b)}_{ij}}{P^{(c,d)}_{ij}} = \frac{\exp(S_{ij} + u^{(a)}_i + v^{(b)}_j)}{\exp(S_{ij} + u^{(c)}_i + v^{(d)}_j)} = \exp(u^{(a)}_i - u^{(c)}_i + v^{(b)}_j - v^{(d)}_j).
 \end{equation}
-Setting the reference indices $(c,d) = (1,1)$, we obtain the element-wise scaling relation used in our hardware implementation:
+Setting the reference indices $(c,d) = (2,2)$, we obtain the element-wise scaling relation used in our hardware implementation:
 \begin{equation}
-    P^{(a,b)}_{ij} = P^{(1,1)}_{ij} \cdot \exp(u^{(a)}_i - u^{(1)}_i) \cdot \exp(v^{(b)}_j - v^{(1)}_j).
+    P^{(a,b)}_{ij} = P^{(2,2)}_{ij} \cdot \exp(u^{(a)}_i - u^{(2)}_i) \cdot \exp(v^{(b)}_j - v^{(2)}_j).
 \end{equation}
 This factorization is exact for any $S, u, v$ and does not depend on convergence. The optimized kernel therefore does not approximate the staircase by a single plan; it materializes one base plan and reconstructs the remaining staircase plans by exact row/column rescaling.
 
