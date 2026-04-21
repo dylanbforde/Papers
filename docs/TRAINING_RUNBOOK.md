@@ -4,8 +4,6 @@ The current production TPU workflow is a two-stage Pfam pipeline:
 1. Run a short Sinkhorn-only screen on Pfam shards with `scripts/tpu_sinkhorn_screen.sh`.
 2. Promote the winning config into the full Pfam Sinkhorn-vs-Flash run with `scripts/tpu_auto_run.sh`.
 
-The older ortholog-DNA wall-clock script is retained as a legacy comparator, but it is not the primary TPU benchmark path anymore.
-
 ---
 
 ## Recommended Flow
@@ -17,7 +15,21 @@ gcloud config set project sinkhorn-neurips
 gcloud storage buckets create gs://sinkhorn-neurips --location=us-east5 || true
 ```
 
-### 2. Launch the Pfam screen
+### 2. Prepare or verify the Pfam shards
+
+The TPU workflows expect precomputed Pfam shards in:
+
+```bash
+gs://sinkhorn-neurips/pfam_shards/
+```
+
+If they are missing or need to be regenerated, run the offline CPU preparation step first:
+
+```bash
+./scripts/prepare_data.sh
+```
+
+### 3. Launch the Pfam screen
 
 This script:
 - waits for `sinkhorn-screen-queue` to become active,
@@ -28,6 +40,12 @@ This script:
 
 ```bash
 ./scripts/tpu_sinkhorn_screen.sh
+```
+
+If you are launching from `command-center` and want the machine to reconcile the current queue state for you:
+
+```bash
+./scripts/tpu_screen_ensure.sh
 ```
 
 Useful overrides:
@@ -50,7 +68,18 @@ Screen artifacts land under:
 gs://sinkhorn-neurips/sinkhorn_screen/<run-id>/
 ```
 
-### 3. Promote the winning config into the full run
+### 4. Optional: run the fixed-budget `K` ablation
+
+```bash
+./scripts/tpu_k_ablation.sh
+```
+
+This script:
+- launches the current tail-refinement ablation grid,
+- verifies the JAX TPU runtime before training,
+- keeps per-`K` logs and checkpoints isolated under `logs/` and `checkpoints/`.
+
+### 5. Promote the winning config into the full run
 
 Set the winning Sinkhorn config via environment variables, then launch the automated production run:
 
@@ -102,4 +131,3 @@ gcloud compute tpus queued-resources describe sinkhorn-screen-queue \
 
 - The automation scripts use `git archive` from your local checkout. You do not need to clone from GitHub on the TPU VM.
 - `scripts/tpu_sinkhorn_screen.sh` now preserves screen logs/checkpoints before teardown. Review the synced GCS artifacts before promoting a config.
-- `src/benchmarks/benchmark_wallclock_training.py` remains available for the legacy ortholog-DNA benchmark, but it is no longer the repo’s primary TPU workflow.

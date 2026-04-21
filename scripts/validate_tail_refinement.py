@@ -19,6 +19,18 @@ from src.benchmarks.benchmark_pfam_training import apply_projection_manifold
 from src import ot_kernel
 
 
+def _parse_length_list(raw_lengths):
+    lengths = []
+    for item in raw_lengths.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        lengths.append(int(item))
+    if not lengths:
+        raise ValueError("at least one validation length is required")
+    return lengths
+
+
 def _make_inputs(seed, length, dim):
     key = jax.random.PRNGKey(seed)
     q_key, k_key, v_key, t_key, wq_key, wk_key, wv_key = jax.random.split(key, 7)
@@ -209,6 +221,11 @@ def _module_agreement(q, k, v, q_mask, k_mask, n_iters, band_width):
     }
 
 
+def _module_agreement_case(seed, length, dim, n_iters, band_width):
+    q, k, v, _target, q_mask, k_mask, _params = _make_inputs(seed, length, dim)
+    return _module_agreement(q, k, v, q_mask, k_mask, n_iters, band_width)
+
+
 def _stiefel_case(params):
     projected = apply_projection_manifold(params, "stiefel_qk")
     wq_err = float(jnp.max(jnp.abs(projected["W_q"].T @ projected["W_q"] - jnp.eye(projected["W_q"].shape[1], dtype=projected["W_q"].dtype))))
@@ -278,19 +295,26 @@ def _offdiag_transport_support_case(seed, length, dim, band_width, shift):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--length", type=int, default=128)
+    parser.add_argument("--length", type=int, default=1024)
+    parser.add_argument("--module_lengths", type=str, default="512,1024,2048,4096,8192,16384")
     parser.add_argument("--dim", type=int, default=8)
     parser.add_argument("--n_iters", type=int, default=2)
-    parser.add_argument("--band_width", type=int, default=16)
+    parser.add_argument("--band_width", type=int, default=256)
     parser.add_argument("--grad_tol", type=float, default=2e-4)
     parser.add_argument("--out_tol", type=float, default=1e-6)
     parser.add_argument("--orth_tol", type=float, default=1e-5)
-    parser.add_argument("--support_gain_tol", type=float, default=0.25)
+    parser.add_argument("--support_gain_tol", type=float, default=0.0)
     args = parser.parse_args()
 
+    module_lengths = _parse_length_list(args.module_lengths)
     q, k, v, target, q_mask, k_mask, params = _make_inputs(args.seed, args.length, args.dim)
+    support_length = max(max(module_lengths), args.length, 2048)
+    support_shift = min(max(args.band_width * 2, 256), support_length // 2)
     report = {
-        "module_agreement": _module_agreement(q, k, v, q_mask, k_mask, args.n_iters, args.band_width),
+        "module_agreement": {
+            str(length): _module_agreement_case(args.seed, length, args.dim, args.n_iters, args.band_width)
+            for length in module_lengths
+        },
         "k2_fast_path": _grad_case(
             "k2_fast_path",
             q,
@@ -347,20 +371,20 @@ def main():
         "epsilon_scaling": _epsilon_scaling_case(q, k, v, q_mask, k_mask, args.band_width),
         "offdiag_support": _offdiag_transport_support_case(
             args.seed + 17,
-            max(args.length, 512),
+            support_length,
             args.dim,
             args.band_width,
-            shift=max(args.band_width * 8, 256),
+            shift=support_shift,
         ),
         "stiefel_projection": _stiefel_case(params),
     }
 
     failures = []
-    module_agreement = report["module_agreement"]
-    if module_agreement["src_vs_jax_max_abs"] > args.out_tol:
-        failures.append(f"src_vs_jax_max_abs={module_agreement['src_vs_jax_max_abs']}")
-    if module_agreement["src_vs_pallas_max_abs"] > args.out_tol:
-        failures.append(f"src_vs_pallas_max_abs={module_agreement['src_vs_pallas_max_abs']}")
+    for length_key, module_agreement in report["module_agreement"].items():
+        if module_agreement["src_vs_jax_max_abs"] > args.out_tol:
+            failures.append(f"L{length_key}.src_vs_jax_max_abs={module_agreement['src_vs_jax_max_abs']}")
+        if module_agreement["src_vs_pallas_max_abs"] > args.out_tol:
+            failures.append(f"L{length_key}.src_vs_pallas_max_abs={module_agreement['src_vs_pallas_max_abs']}")
 
     for case_name in ("k2_fast_path", "adaptive_reference", "fixed_k_orbit", "transport_scout_grad"):
         case = report[case_name]

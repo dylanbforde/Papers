@@ -35,19 +35,21 @@ This repository contains the reference implementation of **Block-Wise Differenti
   - latency benchmark suite for long-context DNA/protein settings,
   - compares Sinkhorn OT vs Flash Attention,
   - intended for 1K → 16K+ context scaling experiments.
-- `src/benchmarks/benchmark_wallclock_training.py`
-  - legacy fixed wall-clock comparison on human/mouse orthologous CDS,
-  - retained for historical/local comparisons after the optimizer-sign fix,
-  - not the primary TPU production workflow.
 - `src/benchmarks/benchmark_pfam_training.py`
   - supervised Pfam alignment training utilities,
   - optional **Stiefel QR projection** on Q/K heads,
   - optional monotonicity and sparse CE terms,
   - configurable Sinkhorn refinement controls.
+- `scripts/prepare_data.sh`
+  - offline Pfam shard generation and upload to GCS,
+  - keeps expensive TPU time focused on training instead of embedding.
 - `scripts/tpu_sinkhorn_screen.sh`
   - queues a TPU v6e-8 slice,
   - runs a short Sinkhorn-only config screen on Pfam shards,
   - syncs logs/checkpoints to GCS before teardown.
+- `scripts/tpu_k_ablation.sh`
+  - runs the fixed-budget Sinkhorn tail-refinement ablation on TPU,
+  - keeps per-`K` logs and checkpoints isolated for comparison.
 - `scripts/tpu_auto_run.sh`
   - runs the promoted Pfam Sinkhorn vs Flash comparison on TPU,
   - checkpoints to GCS for restartability.
@@ -59,6 +61,13 @@ This repository contains the reference implementation of **Block-Wise Differenti
   - one-shot operational helper for `command-center`,
   - normalizes `gcloud`, cleans up the known broken stray race queues,
   - resumes the canonical screen queue if it already exists or launches a fresh race if it does not.
+- `scripts/validate_tail_refinement.py`
+  - numerical validation harness for the custom-VJP tail-refinement path,
+  - checks exact-surrogate gradients at length 1024 by default,
+  - checks module agreement across 512, 1024, 2048, 4096, 8192, and 16384 token contexts,
+  - reports support-reconstruction behavior separately from the core regression gate.
+- `scripts/tpu_jax_probe.py`
+  - preflight TPU runtime probe for JAX/libtpu availability and distributed init state.
 
 ---
 
@@ -146,6 +155,12 @@ python src/benchmarks/benchmark_long_context_alignment.py \
 ./scripts/tpu_sinkhorn_screen.sh
 ```
 
+### Offline Pfam shard preparation
+
+```bash
+./scripts/prepare_data.sh
+```
+
 ### Multi-zone Pfam screen race
 
 Prefer same-region zones first to avoid unnecessary cross-region data movement:
@@ -190,18 +205,22 @@ Check queue state while it is waiting for capacity:
 ./scripts/tpu_auto_run.sh
 ```
 
-### Legacy ortholog-DNA wall-clock benchmark
+### Sinkhorn K ablation
 
 ```bash
-# Prepare data
-python src/benchmarks/benchmark_wallclock_training.py --prepare_data
-
-# 2.5h Flash baseline
-python src/benchmarks/benchmark_wallclock_training.py --method flash_attention --max_hours 2.5
-
-# 2.5h Sinkhorn
-python src/benchmarks/benchmark_wallclock_training.py --method sinkhorn_ot --max_hours 2.5
+./scripts/tpu_k_ablation.sh
 ```
+
+### Tail-refinement validation
+
+```bash
+python scripts/validate_tail_refinement.py
+```
+
+Default behavior:
+- exact-autodiff regression at length 1024,
+- module agreement at lengths 512, 1024, 2048, 4096, 8192, and 16384,
+- Stiefel projection and transport-scout reporting.
 
 ---
 

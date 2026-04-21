@@ -943,8 +943,8 @@ def _banded_compute_next_uv(Q, K, u_in, v_in, scale, BLOCK, q_mask, k_mask, band
         k_mask_band = jax.lax.dynamic_slice_in_dim(k_mask, start_idx * BLOCK, profile["row_slice_size"] * BLOCK, axis=-1)
         S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block, k_band) * scale
         logits = S_block + v_band[..., None, :]
-        abs_indices = start_idx + jnp.arange(profile["row_slice_size"] * BLOCK) // BLOCK
-        block_mask = block_mask[abs_indices % profile["row_slice_size"]]
+        local_block_offsets = jnp.arange(profile["row_slice_size"] * BLOCK) // BLOCK
+        block_mask = block_mask[local_block_offsets]
         valid = q_mask_block[..., :, None] & k_mask_band[..., None, :] & block_mask[None, None, None, :]
         logits = jnp.where(valid, logits, -jnp.inf)
         u_new_block = -jax.scipy.special.logsumexp(logits, axis=-1)
@@ -962,8 +962,8 @@ def _banded_compute_next_uv(Q, K, u_in, v_in, scale, BLOCK, q_mask, k_mask, band
         q_mask_band = jax.lax.dynamic_slice_in_dim(q_mask, start_idx * BLOCK, profile["col_slice_size"] * BLOCK, axis=-1)
         S_block = jnp.einsum("bhmd,bhnd->bhmn", q_band, k_block) * scale
         logits = S_block + u_band[..., :, None]
-        abs_indices = start_idx + jnp.arange(profile["col_slice_size"] * BLOCK) // BLOCK
-        block_mask = block_mask[abs_indices % profile["col_slice_size"]]
+        local_block_offsets = jnp.arange(profile["col_slice_size"] * BLOCK) // BLOCK
+        block_mask = block_mask[local_block_offsets]
         valid = q_mask_band[..., :, None] & k_mask_block[..., None, :] & block_mask[None, None, :, None]
         logits = jnp.where(valid, logits, -jnp.inf)
         v_new_block = -jax.scipy.special.logsumexp(logits, axis=-2)
@@ -990,8 +990,8 @@ def _banded_matvec_P(Q, K, u_a, v_b, vec, scale, BLOCK, q_mask, k_mask, band_wid
             k_mask_band = jax.lax.dynamic_slice_in_dim(k_mask, start_idx * BLOCK, profile["row_slice_size"] * BLOCK, axis=-1)
             S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block, k_band) * scale
             A_block = _exp_for_tpu(S_block + u_block[..., :, None] + v_band[..., None, :])
-            abs_indices = start_idx + jnp.arange(profile["row_slice_size"] * BLOCK) // BLOCK
-            block_mask = block_mask[abs_indices % profile["row_slice_size"]]
+            local_block_offsets = jnp.arange(profile["row_slice_size"] * BLOCK) // BLOCK
+            block_mask = block_mask[local_block_offsets]
             valid = q_mask_block[..., :, None] & k_mask_band[..., None, :] & block_mask[None, None, None, :]
             A_block = jnp.where(valid, A_block, 0.0)
             res_block = jnp.sum(A_block * vec_band[..., None, :], axis=-1)
@@ -1011,8 +1011,8 @@ def _banded_matvec_P(Q, K, u_a, v_b, vec, scale, BLOCK, q_mask, k_mask, band_wid
             k_mask_band = jax.lax.dynamic_slice_in_dim(k_mask, start_idx * BLOCK, profile["row_slice_size"] * BLOCK, axis=-1)
             S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block, k_band) * scale
             A_block = _exp_for_tpu(S_block + u_block[..., :, None] + v_band[..., None, :])
-            abs_indices = start_idx + jnp.arange(profile["row_slice_size"] * BLOCK) // BLOCK
-            block_mask = block_mask[abs_indices % profile["row_slice_size"]]
+            local_block_offsets = jnp.arange(profile["row_slice_size"] * BLOCK) // BLOCK
+            block_mask = block_mask[local_block_offsets]
             valid = q_mask_block[..., :, None] & k_mask_band[..., None, :] & block_mask[None, None, None, :]
             A_block = jnp.where(valid, A_block, 0.0)
             contrib = jnp.sum(A_block * vec_block[..., :, None], axis=-2)
@@ -1039,8 +1039,8 @@ def _banded_transport_apply(Q, K, V, u, v, scale, BLOCK, q_mask, k_mask, band_wi
 
         logits = jnp.einsum("bhmd,bhnd->bhmn", q_block, k_band) * scale
         logits = logits + u_block[..., :, None] + v_band[..., None, :]
-        abs_indices = start_idx + jnp.arange(profile["row_slice_size"] * BLOCK) // BLOCK
-        block_mask = block_mask[abs_indices % profile["row_slice_size"]]
+        local_block_offsets = jnp.arange(profile["row_slice_size"] * BLOCK) // BLOCK
+        block_mask = block_mask[local_block_offsets]
         valid = q_mask_block[..., :, None] & k_mask_band[..., None, :] & block_mask[None, None, None, :]
         weights = jnp.where(valid, _exp_for_tpu(logits), 0.0)
         out_block = jnp.einsum("bhmn,bhnd->bhmd", weights, value_band)
@@ -1467,8 +1467,8 @@ def _output_plan_pullback_stats(
 
         S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block, k_band) * scale
         P_block = _exp_for_tpu(S_block + u_block[..., :, None] + v_band[..., None, :])
-        abs_indices = start_idx + jnp.arange(profile["row_slice_size"] * BLOCK) // BLOCK
-        block_mask = block_mask[abs_indices % profile["row_slice_size"]]
+        local_block_offsets = jnp.arange(profile["row_slice_size"] * BLOCK) // BLOCK
+        block_mask = block_mask[local_block_offsets]
         valid = q_mask_block[..., :, None] & k_mask_band[..., None, :] & block_mask[None, None, None, :]
         P_block = jnp.where(valid, P_block, 0.0)
 
@@ -1548,8 +1548,8 @@ def _fixed_refinement_qk_pullback(
 
         S_block = jnp.einsum("bhmd,bhnd->bhmn", q_block, k_band) * scale
         P_base = _exp_for_tpu(S_block + u_base_block[..., :, None] + v_base_band[..., None, :])
-        abs_indices = start_idx + jnp.arange(profile["row_slice_size"] * BLOCK) // BLOCK
-        block_mask = block_mask[abs_indices % profile["row_slice_size"]]
+        local_block_offsets = jnp.arange(profile["row_slice_size"] * BLOCK) // BLOCK
+        block_mask = block_mask[local_block_offsets]
         valid = q_mask_block[..., :, None] & k_mask_band[..., None, :] & block_mask[None, None, None, :]
         P_base = jnp.where(valid, P_base, 0.0)
 

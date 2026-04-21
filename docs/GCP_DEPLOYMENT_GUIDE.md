@@ -5,10 +5,10 @@ This guide covers everything you need to run the **latency benchmark** (`benchma
 Because you have never used GCP before, this guide assumes zero prior cloud experience.
 
 The current production TPU workflow is:
-1. `scripts/tpu_sinkhorn_screen.sh` for the short Sinkhorn-only Pfam screen.
-2. `scripts/tpu_auto_run.sh` for the promoted Pfam Sinkhorn-vs-Flash run.
-
-The older ortholog-DNA wall-clock benchmark remains in the repository as a legacy comparator, but it is not the primary TPU training path anymore.
+1. `scripts/prepare_data.sh` for offline Pfam shard generation and upload.
+2. `scripts/tpu_sinkhorn_screen.sh` for the short Sinkhorn-only Pfam screen.
+3. `scripts/tpu_k_ablation.sh` for fixed-budget tail-refinement ablations.
+4. `scripts/tpu_auto_run.sh` for the promoted Pfam Sinkhorn-vs-Flash run.
 
 ---
 
@@ -87,6 +87,16 @@ gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=us-east5-a --wo
 ## 6.1 Running the Current Pfam Training Workflow
 The current TPU training path is a two-stage Pfam workflow on precomputed shards.
 
+### Step 0: Prepare or verify the Pfam shards
+
+The TPU scripts expect precomputed shards in `gs://sinkhorn-neurips/pfam_shards/`.
+
+If they are missing or need regeneration, run the offline preparation step before consuming TPU capacity:
+
+```bash
+./scripts/prepare_data.sh
+```
+
 ### Step 1: Run the short Sinkhorn screen
 
 ```bash
@@ -94,6 +104,14 @@ The current TPU training path is a two-stage Pfam workflow on precomputed shards
 ```
 
 This queues `sinkhorn-screen-queue`, uploads your exact local source snapshot, runs the short Pfam screen, and syncs `logs/` plus `screen_checkpoints/` to GCS before tearing the queue down.
+
+On `command-center`, the preferred operational entrypoint is:
+
+```bash
+./scripts/tpu_screen_ensure.sh
+```
+
+That helper will preserve an existing canonical queue, clean up the previously buggy stray race queues if needed, and otherwise launch the current same-region race wrapper for you.
 
 Check queue state while waiting:
 
@@ -118,6 +136,14 @@ TRAIN_MONOTONICITY_WEIGHT=0.0 \
 
 This queues `sinkhorn-queue`, uploads the local snapshot, fetches Pfam shards from GCS, runs Sinkhorn first, then Flash, and checkpoints to GCS so reruns can resume.
 
+### Optional: run the tail-refinement `K` ablation
+
+```bash
+./scripts/tpu_k_ablation.sh
+```
+
+This launches the current fixed-budget `K` sweep on the same Pfam shard data and keeps per-`K` logs/checkpoints isolated for comparison.
+
 ### What to expect:
 - **Data source**: precomputed Pfam shard dataset stored under `gs://sinkhorn-neurips/pfam_shards/`.
 - **Screen artifacts**: synced to `gs://sinkhorn-neurips/sinkhorn_screen/<run-id>/`.
@@ -135,44 +161,13 @@ gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=us-east5-a --wo
   python src/benchmarks/benchmark_pfam_training.py --method sinkhorn_ot --max_hours 0.25 --data_dir data/pfam_shards --autotune_batch_size"
 ```
 
-## 6.2 Legacy Ortholog-DNA Wall-Clock Benchmark
-`src/benchmarks/benchmark_wallclock_training.py` remains available for the older ortholog-DNA comparison. It is no longer the recommended TPU workflow, but it is now consistent with gradient descent after the optimizer-sign fix.
-
-### ⚠️ Billing Safety: Auto-shutdown on completion/failure
-If the Python script crashes, the TPU VM **stays running** and you keep paying ~$10-12/hr. To protect against this (especially for overnight runs), wrap the command so the **TPU auto-deletes itself** when the script finishes or fails:
-
-```bash
-# Safe overnight run: auto-deletes TPU after script completes (success OR failure)
-ZONE=us-east5-a
-gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=$ZONE --worker=all --command="\
-  cd sinkhorn-aligner && \
-  python src/benchmarks/benchmark_wallclock_training.py --method sinkhorn_ot --max_hours 2.5; \
-  sudo shutdown -h now"
-# The VM shuts down after the script exits (success or crash).
-# Then delete from your local machine / Cloud Shell:
-# gcloud compute tpus tpu-vm delete sinkhorn-benchmark-cluster --zone=$ZONE --quiet
-```
-
-Alternatively, set a **hard timeout** from Cloud Shell that kills the VM after a max duration (e.g., 3 hours for a 2.5hr run):
-```bash
-# Start the training in the background, then schedule deletion after 3 hours
-gcloud compute tpus tpu-vm ssh sinkhorn-benchmark-cluster --zone=us-east5-a --worker=all --command="\
-  cd sinkhorn-aligner && \
-  nohup python src/benchmarks/benchmark_wallclock_training.py --method sinkhorn_ot --max_hours 2.5 > training.log 2>&1 &"
-
-# Schedule auto-delete from Cloud Shell (10800s = 3 hours)
-sleep 10800 && gcloud compute tpus tpu-vm delete sinkhorn-benchmark-cluster --zone=us-east5-a --quiet &
-```
-
-**Also recommended:** Set a [GCP Budget Alert](https://console.cloud.google.com/billing/budgets) for your project (e.g., $100) so you get an email if spending exceeds your threshold.
-
-## 6.5 Real-World Training: Epochs & Checkpointing
+## 6.2 Real-World Training: Epochs & Checkpointing
 When you transition from running the benchmark profiling script to doing an actual full-scale training run over Pfam or Nucleotide datasets, you must implement **Checkpointing** to protect against TPU preemptions.
 
 1. **Epochs:** Standard sequence alignment training runs for roughly **50 to 100 epochs** over the dataset. You should wrap your JAX loss in an Optax learning rate scheduler (e.g., `optax.warmup_cosine_decay_schedule`).
 2. **Cloud Checkpointing:** Because Spot/Preemptible TPUs can be shut off randomly by Google (to save 70% of the cost!), you must save your model weights and optimizer state using JAX's `orbax.checkpoint` library at the end of *every single epoch*.
 
-## 6.6 Setting Up Google Cloud Storage (GCS) & Data Retrieval
+## 6.3 Setting Up Google Cloud Storage (GCS) & Data Retrieval
 TPU VMs have very little persistent disk space. All large datasets, checkpoints, and benchmark results should be read from and written to a Google Cloud Storage (GCS) Bucket.
 1. **Create the Bucket**: Run this in your local Cloud Shell:
    ```bash
@@ -184,7 +179,7 @@ TPU VMs have very little persistent disk space. All large datasets, checkpoints,
    gcloud storage cp -r gs://sinkhorn-neurips/results ./local_folder
    ```
 
-## 6.7 Determining TPU Batch Sizes (Gradient Accumulation)
+## 6.4 Determining TPU Batch Sizes (Gradient Accumulation)
 Batch size on TPUs is determined strictly by the physical limits of the High Bandwidth Memory (HBM, 32GB on v6e).
 * **Multiples of Mesh**: Your global `BATCH_SIZE` must be perfectly divisible by the number of chips (e.g., a multiple of 8 for a `v6e-8` slice) so the data shards equally.
 * **Finding the Limit**: Because Sinkhorn Attention requires $O(L \cdot W)$ memory compared to standard tracking $O(L^2)$, you can physically fit a much larger `L`. To find your max batch size, start at 8 and double it until JAX throws an `Out Of Memory (OOM)` error during the initial XLA compilation phase, then step back down.
