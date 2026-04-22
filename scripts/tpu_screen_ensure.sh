@@ -127,13 +127,13 @@ if [ "${#BROKEN_RACE_IDS[@]}" -gt 0 ]; then
   PRIMARY_STATE="$(queue_state "$PRIMARY_ZONE" "$PRIMARY_RESOURCE_ID")"
 fi
 
-if pgrep -f 'bash scripts/tpu_multi_zone_race.sh' >/dev/null 2>&1; then
+if pgrep -f 'scripts/tpu_multi_zone_race.sh' >/dev/null 2>&1; then
   echo "[$(date)] A multi-zone race wrapper is already running. Leaving it alone."
   print_status
   exit 0
 fi
 
-if pgrep -f 'bash scripts/tpu_sinkhorn_screen.sh' >/dev/null 2>&1; then
+if pgrep -f 'scripts/tpu_sinkhorn_screen.sh' >/dev/null 2>&1; then
   echo "[$(date)] A single-zone screen launcher is already running. Leaving it alone."
   print_status
   exit 0

@@ -9,20 +9,33 @@ centralized so benchmark entrypoints fail with actionable context instead.
 from __future__ import annotations
 
 import os
+import socket
 
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _TPU_ENV_KEYS = (
+    "CLOUD_TPU_ACCELERATORS",
     "CLOUD_TPU_TASK_ID",
     "JAX_FORCE_TPU_INIT",
+    "JAX_PLATFORMS",
+    "LIBTPU_INIT_ARGS",
     "MEGATRON_WORKER",
     "PJRT_DEVICE",
+    "PJRT_LOCAL_PROCESS_COUNT",
+    "PJRT_LOCAL_PROCESS_RANK",
     "TPU_ACCELERATOR_TYPE",
     "TPU_CHIPS_PER_HOST_BOUNDS",
+    "TPU_CHIPS_PER_PROCESS_BOUNDS",
     "TPU_HOST_BOUNDS",
+    "TPU_MESH_CONTROLLER_ADDRESS",
+    "TPU_MESH_CONTROLLER_PORT",
     "TPU_PROCESS_BOUNDS",
+    "TPU_PROCESS_ADDRESSES",
+    "TPU_TOPOLOGY_WRAP",
+    "TPU_VISIBLE_CHIPS",
     "TPU_WORKER_HOSTNAMES",
     "TPU_WORKER_ID",
+    "XLA_FLAGS",
 )
 
 
@@ -36,6 +49,12 @@ def cloud_tpu_env_snapshot() -> dict[str, str]:
         value = os.environ.get(key)
         if value:
             snapshot[key] = value
+    return snapshot
+
+
+def cloud_tpu_runtime_snapshot() -> dict[str, str]:
+    snapshot = cloud_tpu_env_snapshot()
+    snapshot["hostname"] = socket.gethostname()
     return snapshot
 
 

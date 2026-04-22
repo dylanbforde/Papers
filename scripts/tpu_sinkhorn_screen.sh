@@ -26,6 +26,7 @@ SCREEN_CONFIGS="${SCREEN_CONFIGS:-k2_eps1:2:1.0:0:2.0:1024:none:none:1.0:0.0:0.0
 ACTIVE_ACCOUNT="${ACTIVE_ACCOUNT:-$(gcloud config get-value account 2>/dev/null || true)}"
 SOURCE_COMMIT="${SOURCE_COMMIT:-$(git -C "$REPO_ROOT" rev-parse HEAD)}"
 SOURCE_ARCHIVE="${SOURCE_ARCHIVE:-/tmp/sinkhorn-aligner-${SOURCE_COMMIT}.tar.gz}"
+REMOTE_SOURCE_ARCHIVE="${REMOTE_SOURCE_ARCHIVE:-/tmp/sinkhorn-aligner-${SOURCE_COMMIT}.tar.gz}"
 ARTIFACT_DEST="${GCS_ARTIFACT_PREFIX%/}/$RUN_ID"
 ARTIFACTS_SYNCED=0
 DELETE_WAITING_QUEUE_ON_EXIT="${DELETE_WAITING_QUEUE_ON_EXIT:-0}"
@@ -126,11 +127,12 @@ gcloud compute tpus tpu-vm ssh "$NODE_ID" --project="$PROJECT_ID" --zone="$ZONE"
   set -euo pipefail && \
   rm -rf sinkhorn-aligner && \
   mkdir -p sinkhorn-aligner" --quiet --ssh-flag="-o StrictHostKeyChecking=no" --ssh-flag="-o UserKnownHostsFile=/dev/null"
-gcloud compute tpus tpu-vm scp "$SOURCE_ARCHIVE" "$NODE_ID:~/sinkhorn-aligner.tar.gz" --project="$PROJECT_ID" --zone="$ZONE" --worker=all --quiet --scp-flag="-o StrictHostKeyChecking=no" --scp-flag="-o UserKnownHostsFile=/dev/null"
+gcloud compute tpus tpu-vm scp "$SOURCE_ARCHIVE" "$NODE_ID:$REMOTE_SOURCE_ARCHIVE" --project="$PROJECT_ID" --zone="$ZONE" --worker=all --quiet --scp-flag="-o StrictHostKeyChecking=no" --scp-flag="-o UserKnownHostsFile=/dev/null"
 gcloud compute tpus tpu-vm ssh "$NODE_ID" --project="$PROJECT_ID" --zone="$ZONE" --worker=all --command="
   set -euo pipefail && \
-  tar -xzf ~/sinkhorn-aligner.tar.gz -C sinkhorn-aligner && \
-  rm -f ~/sinkhorn-aligner.tar.gz && \
+  test -f $REMOTE_SOURCE_ARCHIVE && \
+  tar -xzf $REMOTE_SOURCE_ARCHIVE -C sinkhorn-aligner && \
+  rm -f $REMOTE_SOURCE_ARCHIVE && \
   echo source_commit=$SOURCE_COMMIT" --quiet --ssh-flag="-o StrictHostKeyChecking=no" --ssh-flag="-o UserKnownHostsFile=/dev/null"
 
 echo "Step 4b: Fetching pre-computed Pfam shards from $GCS_DATA_PREFIX..."
@@ -139,6 +141,10 @@ gcloud compute tpus tpu-vm ssh "$NODE_ID" --project="$PROJECT_ID" --zone="$ZONE"
   cd sinkhorn-aligner && \
   mkdir -p data/pfam_shards && \
   gsutil -m cp -r $GCS_DATA_PREFIX/* data/pfam_shards/" --quiet --ssh-flag="-o StrictHostKeyChecking=no" --ssh-flag="-o UserKnownHostsFile=/dev/null"
+
+echo "Step 4c0: Logging TPU control-plane details..."
+gcloud compute tpus queued-resources describe "$RESOURCE_ID" --project="$PROJECT_ID" --zone="$ZONE" || true
+gcloud compute tpus tpu-vm describe "$NODE_ID" --project="$PROJECT_ID" --zone="$ZONE" || true
 
 echo "Step 4c: Verifying JAX TPU runtime..."
 gcloud compute tpus tpu-vm ssh "$NODE_ID" --project="$PROJECT_ID" --zone="$ZONE" --worker=all --command="

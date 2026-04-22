@@ -34,7 +34,7 @@ Dylan B. Forde \\
 \maketitle
 
 \begin{abstract}
-We study how to make balanced entropic optimal transport (OT) attention trainable at long sequence lengths on TPU hardware. The main obstacle is not only the quadratic memory cost of dense transport plans, but also the difficulty of obtaining a numerically stable and hardware-compatible backward pass. Our central contribution is a \textit{tail-refinement surrogate}: after a stopped $T$-step Sinkhorn solve, we unroll a short refinement tail and differentiate that surrogate exactly. For the production kernel we instantiate the $R=2$ refinement case. This yields a staircase of four transport plans, and we show that all non-base plans can be reconstructed exactly from a single base plan by row/column rescaling. Combined with block-wise banded Pallas kernels, this gives an $O(L)$-memory implementation whose fixed-bandwidth cost is $O((T+R)LW)$. We validate the optimized masked $R=2$ kernel against exact autodiff of the same surrogate on small problems, report long-context latency benchmarks on TPU v6e, and describe the supervised Pfam alignment workflow used by the current training stack. The result is a theory-aware and hardware-aware route to practical differentiable OT at scales where naive dense implementations are infeasible.
+We study balanced entropic optimal transport (OT) attention at long sequence lengths on TPU hardware. The challenge is not only the quadratic memory cost of dense transport plans, but also the design of a numerically stable backward pass that maps cleanly to accelerator kernels. We introduce a \textit{tail-refinement surrogate}: after a stopped $T$-step Sinkhorn solve, we unroll a short refinement tail and differentiate the resulting fixed-depth objective. For the production kernel we use the $R=2$ case. This yields a staircase of four transport plans, and we show that in the ungauged adjoint all non-base plans can be recovered exactly from a single base plan by row and column rescaling. Coupled with block-wise banded Pallas kernels, this gives an $O(L)$-memory implementation with fixed-bandwidth cost $O((T+R)LW)$. We verify the optimized masked $R=2$ kernel against exact autodiff of the same centered surrogate on small problems and summarize the experimental protocols used for the larger long-context and Pfam studies now in progress.
 \end{abstract}
 
 \section{Introduction}
@@ -45,15 +45,14 @@ Recent work has explored differentiable relaxations of alignment, notably optima
 
 However, two bottlenecks have limited widespread adoption. First, standard Sinkhorn implementations materialize dense $L \times L$ score or transport matrices, exhausting accelerator memory at long context lengths. Second, backward-pass design is delicate: exact differentiation through many Sinkhorn steps is expensive, while implicit differentiation via the adjoint system \citep{luise2018differential, bai2019deep} can require unstable or difficult-to-scale linear solves.
 
-We address both challenges by separating the problem into a stopped base solve and a short differentiable tail. Our forward and backward passes use block-wise Pallas kernels on TPUs, maintaining an $O(L)$ HBM footprint for fixed head dimension and fixed bandwidth. The key theoretical object is a \textbf{multi-transport-plan tail-refinement surrogate}: starting from stopped $T$-step Sinkhorn potentials, we unroll $R$ additional refinement steps and differentiate that surrogate exactly. The production TPU kernel implements the $R=2$ case, which already exhibits the algebraic structure we need for an efficient backward pass.
+We address both challenges by separating the problem into a stopped base solve and a short differentiable tail. Our forward and backward passes use block-wise Pallas kernels on TPUs, maintaining an $O(L)$ HBM footprint for fixed head dimension and fixed bandwidth. The key theoretical object is a \textbf{multi-transport-plan tail-refinement surrogate}: starting from stopped $T$-step Sinkhorn potentials, we unroll $R$ additional refinement steps and analyze the resulting fixed-depth adjoint in an ungauged representative system. The production TPU kernel implements the $R=2$ case, which already exhibits the algebraic structure we need for an efficient backward pass.
 
-This preprint focuses on the supported workloads in the current codebase: exactness validation of the masked surrogate, long-context latency benchmarking, and the supervised Pfam training workflow. The main contributions are:
+This preprint develops the surrogate, proves the $R=2$ factorization used by the kernel, and records the validation discipline that underlies the larger-scale studies now in progress. The main contributions are:
 
 \begin{itemize}
-    \item a stopped-base, short-tail surrogate formulation for differentiable Sinkhorn attention that is explicit about what is and is not differentiated;
-    \item an exact $R=2$ factorization showing that the four staircase transport plans needed by the tail backward can be reconstructed from a single base plan by row/column rescaling;
-    \item a block-wise banded TPU implementation using Pallas kernels, optional fixed-budget $\varepsilon$-scaling in the stopped base solve, and optional off-diagonal support reconstruction as an ablation path;
-    \item empirical validation through exact-autodiff agreement on small masked problems and long-context latency measurements on TPU v6e, together with a reproducible Pfam training protocol for large-budget biological runs.
+    \item a stopped-base, fixed-depth surrogate formulation for differentiable Sinkhorn attention that makes the differentiated object explicit;
+    \item an exact $R=2$ factorization showing that the four staircase transport plans in the tail adjoint can be reconstructed from a single base plan by row and column rescaling;
+    \item a block-wise TPU implementation, together with an exactness regression suite and a clear experimental protocol for the larger systems and biological studies.
 \end{itemize}
 
 \section{Method}
@@ -69,10 +68,10 @@ Here $\varepsilon > 0$ is the entropic temperature. The implementation exposes $
 Let the base Sinkhorn solve use temperatures $\varepsilon_1 \ge \cdots \ge \varepsilon_S = \varepsilon$ with stage iteration counts $T_1,\dots,T_S$ satisfying $\sum_{s=1}^S T_s = T$. Then the staged base solve has the same asymptotic cost as the single-temperature solve: $O(TLW)$ time and $O(L)$ HBM memory for fixed head dimension.
 \end{proposition}
 
-In the current benchmark code, $\varepsilon$ is configurable while production TPU runs keep the conservative setting $\varepsilon = 1$ with no continuation unless an ablation explicitly changes it.
+In our experiments, $\varepsilon$ is configurable, while the main TPU runs keep the conservative setting $\varepsilon = 1$ with no continuation unless an ablation explicitly changes it.
 
 \paragraph{Off-Diagonal Support Reconstruction.}
-Fixed diagonal banding is brittle when the alignment path is translated or warped away from the main diagonal. To address this, the implementation also exposes an optional \emph{transport-scout} support reconstruction. At block resolution, we form a coarse scout matrix whose $(i,j)$ entry is the average best token-to-token match from query block $i$ into key block $j$, run a short dense Sinkhorn scout on that matrix, and read out row barycenters $c_i$ together with uncertainty widths $w_i$. The fine solver then replaces the diagonal predicate $|i-j|\leq W$ by a row-dependent support mask $|j-c_i|\leq w_i$. Rows whose scout plan is too diffuse fall back to the diagonal center, which prevents unstable recentering early in training. This changes only the support geometry; the same masked tail-refinement estimator is then evaluated on the reconstructed band. In the current codebase we treat this as an ablation path rather than the production default.
+Fixed diagonal banding is brittle when the alignment path is translated or warped away from the main diagonal. To address this, the implementation also exposes an optional \emph{transport-scout} support reconstruction. At block resolution, we form a coarse scout matrix whose $(i,j)$ entry is the average best token-to-token match from query block $i$ into key block $j$, run a short dense Sinkhorn scout on that matrix, and read out row barycenters $c_i$ together with uncertainty widths $w_i$. The fine solver then replaces the diagonal predicate $|i-j|\leq W$ by a row-dependent support mask $|j-c_i|\leq w_i$. Rows whose scout plan is too diffuse fall back to the diagonal center, which prevents unstable recentering early in training. This changes only the support geometry; the same masked tail-refinement estimator is then evaluated on the reconstructed band. In this paper we treat the scout path as an ablation rather than the default configuration.
 
 \subsection{Multi-Transport-Plan Backward Pass}
 Our core technical contribution is the derivation and implementation of a hardware-compatible backward pass for a short refinement tail appended to a stopped Sinkhorn solve. Rather than claiming exact autodiff of the full $T$-step forward map, we define and differentiate a surrogate that is explicit about its truncation point.
@@ -81,70 +80,86 @@ Let $(u^{(0)}, v^{(0)})$ denote the stopped potentials produced by the base $T$-
 \begin{equation}
     \widetilde{O}^{[R]}(Q, K, V; u^{(0)}, v^{(0)}) = \mathcal{A}\!\bigl(Q, K, V, u^{(R)}, v^{(R)}\bigr),
 \end{equation}
-where $\mathcal{A}$ denotes the masked transport-plan application and the refinement iterates depend only on the stopped base pair and the current $(Q,K)$. The optimized backward pass is exact for this surrogate.
+where $\mathcal{A}$ denotes the masked transport-plan application and the refinement iterates depend only on the stopped base pair and the current $(Q,K)$. The implementation additionally centers the stored dual representatives after each refinement step to stabilize numerics, but this centering leaves the transport plans themselves unchanged.
 
-Throughout this section, $S$ denotes the masked, temperature-scaled score matrix on the active support. Starting from stopped-gradient potentials $u^{(0)}, v^{(0)}$, we recompute a short refinement tail. In the TPU kernel we use $R=2$ refinement iterations to obtain the chain $(u^{(1)}, v^{(1)}) \to (u^{(2)}, v^{(2)})$. 
-
-\begin{proposition}[$R=2$ Tail-Refinement Estimator]\label{prop:multi_plan}
-For the $R=2$ tail-refinement surrogate, the VJP with respect to the score matrix $S$ can be written as a sum of five source terms involving exactly four staircase transport matrices
+Throughout this section, $S$ denotes the masked, temperature-scaled score matrix on the active support $\Omega$; entries outside $\Omega$ are fixed to zero and do not participate in the derivatives below. Starting from stopped-gradient potentials $u^{(0)}, v^{(0)}$, we recompute a short refinement tail via
+\begin{align}
+    u^{(t)}_i &= -\log\!\Bigl[\sum_{j:(i,j)\in\Omega} \exp(S_{ij} + v^{(t-1)}_j)\Bigr], \\
+    v^{(t)}_j &= -\log\!\Bigl[\sum_{i:(i,j)\in\Omega} \exp(S_{ij} + u^{(t)}_i)\Bigr],
+\end{align}
+for $t = 1,\dots,R$. These equations describe the ungauged representatives used in the derivation; the code may subsequently recenter them without changing any transport plan. We write
 \[
-P^{(2,2)},\; P^{(2,1)},\; P^{(1,1)},\; P^{(1,0)},
-\qquad
-P^{(a,b)} = \exp(S + u^{(a)} + v^{(b)}).
+P^{(a,b)}_{ij} =
+\begin{cases}
+\exp(S_{ij} + u^{(a)}_i + v^{(b)}_j), & (i,j)\in\Omega, \\
+0, & (i,j)\notin\Omega.
+\end{cases}
 \]
+In the TPU kernel we use $R=2$ refinement iterations to obtain the chain $(u^{(1)}, v^{(1)}) \to (u^{(2)}, v^{(2)})$.
+
+\begin{proposition}[Ungauged Fixed-Depth Tail Adjoint]\label{prop:tail_adjoint}
+Let $\mathcal{L}$ be a scalar loss depending on $\widetilde{O}^{[R]}$, and let $G = \partial \mathcal{L} / \partial \widetilde{O}^{[R]}$. Define
+\[
+Z_{ij} = \langle G_i, V_j \rangle,
+\qquad
+g_u = (P^{(R,R)} \odot Z)\mathbf{1},
+\qquad
+g_v = (P^{(R,R)} \odot Z)^\top \mathbf{1},
+\]
+where $\mathbf{1}$ denotes the all-ones vector of the appropriate size. Then the cotangents of the refinement duals satisfy the reverse recursion
+\begin{align}
+    \bar v^{(R)} &= g_v, \\
+    \bar u^{(R)} &= g_u - P^{(R,R)} \bar v^{(R)}, \\
+    \bar v^{(t-1)} &= -\bigl(P^{(t,t-1)}\bigr)^\top \bar u^{(t)}, \qquad t=R,R-1,\dots,1, \\
+    \bar u^{(t-1)} &= -P^{(t-1,t-1)} \bar v^{(t-1)}, \qquad t=R,R-1,\dots,2,
+\end{align}
+and the score-space cotangent is
+\begin{equation}
+\label{eq:generic_score_vjp}
+    \bar S
+    =
+    P^{(R,R)} \odot Z
+    -
+    \sum_{t=1}^R
+    \Bigl[
+        P^{(t,t)} \odot \bigl(\mathbf{1}\bar v^{(t)\top}\bigr)
+        +
+        P^{(t,t-1)} \odot \bigl(\bar u^{(t)}\mathbf{1}^\top\bigr)
+    \Bigr].
+\end{equation}
 \end{proposition}
+
+\begin{corollary}[$R=2$ Staircase Form]\label{cor:r2_staircase}
+For $R=2$, equation~\eqref{eq:generic_score_vjp} becomes
+\begin{align}
+    \bar S
+    ={}&
+    P^{(2,2)} \odot Z
+    - P^{(2,2)} \odot \bigl(\mathbf{1}\bar v^{(2)\top}\bigr)
+    - P^{(2,1)} \odot \bigl(\bar u^{(2)}\mathbf{1}^\top\bigr) \nonumber\\
+    &\quad
+    - P^{(1,1)} \odot \bigl(\mathbf{1}\bar v^{(1)\top}\bigr)
+    - P^{(1,0)} \odot \bigl(\bar u^{(1)}\mathbf{1}^\top\bigr),
+\end{align}
+so the ungauged $R=2$ adjoint involves exactly four staircase transport plans and five score-space source terms.
+\end{corollary}
 
 \paragraph{Hardware-Efficient Factorization.} While the formulation involves four matrices, we observe that for fixed $S$, any staircase plan can be recovered from any chosen reference plan by element-wise vector scaling. Using the final-tail plan $P^{(2,2)}$ as the reference, we have
 \begin{equation}
     P^{(a,b)} = P^{(2,2)} \odot \exp(u^{(a)} - u^{(2)}) \odot \exp(v^{(b)} - v^{(2)}).
 \end{equation}
-This factorization allows our Pallas kernels to compute the core transport coefficients only once per tile, deriving the other staircase terms through $O(N)$ row/column rescaling. The optimized TPU backward is exact for the $R=2$ surrogate because it reconstructs the remaining staircase plans by exact row/column scaling rather than collapsing them into a single approximation. The same orbit-factorized idea extends to fixed $R>2$, while residual-adaptive refinement remains a reference analysis path. Production TPU runs use the fixed $R=2$ kernel, and exact autodiff through the same masked surrogate is the verification path used on small problems. Appendix~\ref{app:proof} records the algebraic identities used by the kernel.
+This factorization allows our Pallas kernels to compute the core transport coefficients only once per tile, deriving the other staircase terms through $O(N)$ row/column rescaling. The same orbit-factorized idea extends to fixed $R>2$, while residual-adaptive refinement remains a reference analysis path. The TPU implementation uses the fixed $R=2$ kernel, and exact autodiff through the same masked centered surrogate serves as the small-scale verification path. Appendix~\ref{app:proof} records the algebraic identities used by the ungauged derivation and the gauge convention used by the implementation. In particular, the appendix derives the Jacobian of the per-step centering map and proves that the centered forward implementation is gauge-equivalent to the ungauged representative recurrence.
 
-\section{Validation and Experiments}
+\section{Validation}
 
-We evaluate our multi-transport-plan Sinkhorn kernel using rich representations from long-context foundation models. Specifically, we benchmark ultra-long context alignment using the Nucleotide Transformer (\nolinkurl{InstaDeepAI/nucleotide-transformer-v2-100m-multi-species}) for DNA sequences and ESM-2 (\nolinkurl{facebook/esm2_t6_8M_UR50D}) for proteins.
+We evaluate the masked surrogate directly on synthetic regression problems. The systems-scale latency studies and the supervised Pfam experiments are deferred to the appendix so that the main text stays focused on the mathematical object and its exactness checks.
 
 \subsection{Exactness Validation of the Masked Surrogate}
 
-Before launching large TPU runs, we separate surrogate correctness from systems performance. On synthetic masked problems where exact autodiff through the same banded surrogate remains tractable, we compare the optimized $R=2$ kernel against a pure-JAX reference implementation. In the current validation harness, source, pure-JAX, and Pallas implementations agree on forward outputs to within the configured output tolerance, and the tail-refinement gradients remain within the configured regression tolerances relative to exact autodiff through the same surrogate. In the current default exactness regression at length $1024$, the forward outputs agree to displayed precision and the maximum absolute gradient deviations are below $10^{-5}$ for $Q$, below $10^{-6}$ for $K$, and below $10^{-9}$ for $V$. Separately, forward module-agreement checks run at lengths $512$, $1024$, $2048$, $4096$, $8192$, and $16384$, with source, pure-JAX, and Pallas implementations agreeing to displayed precision throughout. This is the relevant notion of exactness for the implementation: the optimized kernel computes the intended masked surrogate, up to the numerical tolerances expected from mixed accelerator execution.
-
-\subsection{Latency and Scaling}
-We evaluate scaling on Google Cloud TPU v6e-1. Table~\ref{tab:latency} compares our Pallas kernel against a JAX-native FlashAttention baseline. 
-
-\begin{table}[ht]
-\centering
-\caption{Latency Benchmarks on TPU v6e (Trillium). Comparison between FlashAttention and our Pallas-optimized Sinkhorn OT kernel with 15 iterations and $W=2048$ banding.}
-\label{tab:latency}
-\begin{tabular}{llccc}
-\toprule
-\textbf{Context (L)} & \textbf{Method} & \textbf{Fwd (ms)} & \textbf{Bwd (ms)} & \textbf{Status} \\
-\midrule
-1024 & Flash Attention & 0.14 & 1.54 & Success \\
-1024 & Sinkhorn OT (Ours) & 363.24 & 4270.36 & Success \\
-\midrule
-4096 & Flash Attention & 0.14 & 1.47 & Success \\
-4096 & Sinkhorn OT (Ours) & 525.13 & 5033.42 & Success \\
-\midrule
-8192 & Flash Attention & 0.14 & 1.50 & Success \\
-8192 & Sinkhorn OT (Ours) & 711.66 & 5662.79 & Success \\
-\midrule
-16384 & Flash Attention & 0.15 & 1.51 & Success \\
-16384 & Sinkhorn OT (Ours) & 1264.84 & 7401.55 & Success \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-The results demonstrate that while Sinkhorn is computationally more expensive than row-softmax attention, it exhibits stable $O(L \cdot W)$ scaling even at contexts where dense OT implementations are infeasible. The approximately linear increase in latency with sequence length is consistent with the banded block-wise design.
-
-\subsection{Pfam Training Workflow}
-
-Our biological training workflow is a supervised protein-family alignment task derived from Pfam-A seed MSAs. From each family we sample aligned sequence pairs, strip Stockholm gap tokens to recover raw amino-acid strings, and convert the retained matched columns into sparse pairwise supervision targets. We embed sequences using frozen ESM-2 (\nolinkurl{facebook/esm2_t6_8M_UR50D}) representations and train lightweight Q/K/V projection heads on the resulting shard dataset. The training objective is a configurable weighted sum of output reconstruction, sparse cross-entropy on valid alignment targets, and a row-barycenter monotonicity penalty; sparse cross-entropy on valid targets is the primary alignment-quality metric. For both Sinkhorn and Flash baselines we apply the same QR-based Stiefel retraction to the $Q/K$ projection heads after each optimizer step to stabilize score geometry without changing the attention definition.
-
-The supported TPU evaluation path has three stages. First, we run a short Sinkhorn-only screening sweep across a small discrete set of balanced and gap-aware monotone-unbalanced configurations on the same Pfam shard data. Second, we run a fixed-budget refinement-depth ablation over $R$ to isolate the effect of the backward surrogate under matched training budgets. Third, we promote the best screened Sinkhorn configuration into the full Sinkhorn-versus-Flash comparison on a TPU v6e-8 slice. The Pfam supervision is sparse and near-monotone rather than perfectly permutation-valued, so in addition to sparse CE we track a monotonicity-violation metric based on row barycenters of the predicted transport. Off-diagonal support reconstruction is treated as an ablation path; the current production default remains diagonal banding unless the screen promotes the scout path. This preprint therefore emphasizes the methodology and supported evaluation pipeline, while reserving larger-budget Pfam comparison tables for a later revision once the queued production runs complete.
-
+We separate surrogate correctness from systems performance. On synthetic masked problems for which exact autodiff through the same banded surrogate remains tractable, we compare the optimized $R=2$ kernel against a pure-JAX reference implementation. Across the regression suite, the source, pure-JAX, and Pallas implementations agree on forward outputs within numerical tolerance, and the tail-refinement gradients remain close to exact autodiff through the same surrogate. In the default exactness test at length $1024$, the forward outputs agree to displayed precision and the maximum absolute gradient deviations are below $10^{-5}$ for $Q$, below $10^{-6}$ for $K$, and below $10^{-9}$ for $V$. Additional forward-consistency checks run at lengths $512$, $1024$, $2048$, $4096$, $8192$, and $16384$, and extended spot checks also pass at $32768$, $65536$, and $131072$, with source, pure-JAX, and Pallas implementations agreeing to displayed precision throughout. We treat the longer checks as forward-consistency evidence rather than exact-gradient checks: under strongly asymmetric synthetic masks, dense exact reverse-mode can become numerically unstable before the masked surrogate forward ceases to be well defined.
 
 \section{Conclusion}
-We developed a hardware-optimized Sinkhorn attention mechanism for massive context lengths by pairing block-wise banded transport kernels with a theory-aware tail-refinement surrogate. The central technical point is that the production $R=2$ backward can be written in terms of four staircase plans and then executed from a single base plan by exact row/column rescaling. This makes the surrogate both analyzable and implementable on current TPU hardware. The resulting stack supports exactness validation against autodiff on small masked problems, long-context latency benchmarking, and supervised Pfam training on TPU v6e. We view this as a practical route toward trainable OT modules in large-scale sequence models, with larger biological result tables and additional ablations to follow in later revisions.
+We presented a hardware-efficient Sinkhorn attention mechanism for long sequences based on a stopped-base, fixed-depth tail surrogate. The central technical point is that the $R=2$ backward can be written in terms of four staircase plans and then executed from a single base plan by exact row and column rescaling. This makes the surrogate both analyzable and implementable on present TPU hardware. This preprint is intentionally limited to the theorem, its implementation consequences, and the exactness checks already in place; large-scale latency plots and biological results are deferred to a later revision.
 
 \bibliographystyle{plainnat}
 \bibliography{references}
@@ -155,18 +170,151 @@ We developed a hardware-optimized Sinkhorn attention mechanism for massive conte
 \section{Algebraic Structure of the \texorpdfstring{$R=2$}{R=2} Tail-Refinement Estimator}
 \label{app:proof}
 
-We record the exact factorization identities used by the TPU kernel. Throughout, potentials are understood modulo the standard additive Sinkhorn gauge, and the implementation uses a gauge-fixing convention when materializing them numerically.
+We record the exact identities underlying the TPU kernel. Throughout, potentials are understood modulo the standard additive Sinkhorn gauge. For the derivation below we work with ungauged representatives satisfying the raw logsumexp half-step equations; the implementation may subsequently recenter those representatives after each refinement step, but such recentering leaves every staircase transport plan unchanged.
 
 \paragraph{Notation.}
-The four transport matrices used in the backward pass are indexed by pairs drawn from the set $\mathcal{I} = \{(2,2),\,(2,1),\,(1,1),\,(1,0)\}$, defined as:
+Let $\Omega$ denote the active masked support. The four transport matrices used in the $R=2$ backward pass are indexed by pairs drawn from the set $\mathcal{I} = \{(2,2),\,(2,1),\,(1,1),\,(1,0)\}$, defined as:
 \begin{equation}
-    P^{(a,b)}_{ij} = \exp\!\bigl(S_{ij} + u^{(a)}_i + v^{(b)}_j\bigr).
+    P^{(a,b)}_{ij} =
+    \begin{cases}
+        \exp\!\bigl(S_{ij} + u^{(a)}_i + v^{(b)}_j\bigr), & (i,j)\in\Omega, \\
+        0, & (i,j)\notin\Omega.
+    \end{cases}
 \end{equation}
 \begin{align}
     u^{(t+1)}_i &= -\log\!\Bigl[\sum_j \exp(S_{ij} + v^{(t)}_j)\Bigr], \label{eq:u_update_app}\\
     v^{(t+1)}_j &= -\log\!\Bigl[\sum_i \exp(S_{ij} + u^{(t+1)}_i)\Bigr], \label{eq:v_update_app}
 \end{align}
-where all exponentials and sums are strictly positive. The potentials $(u^{(0)}, v^{(0)})$ are treated as constants (stopped gradients); only iterates $t \geq 1$ satisfy the update equations above. We write $\Delta u^{(t)} = u^{(t+1)} - u^{(t)}$ and $\Delta v^{(t)} = v^{(t+1)} - v^{(t)}$ for the per-step potential updates.
+where the sums are restricted to indices in $\Omega$ and the potentials $(u^{(0)}, v^{(0)})$ are treated as constants (stopped gradients). We write $\Delta u^{(t)} = u^{(t+1)} - u^{(t)}$ and $\Delta v^{(t)} = v^{(t+1)} - v^{(t)}$ for the per-step potential updates.
+
+\paragraph{Reverse Recursion.}
+Let $\mathcal{L}$ be a scalar loss depending on $\widetilde{O}^{[R]}$, and define $G = \partial \mathcal{L} / \partial \widetilde{O}^{[R]}$ together with $Z_{ij} = \langle G_i, V_j \rangle$. Since
+\[
+\widetilde{O}^{[R]}_i = \sum_j P^{(R,R)}_{ij} V_j,
+\]
+the direct score-space contribution of the terminal transport application is $P^{(R,R)} \odot Z$. The corresponding terminal dual cotangents are
+\[
+g_u = (P^{(R,R)} \odot Z)\mathbf{1},
+\qquad
+g_v = (P^{(R,R)} \odot Z)^\top \mathbf{1}.
+\]
+
+\paragraph{Centering Map.}
+Let $\mathbf{1}_q$ and $\mathbf{1}_k$ denote the all-ones vectors on the valid query and key supports, and let
+\[
+m = \frac{\mathbf{1}_q}{\mathbf{1}_q^\top \mathbf{1}_q}
+\]
+be the mean functional on valid queries. The implementation stores centered representatives via
+\[
+\mathcal{C}(u,v) = \bigl(u - (m^\top u)\mathbf{1}_q,\; v + (m^\top u)\mathbf{1}_k\bigr).
+\]
+
+\begin{lemma}[Centering Pullback]\label{lem:centering_pullback}
+Let $(\bar u, \bar v)$ be cotangents on the outputs of $\mathcal{C}$. Then the pullback of the centering map is
+\[
+\mathcal{C}^*(\bar u, \bar v)
+=
+\Bigl(
+\bar u + m\bigl(\mathbf{1}_k^\top \bar v - \mathbf{1}_q^\top \bar u\bigr),
+\;
+\bar v
+\Bigr).
+\]
+\end{lemma}
+
+\begin{proof}
+Write $s = m^\top u$, so $\delta s = m^\top \delta u$. Then
+\[
+\delta \mathcal{C}(u,v)
+=
+\bigl(\delta u - (\delta s)\mathbf{1}_q,\; \delta v + (\delta s)\mathbf{1}_k\bigr).
+\]
+Pairing this variation with $(\bar u,\bar v)$ and collecting the coefficients of $\delta u$ and $\delta v$ gives the stated pullback formula.
+\end{proof}
+
+\begin{lemma}[Gauge Equivariance of One Raw Refinement Step]\label{lem:gauge_equivariance}
+Let $\Gamma_c(u,v) = (u-c\mathbf{1}_q,\; v+c\mathbf{1}_k)$. If the raw refinement half-step map is defined by equations~\eqref{eq:u_update_app}--\eqref{eq:v_update_app}, then for any scalar $c$,
+\[
+U(v+c\mathbf{1}_k) = U(v) - c\mathbf{1}_q,
+\qquad
+V(u-c\mathbf{1}_q) = V(u) + c\mathbf{1}_k.
+\]
+Equivalently, the raw two-half-step map is gauge equivariant:
+\[
+\mathcal{F}(v+c\mathbf{1}_k) = \Gamma_c\bigl(\mathcal{F}(v)\bigr).
+\]
+\end{lemma}
+
+\begin{proof}
+Adding $c$ to every valid key potential shifts every logsumexp argument in the $u$-update by the same constant, so the update subtracts $c$ from every valid query potential. The $v$-update is identical with rows and columns swapped.
+\end{proof}
+
+\begin{lemma}[Jacobian of One Sinkhorn Half-Step]\label{lem:half_step_jacobian}
+For each refinement step $t \geq 1$, the Jacobians of the masked updates satisfy
+\begin{align}
+    \frac{\partial u^{(t)}_i}{\partial v^{(t-1)}_j} &= -P^{(t,t-1)}_{ij}, \\
+    \frac{\partial v^{(t)}_j}{\partial u^{(t)}_i} &= -P^{(t,t)}_{ij},
+\end{align}
+for $(i,j)\in\Omega$, and vanish outside $\Omega$.
+\end{lemma}
+
+\begin{proof}
+Differentiate the logsumexp updates in equations~\eqref{eq:u_update_app}--\eqref{eq:v_update_app}. For example,
+\[
+\frac{\partial u^{(t)}_i}{\partial v^{(t-1)}_j}
+=
+-
+\frac{\exp(S_{ij} + v^{(t-1)}_j)}{\sum_{k:(i,k)\in\Omega}\exp(S_{ik} + v^{(t-1)}_k)}
+=
+-\exp(S_{ij} + u^{(t)}_i + v^{(t-1)}_j)
+=
+-P^{(t,t-1)}_{ij},
+\]
+and the second identity is identical with rows and columns swapped.
+\end{proof}
+
+\begin{proposition}[Centered-Ungauged Forward Equivalence]\label{prop:centered_equivalence}
+Let $(\widehat u^{(t)}, \widehat v^{(t)})$ be the ungauged refinement iterates obtained by repeatedly applying the raw update map from Lemma~\ref{lem:gauge_equivariance}, starting from the same centered base pair $(u^{(0)}, v^{(0)})$ used by the implementation. Let $(u^{(t)}, v^{(t)})$ be the iterates produced by the implementation, which applies $\mathcal{C}$ after each raw step. Then for every $t \geq 1$ there exists a scalar $c_t$ such that
+\[
+(u^{(t)}, v^{(t)}) = \Gamma_{c_t}\bigl(\widehat u^{(t)}, \widehat v^{(t)}\bigr).
+\]
+Consequently,
+\[
+\exp\!\bigl(S + u^{(t)} + v^{(t)}\bigr)
+=
+\exp\!\bigl(S + \widehat u^{(t)} + \widehat v^{(t)}\bigr)
+\]
+on the active support for every $t$, and the centered forward implementation computes exactly the same surrogate output $\widetilde O^{[R]}$ as the ungauged recurrence.
+\end{proposition}
+
+\begin{proof}
+For $t=1$, the centered implementation applies $\mathcal{C}$ to the raw step output, so the result is by definition a gauge transform of the ungauged representative. Assume the claim holds at step $t-1$, so $v^{(t-1)} = \widehat v^{(t-1)} + c_{t-1}\mathbf{1}_k$ on the active support. Lemma~\ref{lem:gauge_equivariance} then implies that the next raw step outputs differ by the gauge transform $\Gamma_{c_{t-1}}$. Applying $\mathcal{C}$ once more merely chooses a new representative in the same orbit, yielding $(u^{(t)},v^{(t)}) = \Gamma_{c_t}(\widehat u^{(t)}, \widehat v^{(t)})$ for some $c_t$. The transport plan is invariant under $\Gamma_{c_t}$, so the terminal plan and hence the surrogate output are identical.
+\end{proof}
+
+\begin{proposition}[Exact Ungauged Fixed-Depth Adjoint Recursion]\label{prop:appendix_adjoint}
+For the fixed-depth surrogate, let $\bar v^{(R)} = g_v$ and define, for $t = R,R-1,\dots,1$,
+\begin{align}
+    \bar u^{(t)} &= \mathbf{1}_{\{t=R\}} g_u - P^{(t,t)} \bar v^{(t)}, \\
+    \bar v^{(t-1)} &= -\bigl(P^{(t,t-1)}\bigr)^\top \bar u^{(t)}.
+\end{align}
+Then the score-space cotangent is
+\[
+    \bar S
+    =
+    P^{(R,R)} \odot Z
+    -
+    \sum_{t=1}^R
+    \Bigl[
+        P^{(t,t)} \odot \bigl(\mathbf{1}\bar v^{(t)\top}\bigr)
+        +
+        P^{(t,t-1)} \odot \bigl(\bar u^{(t)}\mathbf{1}^\top\bigr)
+    \Bigr].
+\]
+\end{proposition}
+
+\begin{proof}
+Apply Lemma~\ref{lem:half_step_jacobian} in reverse order through the refinement chain. The direct terminal contribution is $P^{(R,R)} \odot Z$. Pulling $g_v$ through the map $v^{(t)} \mapsto u^{(t)}$ yields the subtraction $P^{(t,t)} \odot (\mathbf{1}\bar v^{(t)\top})$, while pulling $\bar u^{(t)}$ through the map $u^{(t)} \mapsto v^{(t-1)}$ yields the subtraction $P^{(t,t-1)} \odot (\bar u^{(t)}\mathbf{1}^\top)$. Summing the direct terminal term and all reverse-time half-step contributions gives the stated formula.
+\end{proof}
 
 \paragraph{Derivation of Algebraic Factorization.}
 For any two transport matrices $P^{(a,b)}$ and $P^{(c,d)}$, the ratio of their entries at $(i,j)$ is:
@@ -190,19 +338,47 @@ which leaves the transport plan unchanged. Consequently, equality of two stairca
 \subsection*{Part B: Exactness of the Factorized $R=2$ Kernel}
 
 \begin{theorem}[Exact Single-Base-Plan Reconstruction]
-Consider the explicit $R=2$ tail-refinement VJP of $\widetilde{O}^{[2]}$ written in terms of the four staircase plans $P^{(2,2)}, P^{(2,1)}, P^{(1,1)}, P^{(1,0)}$. Replacing each non-base plan by its exact rescaled form
+Consider the explicit ungauged $R=2$ score-space VJP obtained from Proposition~\ref{prop:appendix_adjoint}, namely
+\begin{align}
+    \bar S
+    ={}&
+    P^{(2,2)} \odot Z
+    - P^{(2,2)} \odot \bigl(\mathbf{1}\bar v^{(2)\top}\bigr)
+    - P^{(2,1)} \odot \bigl(\bar u^{(2)}\mathbf{1}^\top\bigr) \nonumber\\
+    &\quad
+    - P^{(1,1)} \odot \bigl(\mathbf{1}\bar v^{(1)\top}\bigr)
+    - P^{(1,0)} \odot \bigl(\bar u^{(1)}\mathbf{1}^\top\bigr).
+\end{align}
+Replacing each non-base plan by its exact rescaled form
 \begin{equation}
     P^{(a,b)}_{ij} = P^{(2,2)}_{ij} \cdot \exp(u^{(a)}_i-u^{(2)}_i) \cdot \exp(v^{(b)}_j-v^{(2)}_j)
 \end{equation}
-leaves every gradient entry unchanged. Consequently, the optimized TPU kernel computes exactly the same $R=2$ surrogate gradient as explicit four-plan unrolling while materializing only one transport tile per block pair.
+leaves every gradient entry unchanged. Consequently, the ungauged explicit four-plan adjoint can be executed while materializing only one transport tile per block pair.
 \end{theorem}
 
 \begin{proof}
-The $R=2$ VJP is a sum of five element-wise source terms, each of which is the product of a row factor, a column factor, and one staircase plan. Terms using $P^{(2,2)}$ are unchanged. For the remaining terms, substitute the rescaling identity above. The exponential row and column factors are exactly the same factors that explicit unrolling would attach to the corresponding staircase plan, so every element of every source term is preserved. Summing the preserved source terms yields the same gradient tensor entrywise.
+The displayed $R=2$ VJP is a sum of five element-wise source terms. Terms using $P^{(2,2)}$ are unchanged. For the remaining three staircase plans, substitute the rescaling identity above. Each substituted plan contributes exactly the same row-dependent and column-dependent exponential factors that explicit four-plan unrolling would contribute. Therefore every matrix entry of every source term is preserved, and hence the full ungauged score-space cotangent $\bar S$ is preserved entrywise.
 \end{proof}
 
 \begin{remark}[Adaptive Tail and Reference Path]
-The implementation also supports a residual-adaptive refinement schedule, which continues the stopped tail until either a prescribed maximum depth or a masked $\ell_\infty$ potential residual threshold is reached. This mode is useful for analysis, but the production TPU kernel fixes $R=2$ for throughput. For fixed depths beyond $R=2$, we use the same orbit-factorized reconstruction to avoid falling back to full autodiff. We validate the optimized masked backward against exact autodiff through the same banded surrogate on small problems.
+The implementation also supports a residual-adaptive refinement schedule, which continues the stopped tail until either a prescribed maximum depth or a masked $\ell_\infty$ potential residual threshold is reached. This mode is useful for analysis, but the production TPU kernel fixes $R=2$ for throughput. For fixed depths beyond $R=2$, we use the same orbit-factorized reconstruction to avoid falling back to full autodiff. Because the implementation stores centered representatives after each step, we treat exact agreement with autodiff through the centered surrogate as a numerical validation statement rather than a theorem here.
 \end{remark}
+
+\section{Experimental Protocols}
+\label{app:protocols}
+
+This appendix records the protocols used in the ongoing systems and biological studies, without presenting unfinished benchmark tables or plots in the main text.
+
+\subsection{Long-Context Latency Protocol}
+
+The long-context systems sweep is still in progress, so we do not include finalized latency tables or figures in this preprint. What is fixed already is the evaluation protocol: on Google Cloud TPU v6e we benchmark the Pallas Sinkhorn kernel against a JAX-native FlashAttention baseline, sweep context length under matched masking and band-width settings, and record separate forward and backward wall-clock timings. The systems claim appropriate for the current draft is therefore structural rather than tabular: with fixed band width $W$, the implementation is designed to realize the $O(LW)$ work predicted by the block-wise construction while avoiding dense $L \times L$ materialization. Final latency plots and tables will be added only after the full benchmark sweep has completed under the current runtime and validation stack.
+
+\subsection{Pfam Training Workflow}
+
+For biological runs, the current stack uses frozen long-context foundation-model representations, notably the Nucleotide Transformer (\nolinkurl{InstaDeepAI/nucleotide-transformer-v2-100m-multi-species}) for DNA and ESM-2 (\nolinkurl{facebook/esm2_t6_8M_UR50D}) for proteins.
+
+Our biological training workflow is a supervised protein-family alignment task derived from Pfam-A seed MSAs. From each family we sample aligned sequence pairs, strip Stockholm gap tokens to recover raw amino-acid strings, and convert the retained matched columns into sparse pairwise supervision targets. We embed sequences using frozen ESM-2 (\nolinkurl{facebook/esm2_t6_8M_UR50D}) representations and train lightweight Q/K/V projection heads on the resulting shard dataset. The training objective is a configurable weighted sum of output reconstruction, sparse cross-entropy on valid alignment targets, and a row-barycenter monotonicity penalty; sparse cross-entropy on valid targets is the primary alignment-quality metric. For both Sinkhorn and Flash baselines we apply the same QR-based Stiefel retraction to the $Q/K$ projection heads after each optimizer step to stabilize score geometry without changing the attention definition.
+
+The TPU study proceeds in three stages. First, we run a short Sinkhorn-only screening sweep across a small discrete set of balanced and gap-aware monotone-unbalanced configurations on the same Pfam shard data. Second, we run a fixed-budget refinement-depth ablation over $R$ to isolate the effect of the backward surrogate under matched training budgets. Third, we promote the best screened Sinkhorn configuration into the full Sinkhorn-versus-Flash comparison on a TPU v6e-8 slice. The Pfam supervision is sparse and near-monotone rather than perfectly permutation-valued, so in addition to sparse CE we track a monotonicity-violation metric based on row barycenters of the predicted transport. Off-diagonal support reconstruction is treated as an ablation path; the main configuration remains diagonal banding unless the screen promotes the scout path. Larger-budget Pfam comparison tables remain deferred until the queued production runs complete.
 
 \end{document}
