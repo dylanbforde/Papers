@@ -59,13 +59,14 @@ def parse_stockholm_families(gz_path: str):
                 if len(parts) == 2:
                     sequences.append((parts[0], parts[1]))
 
+GAP_CHARS = set(".-~")
+
 def extract_alignment(s1, s2):
-    gap_chars = set(".-~")
     r1, r2, pairs = [], [], []
     i, j = 0, 0
     for col in range(len(s1)):
         c1, c2 = s1[col], s2[col]
-        g1, g2 = c1 in gap_chars, c2 in gap_chars
+        g1, g2 = c1 in GAP_CHARS, c2 in GAP_CHARS
         if not g1 and not g2:
             pairs.append((i, j))
             r1.append(c1)
@@ -154,12 +155,13 @@ def process_sharded(
 
         shard_count += 1
 
+    remove_gaps = str.maketrans('', '', '.-~')
     for family in parse_stockholm_families(gz_path):
         if pair_count >= max_pairs:
             break
         valid = []
         for name, ali in family["sequences"]:
-            raw = "".join(c for c in ali if c not in set(".-~"))
+            raw = ali.translate(remove_gaps)
             if 128 <= len(raw) <= max_len:
                 valid.append((name, ali, raw))
 
