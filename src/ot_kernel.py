@@ -600,8 +600,8 @@ def tile_sinkhorn_kernel(q_ref, k_ref, v_ref, u_ref, v_pot_ref, q_mask_ref, k_ma
     v = v_ref[...]
     u = u_ref[..., 0]   # v6e: unpack trailing dim
     v_pot = v_pot_ref[..., 0]
-    q_mask = q_mask_ref[...]
-    k_mask = k_mask_ref[...]
+    q_mask = q_mask_ref[..., 0]
+    k_mask = k_mask_ref[..., 0]
     scale = scale_ref[0]
     logits = jnp.dot(q, k.T) * scale
     log_alpha = logits + u[:, None] + v_pot[None, :]
@@ -624,8 +624,8 @@ def _apply_transport_plan(Q, K, V, u_out, v_out, band_width, q_mask, k_mask, sco
     v_blocks = V.reshape(B, H, num_blocks, block_size, head_dim)
     u_blocks = u_out.reshape(B, H, num_blocks, block_size, 1)   # v6e pad
     v_pot_blocks = v_out.reshape(B, H, num_blocks, block_size, 1)
-    q_mask_blocks = q_mask.reshape(B, H, num_blocks, block_size)
-    k_mask_blocks = k_mask.reshape(B, H, num_blocks, block_size)
+    q_mask_blocks = q_mask.reshape(B, H, num_blocks, block_size, 1)
+    k_mask_blocks = k_mask.reshape(B, H, num_blocks, block_size, 1)
 
     def compute_tile(q_tile, k_tile, v_tile, u_tile, v_pot_tile, q_mask_tile, k_mask_tile):
         out_shape = jax.ShapeDtypeStruct((block_size, head_dim), Q.dtype)
@@ -640,8 +640,8 @@ def _apply_transport_plan(Q, K, V, u_out, v_out, band_width, q_mask, k_mask, sco
                 pl.BlockSpec(block_shape=v_tile.shape, index_map=lambda: (0, 0)),
                 pl.BlockSpec(block_shape=u_tile.shape, index_map=lambda: (0, 0)),
                 pl.BlockSpec(block_shape=v_pot_tile.shape, index_map=lambda: (0, 0)),
-                pl.BlockSpec(block_shape=q_mask_tile.shape, index_map=lambda: (0,)),
-                pl.BlockSpec(block_shape=k_mask_tile.shape, index_map=lambda: (0,)),
+                pl.BlockSpec(block_shape=q_mask_tile.shape, index_map=lambda: (0, 0)),
+                pl.BlockSpec(block_shape=k_mask_tile.shape, index_map=lambda: (0, 0)),
                 pl.BlockSpec(block_shape=(1,), index_map=lambda: (0,)),
             ],
             out_specs=pl.BlockSpec(block_shape=out_shape.shape, index_map=lambda: (0, 0)),
