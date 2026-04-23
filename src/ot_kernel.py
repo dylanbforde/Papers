@@ -667,18 +667,51 @@ def _apply_transport_plan(Q, K, V, u_out, v_out, band_width, q_mask, k_mask, sco
         )
         return final_sum
 
-    vmap_q = jax.vmap(process_q_block, in_axes=(0, 0, 0, 0, None, None, None, None))
-    vmap_heads = jax.vmap(vmap_q, in_axes=(0, 0, 0, None, 0, 0, 0, 0))
-    vmap_batch = jax.vmap(vmap_heads, in_axes=(0, 0, 0, None, 0, 0, 0, 0))
-    out_blocks = vmap_batch(
-        q_blocks,
-        u_blocks,
-        q_mask_blocks,
-        jnp.arange(num_blocks),
-        k_blocks,
-        v_blocks,
-        v_pot_blocks,
-        k_mask_blocks,
+    q_block_idx = jnp.arange(num_blocks, dtype=jnp.int32)
+
+    def process_head(inputs):
+        q_blocks_h, u_blocks_h, q_mask_blocks_h, k_blocks_h, v_blocks_h, v_pot_blocks_h, k_mask_blocks_h = inputs
+
+        def process_q_idx(i):
+            return process_q_block(
+                q_blocks_h[i],
+                u_blocks_h[i],
+                q_mask_blocks_h[i],
+                i,
+                k_blocks_h,
+                v_blocks_h,
+                v_pot_blocks_h,
+                k_mask_blocks_h,
+            )
+
+        return jax.lax.map(process_q_idx, q_block_idx)
+
+    def process_batch(inputs):
+        q_blocks_b, u_blocks_b, q_mask_blocks_b, k_blocks_b, v_blocks_b, v_pot_blocks_b, k_mask_blocks_b = inputs
+        return jax.lax.map(
+            process_head,
+            (
+                q_blocks_b,
+                u_blocks_b,
+                q_mask_blocks_b,
+                k_blocks_b,
+                v_blocks_b,
+                v_pot_blocks_b,
+                k_mask_blocks_b,
+            ),
+        )
+
+    out_blocks = jax.lax.map(
+        process_batch,
+        (
+            q_blocks,
+            u_blocks,
+            q_mask_blocks,
+            k_blocks,
+            v_blocks,
+            v_pot_blocks,
+            k_mask_blocks,
+        ),
     )
     out = out_blocks.reshape(B, H, L, D)
     out = jnp.where(q_mask[..., :, None], out, 0.0)
