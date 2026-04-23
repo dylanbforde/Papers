@@ -1,0 +1,587 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{algorithm,algorithmic}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{microtype}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{natbib}
+\usepackage[margin=1in]{geometry}
+\usepackage{xcolor}
+
+\DeclareMathOperator{\argmin}{arg\,min}
+\DeclareMathOperator{\argmax}{arg\,max}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}{Proposition}
+\newtheorem{lemma}{Lemma}
+\newtheorem{remark}{Remark}
+\newtheorem{corollary}{Corollary}
+
+\title{Tail-Refinement Sinkhorn Attention Beyond the Balanced Core:\\Unified Theorem Draft for the NeurIPS Program}
+
+\author{
+Dylan B. Forde \\
+\texttt{forde.dylan@gmail.com}
+}
+
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This internal draft stages the theorem spine for the unified NeurIPS paper. The central result remains the balanced fixed-support $R=2$ tail-refinement factorization from the arXiv preprint: that is the main theorem and the conceptual core of the project. The first extension carried here is deliberately minimal and experiment-facing: the current \texttt{dustbin\_block} implementation is formalized as balanced Sinkhorn attention on an augmented state space, so the balanced theorem lifts directly to the gap-aware transport path already exercised by the cloud runs. We also add a local surrogate-bias bound under fixed-support contraction assumptions, clarifying what is and is not controlled when the base solve is stopped and only a short tail is differentiated. A denser true-unbalanced fixed-support theorem is recorded as a secondary layer, numerically verified but not yet promoted to the production TPU path. Geometry-adaptive support and multimodal routing remain explicitly sequenced follow-ons rather than merged claims.
+\end{abstract}
+
+\section{Scope of the Unified Draft}
+
+The current balanced tail-refinement paper proves an exact $R=2$ factorization for a fixed active support and validates that implementation against exact autodiff on small masked problems. That remains the public arXiv scope. The job of this internal draft is different: merge that balanced theorem with the strongest next theorem layer that already matches the production TPU path, while keeping later extensions clearly separated.
+
+The theorem hierarchy should be read in the following order:
+\begin{itemize}
+    \item \textbf{centerpiece:} the balanced fixed-support $R=2$ adjoint and single-base-plan reconstruction from the first paper;
+    \item \textbf{first bridge:} a dustbin-augmentation lift showing that the current gap-aware cloud path is the same balanced surrogate on an enlarged state space, together with a local surrogate-bias bound for the stopped-base construction;
+    \item \textbf{secondary layer:} a dense fixed-support true-unbalanced theorem, kept separate until there is a scalable implementation.
+\end{itemize}
+
+Beyond that merged core, the codebase still contains ingredients that are not yet theorem-level:
+\begin{itemize}
+    \item genuinely unbalanced gap-aware transport, where marginal mismatch is penalized directly rather than represented by augmentation inside a balanced surrogate;
+    \item adaptive support geometry, where the support is learned rather than fixed to a diagonal band;
+    \item multimodal routing, where coarse support summaries can represent repeated or duplicated structure rather than a single centerline.
+\end{itemize}
+
+The strategic decision in this draft is therefore to separate what is now merged into the NeurIPS theorem spine from what remains future work. Dustbin augmentation belongs in the merged spine because it already matches the active cloud path. The true-unbalanced theorem is promising, but remains secondary until there is a scalable path. Adaptive support geometry and multimodal routing do not belong in the main theorem spine at all unless later work materially changes that.
+
+\section{Problem Statement}
+
+Let $Q,K,V$ denote long-context query, key, and value tensors, and let $S$ denote the score matrix induced by $Q$ and $K$. The balanced paper studies a masked transport surrogate on a fixed support $\Omega$ and proves an exact adjoint factorization for a short refinement tail. In practice, however, sequence alignment often requires more than this fixed-support balanced picture.
+
+First, biological and structural alignment problems are rarely strictly balanced. Insertions, deletions, repeats, and unmatched regions make it natural to allow mass to disappear into a sink or to pay a penalty for marginal mismatch rather than enforcing exact doubly-stochastic constraints. Second, a fixed diagonal band can be badly misaligned with the true path. Third, a single row barycenter is a poor summary of a multimodal scout distribution. These are not merely engineering details: they change the mathematical object being differentiated.
+
+The next problem is therefore:
+\begin{quote}
+Can one retain the block-wise, hardware-efficient tail-refinement strategy while extending the balanced fixed-support surrogate just enough to match the real training path, without obscuring the central $R=2$ factorization theorem?
+\end{quote}
+
+\section{Prioritized Route}
+
+There are two mathematically distinct ways to move beyond the balanced first paper:
+\begin{enumerate}
+    \item \textbf{dustbin-augmented balanced transport}, in which unmatched query or key mass is routed to explicit sink states while the augmented problem remains balanced on the enlarged support;
+    \item \textbf{genuinely unbalanced entropic transport}, in which marginal mismatch is penalized directly in the objective.
+\end{enumerate}
+
+The first route should come first. It is closer to the current code path, more likely to preserve an exact staircase factorization, and easier to map onto tilewise kernels because the gap states can be represented by small additional blocks rather than by a wholesale change to the dual equations. This draft therefore formalizes the dustbin-augmented case first and treats true unbalanced OT as the next-stage generalization.
+
+\section{Innovation Targets}
+
+\subsection{Dustbin-Augmented Tail Refinement}
+
+The first merged theorem layer is a dustbin-augmented analogue of the balanced tail-refinement derivation. Let the augmented score matrix be
+\[
+\widetilde S =
+\begin{bmatrix}
+S & s_{\mathrm{q}\to\bot} \\
+s_{\bot\to\mathrm{k}}^\top & s_{\bot\bot}
+\end{bmatrix},
+\]
+where the extra row and column represent unmatched-mass states. In the current merged draft, the dustbin layer has three pieces:
+\begin{enumerate}
+    \item an explicit augmented-tail recursion for the duals and transport plans;
+    \item the $R=2$ score-space adjoint for that surrogate;
+    \item an exact reconstruction theorem showing which augmented staircase plans can still be recovered from one materialized base plan and row/column modifiers.
+\end{enumerate}
+
+This is stronger than treating the current \texttt{dustbin\_block} path as a heuristic training option, because it identifies the exact implemented transport object and lifts the fixed-depth backward theorem onto it directly.
+
+\paragraph{Code-aligned augmented surrogate.}
+The current TPU screen already contains the relevant gap-aware path. It does not introduce a new OT solver; instead, it augments the balanced problem. Concretely, let the base query, key, and value sequences have length $L$, and let $B=128$ be the dustbin block size used in the implementation. Define augmented sequences
+\[
+\widetilde Q \in \mathbb{R}^{(L+B)\times d}, \qquad
+\widetilde K \in \mathbb{R}^{(L+B)\times d}, \qquad
+\widetilde V \in \mathbb{R}^{(L+B)\times d}
+\]
+by appending one extra block whose first token stores learned vectors $(q_\bot,k_\bot,v_\bot)$ and whose remaining $B-1$ tokens are zero. Likewise define augmented masks $\widetilde q,\widetilde k\in\{0,1\}^{L+B}$ by appending one active token and $B-1$ inactive fillers. The current code then runs the same balanced tail-refinement solver on the augmented system, with effective band width
+\[
+\widetilde W = \max(W,L).
+\]
+Finally, if a supervised query row is unmatched, its target column is remapped to the active dustbin index $L$.
+
+\begin{theorem}[Dustbin Augmentation Theorem]
+Let $(Q,K,V,q,k)$ be the base sequences and masks, and let $(\widetilde Q,\widetilde K,\widetilde V,\widetilde q,\widetilde k)$ be the dustbin-augmented objects defined above. Let $\widetilde\Omega$ be the active support induced by the augmented masks and the band width $\widetilde W=\max(W,L)$. Then the current \texttt{dustbin\_block} path is exactly the balanced fixed-support tail-refinement surrogate applied to $(\widetilde Q,\widetilde K,\widetilde V,\widetilde\Omega)$.
+\end{theorem}
+
+\begin{proof}
+The implementation appends no new dynamics beyond the augmentation itself: after constructing $(\widetilde Q,\widetilde K,\widetilde V,\widetilde q,\widetilde k)$, it calls the same balanced Sinkhorn forward and backward path as in the first paper. Because only the first appended token is marked active, every plan entry touching the remaining $B-1$ filler positions is masked out and therefore identically zero. Because $\widetilde W \ge L$, every active base row $i\in\{0,\dots,L-1\}$ can reach the active dustbin column $L$, and symmetrically every active base column can be reached from the active dustbin row. Thus the augmented support is exactly a balanced support on a larger state space with one reachable unmatched-mass token on each side. No additional approximation is introduced after the augmentation.
+\end{proof}
+
+\begin{corollary}[Exact \texorpdfstring{$R=2$}{R=2} Adjoint for the Current Dustbin Transport Path]
+Apply the balanced fixed-support tail-refinement theorem and single-base-plan reconstruction theorem from the first paper to the augmented system $(\widetilde Q,\widetilde K,\widetilde V,\widetilde\Omega)$. Then the current dustbin-augmented $R=2$ path already has an exact fixed-depth adjoint and the same orbit-factorized reconstruction
+\[
+\widetilde P^{(a,b)}
+=
+\widetilde P^{(2,2)}
+\odot
+\exp(\widetilde u^{(a)}-\widetilde u^{(2)})
+\odot
+\exp(\widetilde v^{(b)}-\widetilde v^{(2)})
+\]
+on the augmented support. In particular, the transport subroutine used by the ongoing TPU screen's dustbin configurations is already an exact fixed-depth dustbin-augmented surrogate rather than a heuristic backward pass.
+\end{corollary}
+
+\begin{remark}[Relation to the Current Cloud Objective]
+The current dustbin screen runs are not \emph{purely} tail-surrogate objectives. Their training loss is a weighted sum
+\[
+\mathcal{L}_{\mathrm{cloud}}
+=
+\lambda_{\mathrm{rec}}\mathcal{L}_{\mathrm{rec}}^{\mathrm{tail}}
+\;+\;
+\lambda_{\mathrm{ce}}\mathcal{L}_{\mathrm{ce}}^{\mathrm{full}}
+\;+\;
+\lambda_{\mathrm{mono}}\mathcal{L}_{\mathrm{mono}}^{\mathrm{full}},
+\]
+where all three terms are evaluated on the same augmented state space, but only the reconstruction term uses the fixed-depth tail-refinement transport path. The sparse cross-entropy and barycenter-monotonicity terms are computed from the exact augmented $T$-step base solve. Thus the present theorem controls the transport subroutine that enters the reconstruction term and the augmented state space on which the other metrics are defined; it does not claim that the entire cloud objective is itself a pure fixed-depth surrogate.
+\end{remark}
+
+\paragraph{Local verification of the merged theorem layer.}
+The repository now includes a direct harness, \texttt{scripts/validate\_dustbin\_augmentation.py}, for the exact code path used by the current TPU screen. Under reduced-length but cloud-aligned local settings ($L=128$, dustbin block size $B=128$, $T=15$, $R=2$, \texttt{gap\_mode=dustbin\_block}, \texttt{support\_reconstruction=none}), it checks three invariants:
+\begin{enumerate}
+    \item the benchmark's \texttt{gap\_mode=dustbin\_block} losses match the manually pre-augmented losses exactly for three objective mixes relevant to the codebase: reconstruction-only, \texttt{muot\_dustbin\_mono}, and \texttt{muot\_dustbin\_hybrid}; in all three cases the loss and gradient discrepancies are zero to displayed precision;
+    \item the augmented staircase factorization holds numerically, with maximum absolute errors below $5\times 10^{-8}$ for $\widetilde P^{(2,1)}$, $\widetilde P^{(1,1)}$, and $\widetilde P^{(1,0)}$ reconstructed from $\widetilde P^{(2,2)}$;
+    \item tail refinement on the augmented path remains close to exact autodiff through the same objective on this local problem, with maximum gradient deviation about $8.5\times 10^{-5}$ for the reconstruction-only and monotone settings and about $4.3\times 10^{-5}$ for the hybrid setting.
+\end{enumerate}
+This does not replace the theorem, but it does verify that the present implementation, the current cloud loss decomposition, and the theorem statement are aligned on the gap-aware path already running in GCP.
+
+\paragraph{What remains open.}
+This corollary is intentionally modest. It shows that the current cloud runs already sit on theorem-friendly ground, because they reuse the balanced solver on an augmented state space. It does \emph{not} yet provide a theorem for genuinely unbalanced OT, nor does it make the support geometry differentiable. It also does not collapse the entire cloud objective into one tail-surrogate theorem, because the sparse-CE and monotonicity terms are exact augmented metrics rather than fixed-depth tail losses. Those are the right boundaries for the merged theorem layer.
+
+\paragraph{Why this route is plausible.}
+The balanced factorization in the first paper works because all staircase plans share the same score matrix and differ only through dual shifts. The dustbin-augmented route preserves exactly that structural advantage on a larger state space. By contrast, fully unbalanced OT changes the dual updates more fundamentally and should be treated as a second-stage generalization rather than as part of the first merged extension.
+
+\paragraph{A second merged theorem layer: surrogate bias.}
+The unified NeurIPS story should also add the theoretical component absent from the first paper: a local bound comparing the surrogate gradient to the exact gradient through the same augmented base solve. Define the centered one-step augmented refinement map by
+\[
+\Phi_x : z \mapsto z^+,
+\qquad
+z=(u,v),
+\]
+where $x$ collects the differentiable augmented inputs and gap tokens, the support $\widetilde\Omega$ is held fixed, and the centering convention is the same as in the balanced paper. Let $A_x(z)$ denote the augmented transport application map, let $z_0$ be an initialization independent of $x$, and define the base orbit
+\[
+z_t(x) = \Phi_x^t(z_0).
+\]
+For fixed tail depth $R$, write
+\[
+\Psi_x^R(z) = A_x\!\bigl(\Phi_x^R(z)\bigr),
+\qquad
+f_{\mathrm{full}}^{T,R}(x)=\Psi_x^R(z_T(x)).
+\]
+The surrogate used in practice applies stop-gradient to $z_T(x)$, so its gradient is
+\[
+g_{\mathrm{surr}}^{T,R}(x)
+=
+\partial_x \Psi_x^R(z)\big|_{z=z_T(x)},
+\]
+where the partial derivative holds the base state fixed.
+
+\begin{theorem}[Local Surrogate-Bias Bound for the Augmented Tail]
+Assume there is a neighborhood $\mathcal U$ of parameters $x$ and a forward-invariant neighborhood $\mathcal N$ of dual states such that:
+\begin{enumerate}
+    \item the augmented support $\widetilde\Omega$ is constant on $\mathcal U$;
+    \item $\Phi_x$ and $A_x$ are $C^1$ on $\mathcal U \times \mathcal N$;
+    \item there are constants $\rho \in [0,1)$, $L_\Phi > 0$, and $L_A > 0$ such that
+    \[
+    \|D_z \Phi_x(z)\| \le \rho,
+    \qquad
+    \|D_x \Phi_x(z)\| \le L_\Phi,
+    \qquad
+    \|D_z A_x(z)\| \le L_A
+    \]
+    for all $(x,z)\in\mathcal U\times\mathcal N$.
+\end{enumerate}
+Let
+\[
+g_{\mathrm{full}}^{T,R}(x)=\nabla_x f_{\mathrm{full}}^{T,R}(x).
+\]
+Then
+\[
+g_{\mathrm{full}}^{T,R}(x)-g_{\mathrm{surr}}^{T,R}(x)
+=
+D_z \Psi_x^R(z_T(x))\,D_x z_T(x),
+\]
+and the resulting stop-gradient bias satisfies
+\[
+\bigl\|g_{\mathrm{full}}^{T,R}(x)-g_{\mathrm{surr}}^{T,R}(x)\bigr\|
+\le
+\frac{L_A L_\Phi}{1-\rho}\,\rho^R.
+\]
+\end{theorem}
+
+\begin{proof}
+The identity is a direct chain-rule decomposition:
+\[
+\nabla_x \Psi_x^R(z_T(x))
+=
+\partial_x \Psi_x^R(z)\big|_{z=z_T(x)}
++
+D_z \Psi_x^R(z_T(x))\,D_x z_T(x).
+\]
+Subtracting the first term on the right gives the exact bias identity.
+
+For the norm bound, write $z_{T+r}(x)=\Phi_x^r(z_T(x))$ for $r=0,\dots,R$. By the chain rule,
+\[
+D_z \Psi_x^R(z_T(x))
+=
+D_z A_x(z_{T+R}(x))
+\prod_{r=0}^{R-1} D_z \Phi_x(z_{T+r}(x)).
+\]
+Hence
+\[
+\|D_z \Psi_x^R(z_T(x))\|
+\le
+L_A \rho^R.
+\]
+Next, differentiate the base recursion $z_{t+1}(x)=\Phi_x(z_t(x))$:
+\[
+D_x z_{t+1}(x)
+=
+D_x \Phi_x(z_t(x))
++
+D_z \Phi_x(z_t(x))\,D_x z_t(x).
+\]
+Since $z_0$ is independent of $x$, we have $D_x z_0=0$, so repeated application of the norm bounds gives
+\[
+\|D_x z_T(x)\|
+\le
+L_\Phi \sum_{j=0}^{T-1}\rho^j
+\le
+\frac{L_\Phi}{1-\rho}.
+\]
+Combining the two estimates with the exact bias identity yields
+\[
+\bigl\|g_{\mathrm{full}}^{T,R}(x)-g_{\mathrm{surr}}^{T,R}(x)\bigr\|
+\le
+\frac{L_A L_\Phi}{1-\rho}\,\rho^R.
+\qedhere
+\]
+\end{proof}
+
+\begin{corollary}[Converged-Objective Bias Under Derivative Convergence]
+Assume in addition that the centered augmented refinement map has a locally attracting fixed point $z_*(x)$ on $\mathcal U$, that the exact gradient of the converged objective
+\[
+F_*(x)=A_x(z_*(x))
+\]
+exists, and that there is a constant $C_T>0$ such that
+\[
+\bigl\|\nabla F_*(x)-g_{\mathrm{full}}^{T,R}(x)\bigr\| \le C_T \rho^T
+\]
+throughout $\mathcal U$. Then
+\[
+\bigl\|\nabla F_*(x)-g_{\mathrm{surr}}^{T,R}(x)\bigr\|
+\le
+C_T \rho^T + \frac{L_A L_\Phi}{1-\rho}\,\rho^R.
+\]
+\end{corollary}
+
+\begin{proof}
+Apply the triangle inequality:
+\[
+\bigl\|\nabla F_*(x)-g_{\mathrm{surr}}^{T,R}(x)\bigr\|
+\le
+\bigl\|\nabla F_*(x)-g_{\mathrm{full}}^{T,R}(x)\bigr\|
++
+\bigl\|g_{\mathrm{full}}^{T,R}(x)-g_{\mathrm{surr}}^{T,R}(x)\bigr\|.
+\]
+Bound the first term by assumption and the second term by the previous theorem.
+\end{proof}
+
+\subsection{True Unbalanced Fixed-Support Tail}
+
+The dustbin-augmentation lift is the strongest theorem that already matches the current cloud path. The next theorem layer is \emph{genuinely} unbalanced OT, where marginal mismatch is penalized directly rather than represented by augmentation. Here the fixed-support tail no longer reduces to the balanced recurrence, but the basic staircase structure still survives.
+
+Let $\Omega$ be a fixed active support, let $a_i>0$ and $b_j>0$ be target masses on the active query and key supports, and let $S$ again denote the score matrix with the factor $1/\varepsilon$ already absorbed into its definition. A natural score-space fixed-support unbalanced objective is
+\[
+\min_{P\ge 0,\;\mathrm{supp}(P)\subseteq\Omega}
+\sum_{(i,j)\in\Omega} P_{ij}\bigl(\log P_{ij}-S_{ij}-1\bigr)
+\;+\;
+\lambda_q \,\mathrm{KL}(P\mathbf 1\|a)
+\;+\;
+\lambda_k \,\mathrm{KL}(P^\top \mathbf 1\|b),
+\]
+where
+\[
+\mathrm{KL}(r\|a)=\sum_i r_i\!\left(\log \frac{r_i}{a_i}-1\right)+a_i
+\]
+and analogously for the key marginal. If one starts from the more conventional unscaled primal with entropic temperature $\varepsilon$ and KL penalties $\tau_q,\tau_k$, then
+\[
+\lambda_q=\frac{\tau_q}{\varepsilon},
+\qquad
+\lambda_k=\frac{\tau_k}{\varepsilon}.
+\]
+The first-order stationarity condition gives
+\[
+\log P_{ij}
+=
+S_{ij}
+-\lambda_q \log \frac{r_i}{a_i}
+-\lambda_k \log \frac{c_j}{b_j},
+\]
+so with the usual parametrization $P_{ij}=\exp(S_{ij}+u_i+v_j)$ one has
+\[
+u_i=-\lambda_q \log \frac{r_i}{a_i},
+\qquad
+v_j=-\lambda_k \log \frac{c_j}{b_j}.
+\]
+Eliminating $r_i$ and $c_j$ then yields the standard unbalanced scaling exponents
+\[
+\alpha_q=\frac{\lambda_q}{1+\lambda_q}=\frac{\tau_q}{\tau_q+\varepsilon},
+\qquad
+\alpha_k=\frac{\lambda_k}{1+\lambda_k}=\frac{\tau_k}{\tau_k+\varepsilon}.
+\]
+Assume throughout this subsection that every active query row and every active key column intersects $\Omega$, so that the row and column sums defined below are strictly positive on the active support.
+Define the fixed-support unbalanced refinement half-steps by
+\begin{align}
+    u_i^{(t)} &= \alpha_q\!\left(\log a_i - \log\!\sum_{j:(i,j)\in\Omega}\exp(S_{ij}+v_j^{(t-1)})\right), \\
+    v_j^{(t)} &= \alpha_k\!\left(\log b_j - \log\!\sum_{i:(i,j)\in\Omega}\exp(S_{ij}+u_i^{(t)})\right),
+\end{align}
+and as before write
+\[
+P_{ij}^{(a,b)}=
+\begin{cases}
+\exp(S_{ij}+u_i^{(a)}+v_j^{(b)}), & (i,j)\in\Omega,\\
+0, & (i,j)\notin\Omega.
+\end{cases}
+\]
+Now define the row and column sums
+\[
+r_i^{(a,b)}=\sum_j P_{ij}^{(a,b)},
+\qquad
+c_j^{(a,b)}=\sum_i P_{ij}^{(a,b)},
+\]
+and the corresponding row- and column-normalized plans
+\[
+\mathsf R_{ij}^{(a,b)}=\frac{P_{ij}^{(a,b)}}{r_i^{(a,b)}},
+\qquad
+\mathsf C_{ij}^{(a,b)}=\frac{P_{ij}^{(a,b)}}{c_j^{(a,b)}}.
+\]
+
+\begin{proposition}[Exact Fixed-Depth Adjoint for the Unbalanced Tail]
+Let $\widetilde O^{[R]} = P^{(R,R)}V$, let $G=\partial \mathcal L/\partial \widetilde O^{[R]}$, and define
+\[
+Z_{ij}=\langle G_i,V_j\rangle,
+\qquad
+g_u=(P^{(R,R)}\odot Z)\mathbf 1,
+\qquad
+g_v=(P^{(R,R)}\odot Z)^\top \mathbf 1.
+\]
+Then the refinement Jacobians are
+\[
+\frac{\partial u_i^{(t)}}{\partial v_j^{(t-1)}}=-\alpha_q\,\mathsf R_{ij}^{(t,t-1)},
+\qquad
+\frac{\partial v_j^{(t)}}{\partial u_i^{(t)}}=-\alpha_k\,\mathsf C_{ij}^{(t,t)},
+\]
+and the fixed-depth reverse recursion is
+\begin{align}
+    \bar v^{(R)} &= g_v, \\
+    \bar u^{(R)} &= g_u - \alpha_k \mathsf C^{(R,R)} \bar v^{(R)}, \\
+    \bar v^{(t-1)} &= -\alpha_q\bigl(\mathsf R^{(t,t-1)}\bigr)^\top \bar u^{(t)}, \qquad t=R,R-1,\dots,1, \\
+    \bar u^{(t-1)} &= -\alpha_k \mathsf C^{(t-1,t-1)} \bar v^{(t-1)}, \qquad t=R,R-1,\dots,2.
+\end{align}
+The score-space cotangent is
+\[
+\bar S
+=
+P^{(R,R)}\odot Z
+-
+\sum_{t=1}^R
+\left[
+\alpha_k P^{(t,t)}\odot\bigl(\mathbf 1(\bar v^{(t)}\oslash c^{(t,t)})^\top\bigr)
+\;+\;
+\alpha_q P^{(t,t-1)}\odot\bigl((\bar u^{(t)}\oslash r^{(t,t-1)})\mathbf 1^\top\bigr)
+\right],
+\]
+where $\oslash$ denotes elementwise division.
+\end{proposition}
+
+\begin{proof}
+Differentiate each unbalanced half-step. For the query update,
+\[
+\frac{\partial u_i^{(t)}}{\partial v_j^{(t-1)}}
+=
+-\alpha_q \frac{\exp(S_{ij}+v_j^{(t-1)})}{\sum_{j'}\exp(S_{ij'}+v_{j'}^{(t-1)})}
+=
+-\alpha_q \frac{P_{ij}^{(t,t-1)}}{r_i^{(t,t-1)}}
+=
+-\alpha_q\,\mathsf R_{ij}^{(t,t-1)}.
+\]
+The column update is identical with $\alpha_k$ and column-normalized plans. Pulling the terminal transport application backward gives $g_u$ and $g_v$, and repeated application of the two Jacobians yields the stated reverse recursion. Pulling $\bar u^{(t)}$ and $\bar v^{(t)}$ through the two half-steps contributes
+\[
+-\alpha_q P_{ij}^{(t,t-1)} \frac{\bar u_i^{(t)}}{r_i^{(t,t-1)}}
+\qquad\text{and}\qquad
+-\alpha_k P_{ij}^{(t,t)} \frac{\bar v_j^{(t)}}{c_j^{(t,t)}}
+\]
+to the score-space cotangent, and summing these terms over $t$ gives the formula for $\bar S$.
+\end{proof}
+
+\begin{theorem}[Single-Base-Plan Reduction for Unbalanced \texorpdfstring{$R=2$}{R=2}]
+For any reference pair $(R,R)$, the staircase plans still satisfy the orbit relation
+\[
+P^{(a,b)}
+=
+P^{(R,R)}
+\odot
+\exp(u^{(a)}-u^{(R)})
+\odot
+\exp(v^{(b)}-v^{(R)}).
+\]
+Consequently, in the $R=2$ unbalanced tail all plans needed by the adjoint can be recovered from one materialized base plan $P^{(2,2)}$. Their row and column sums are
+\begin{align}
+    r_i^{(a,b)}
+    &=
+    \exp(u_i^{(a)}-u_i^{(2)})
+    \sum_j P_{ij}^{(2,2)}\exp(v_j^{(b)}-v_j^{(2)}), \\
+    c_j^{(a,b)}
+    &=
+    \exp(v_j^{(b)}-v_j^{(2)})
+    \sum_i P_{ij}^{(2,2)}\exp(u_i^{(a)}-u_i^{(2)}),
+\end{align}
+so the exact unbalanced $R=2$ adjoint can be evaluated from one materialized base plan together with row and column reductions of three reweighted base plans.
+\end{theorem}
+
+\begin{proof}
+The orbit relation is immediate from the ratio
+\[
+\frac{P_{ij}^{(a,b)}}{P_{ij}^{(2,2)}}
+=
+\exp(u_i^{(a)}-u_i^{(2)}+v_j^{(b)}-v_j^{(2)}),
+\]
+which does not depend on the specific balanced or unbalanced recurrence. Summing the reconstructed plan over rows or columns gives the stated formulas for $r^{(a,b)}$ and $c^{(a,b)}$. Substituting these row and column sums into the previous proposition yields an adjoint evaluation based on one materialized base plan plus reductions of reweighted copies.
+\end{proof}
+
+\paragraph{Local algebraic verification.}
+The repository now includes a small dense reference module, \path{src/unbalanced_ot.py}, together with a verifier, \path{scripts/validate_unbalanced_tail_refinement.py}, for this theorem layer. On the default asymmetric local check ($L=16$, $d=4$, $T=5$, $R=2$, $\alpha_q=0.7$, $\alpha_k=0.6$), the unbalanced single-base-plan reconstruction holds with plan errors below $2.3\times 10^{-8}$, and the closed-form adjoint matches exact autodiff with maximum absolute errors about $6\times 10^{-8}$ for $\bar S$, $dQ$, $dK$, and $dV$. Additional spot checks with different seeds, narrower supports, and exponent pairs $(\alpha_q,\alpha_k)=(0.3,0.8)$ and $(0.9,0.4)$ also pass at the same numerical scale. So the algebraic theorem is not just formal; it is numerically verified on a direct dense prototype across several asymmetric settings.
+
+\paragraph{Bridge-to-cloud comparison.}
+The repository also includes a local comparison harness, \path{scripts/compare_dustbin_and_true_unbalanced.py}, which evaluates the current cloud-style \texttt{dustbin\_block} path against the dense true-unbalanced reference on the same small problem. This comparison is intentionally diagnostic rather than theorem-level. Its main conclusion is that the two objects are \emph{not} equivalent: at moderate unbalanced strengths they can differ substantially, while in the near-balanced regime the gap narrows but remains nonzero. On a cloud-aligned local setting ($L=128$, $d=8$, $T=15$, $R=2$, full band), the active-output maximum absolute difference is about $4.05$ at $\tau_q=\tau_k=1$, about $0.13$ at $\tau_q=\tau_k=20$, and about $0.09$ at $\tau_q=\tau_k=100$. This is exactly the distinction the unified paper should maintain: the current dustbin theorem is the correct bridge to the production cloud path, but true KL-unbalanced OT is a strictly stronger and presently separate theorem layer.
+
+\begin{remark}[Why This Is Not Yet the Cloud Path]
+This unbalanced theorem layer is mathematically stronger than the current dustbin-augmentation lift, but it is not yet the production training path. The present verification is dense and fixed-support; there is not yet a banded/Pallas implementation, no TPU-scale runtime validation, and no integration into the Pfam benchmark objective. For that reason the current cloud jobs should remain on the dustbin-augmented balanced surrogate until an actual scalable implementation of the unbalanced path exists.
+\end{remark}
+
+\begin{remark}[Relevance to the Current TPU Screen]
+The live screen configurations \texttt{muot\_dustbin\_mono} and \texttt{muot\_dustbin\_hybrid} already satisfy the theorem's architectural regime: they use \texttt{gap\_mode=dustbin\_block}, \texttt{support\_reconstruction=none}, fixed-depth tail refinement, and the same balanced solver as the first paper on the augmented state space. In the current launcher, the relevant hyperparameters are $T=15$ base iterations and $R=2$ refinement steps. Thus the theorem is not detached from the cloud workflow; it is the clean local statement for the exact path those runs already execute.
+\end{remark}
+
+\subsection{Differentiable Support Geometry}
+
+The second target is to replace hard support proposals by a differentiable support geometry. The present scout path computes a coarse support proposal and then freezes a hard band before the fine solver runs. This is acceptable as an ablation, but it is not a theorem about end-to-end differentiable routing. The key point for the unified program is sequencing: this should be layered on top of the gap-aware theorem, not entangled with it from the start.
+
+The unified paper should introduce a soft support object only if the additional theorem and empirical work is ready. Candidate directions include:
+\begin{itemize}
+    \item a soft row-dependent band mask with differentiable width and center parameters;
+    \item a mixture of support bands whose weights are trained jointly with the transport model;
+    \item a coarse transport prior that modulates, rather than truncates, the fine support.
+\end{itemize}
+
+The theorem target is not merely to make the support proposal differentiable, but to define a surrogate whose backward pass remains exact for the softened geometry actually used by the kernel. The likely mathematical form is a gated score matrix
+\[
+S^\phi_{ij} = S_{ij} + \log w_\phi(i,j),
+\]
+where $w_\phi(i,j)\in(0,1]$ is a learned soft support weight. This makes the support parameters part of the score space rather than a separate discrete routing object, which is promising for exact differentiation.
+
+\subsection{Multimodal Support Summaries}
+
+The third target is to move beyond one-centerline scouting. Repeated structure, duplicated domains, and displaced motifs can induce coarse transport profiles with several separated modes. A single barycenter destroys this structure.
+
+One natural extension is a top-$k$ or mixture-of-centerlines representation, where each row is allowed several candidate support tracks. The mathematical challenge is then to keep the representation compatible with block-wise kernels. The systems challenge is to do so without collapsing the memory advantage that motivated the original factorization.
+
+\section{Merged Technical Program}
+
+\subsection{Theoretical Program}
+
+The merged theory now answers the first two questions for the \emph{primary} dustbin-augmented track and partially answers the third:
+\begin{enumerate}
+    \item What is the exact surrogate being differentiated in the gap-aware setting?
+    \item Which staircase plans appear in the fixed-depth adjoint, and can they still be reconstructed exactly from one base plan and low-rank row/column modifiers?
+    \item What local control is available on the bias introduced by stopping the base solve and differentiating only the tail?
+\end{enumerate}
+
+The support-geometry component should be posed only after this merged dustbin layer is in place. Then the analogous questions are:
+\begin{enumerate}
+    \item What is the differentiable support parameterization?
+    \item How does it enter the transport application and refinement steps?
+    \item Which additional cotangent terms appear from differentiating the support parameters?
+    \item Can those terms be evaluated tilewise without dense materialization?
+\end{enumerate}
+
+\paragraph{Merged theorem spine.}
+The unified NeurIPS paper should now be organized around three formal results:
+\begin{enumerate}
+    \item \textbf{Balanced fixed-support theorem.} The public arXiv theorem for the centered balanced surrogate and its exact $R=2$ factorization.
+    \item \textbf{Dustbin-augmentation lift.} The present theorem showing that the current gap-aware transport path is exactly the balanced surrogate on an augmented state space, together with the lifted $R=2$ factorization.
+    \item \textbf{Local surrogate-bias bound.} A contraction-based estimate quantifying the effect of stopping the augmented base solve and differentiating only the tail.
+\end{enumerate}
+
+Only after these are settled should the draft promote soft support geometry to theorem level.
+
+\subsection{Implementation Program}
+
+The implementation should remain faithful to the lesson of the first paper: any theorem worth proving should still map cleanly onto TPU kernels. The likely implementation priorities are:
+\begin{itemize}
+    \item maintain one materialized base transport tile per block pair whenever possible;
+    \item push dustbin or geometry-aware corrections into row/column statistics or light-weight auxiliary channels;
+    \item keep the long-context path compatible with block-wise Pallas kernels rather than introducing dense fallback logic in the main algorithm.
+\end{itemize}
+
+In practical terms, this means the first implementation target should be a cleaned-up theorem-aligned version of the current \texttt{dustbin\_block} path, not a brand-new unbalanced solver. A strong second-paper implementation would therefore have:
+\begin{itemize}
+    \item a theorem-matching augmented forward path;
+    \item an exact custom-VJP for the augmented $R=2$ surrogate;
+    \item a validation harness mirroring the balanced paper's exactness checks before any large-scale Pfam training.
+\end{itemize}
+
+\section{Experimental Program}
+
+The unified NeurIPS paper should have a more ambitious empirical target than the first arXiv draft, but the experiments should still follow the theorem sequencing:
+\begin{enumerate}
+    \item verify the dustbin-augmented surrogate against exact autodiff on small masked problems;
+    \item isolate the effect of gap-aware transport separately from adaptive support geometry;
+    \item test multimodal support only after a soft-support variant exists;
+    \item evaluate the resulting model on Pfam-style supervision with explicit gap-aware diagnostics rather than sparse CE alone.
+\end{enumerate}
+
+For biology-facing runs, the evaluation should go beyond a positive-only metric on matched columns. The unified study should incorporate diagnostics for unmatched regions, false-positive transport mass, and robustness to repeats or translocations. If monotonicity is used, it should be presented as a domain prior rather than as a universal property of correct alignments.
+
+\paragraph{Bridge to the current TPU screen.}
+The immediate empirical bridge is already in place. The live TPU screen currently includes two dustbin-augmented short-budget configurations: one monotone reconstruction-oriented variant and one hybrid variant combining reconstruction and sparse cross-entropy. Both run with \texttt{gap\_mode=dustbin\_block}, \texttt{support\_reconstruction=none}, and tail refinement for the reconstruction term. This means the ongoing cloud jobs are not merely engineering probes; they are already the natural first experiments for the merged theorem layer above.
+
+\section{What Stays in the First Paper}
+
+The purpose of this draft is not to retroactively enlarge the current balanced manuscript. The first paper should remain about:
+\begin{itemize}
+    \item the balanced fixed-support surrogate;
+    \item the exact $R=2$ staircase factorization;
+    \item the centered-versus-ungauged equivalence used by the implementation;
+    \item exactness checks for the balanced masked kernel.
+\end{itemize}
+
+The unified NeurIPS paper should be where the gap-aware and adaptive-support claims live, once they have their own theorems and validation. In particular, the first paper should not be retrofitted to claim gap handling, support-routing differentiability, or multimodal scouting beyond what it explicitly proves.
+
+\section{Open Questions}
+
+The main open questions for this innovation track are:
+\begin{enumerate}
+    \item whether the local surrogate-bias bound can be sharpened under assumptions closer to the practical $\varepsilon=1$ regime used in cloud screening;
+    \item whether an equally clean theorem can be given for a genuinely unbalanced OT objective rather than the augmented balanced surrogate;
+    \item whether support-geometry gradients can be introduced without destroying kernel simplicity;
+    \item whether multimodal support can be represented in a way that remains both expressive and tile-friendly;
+    \item whether the biological gains from these additions are large enough to justify the added complexity.
+\end{enumerate}
+
+These are substantial questions, which is precisely why they should anchor the staged extensions of the unified NeurIPS paper rather than be smuggled into the first arXiv manuscript as unsupported claims. The current draft therefore recommends a disciplined order: dustbin-augmented theorem first, support-geometry theorem second, multimodal routing theorem third.
+
+\end{document}
