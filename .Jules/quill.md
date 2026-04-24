@@ -7,3 +7,7 @@
 ## 2024-05-24 - [Dual-Tensor Packing Strategy]
 **Learning:** The paper claimed a "single tensor" with $C=8$ channels for the packing strategy, but the codebase actually utilizes two distinct tensors (`M_data` for query-side and `N_data` for key-side), each with 8 channels, to pack potential histories and gradient intermediates without overloading a single tensor.
 **Action:** Always verify memory mapping architecture claims in the text against the actual JAX Pallas kernel inputs, specifically looking for split query/key state representations.
+
+## 2026-04-24 - [Dual-Tensor Packing Clarification]
+**Learning:** The previous learning highlighted the split between `M_data` and `N_data` but the paper still referred to them vaguely as "a small fixed number of VMEM channels".
+**Action:** Always be specific when naming hardware-level tensors in paper text rather than just conceptually explaining them. Avoid relying on broad phrases.
