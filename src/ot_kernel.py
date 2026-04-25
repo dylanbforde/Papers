@@ -1717,16 +1717,21 @@ def _use_fused_k2_fast_path(Q, band_width, refine_steps, refine_tolerance, suppo
     The theorem-level method remains the same either way: fixed-depth
     tail-refinement with R=2. This gate only selects the implementation.
 
-    On v6e, the fused dQ kernel overruns scoped VMEM for full-support
-    problems such as L=1024 with band_width>=L. In those cases we fall back
-    to the orbit-factorized fixed-K implementation, which is slower but
-    preserves the same R=2 estimator.
+    On v6e, the fused dQ kernel overruns scoped VMEM for wide-support
+    problems. That includes not only literal full support (e.g. L=1024 with
+    band_width>=L), but also dustbin-augmented paths where the active band
+    covers all but one 128-token block of the augmented sequence. In those
+    cases we fall back to the orbit-factorized fixed-K implementation, which
+    is slower but preserves the same R=2 estimator.
     """
     if int(refine_steps) != 2 or refine_tolerance is not None or support_reconstruction != "none":
         return False
     length = Q.shape[-2]
     num_blocks, band_blocks, _slice_size = _resolve_block_layout(length, 128, band_width)
-    return band_blocks < num_blocks
+    # Require at least one whole 128-token block of slack outside the active
+    # band. "Nearly full support" still produces the same VMEM-heavy fused dQ
+    # custom call shape that fails on v6e for the Pfam dustbin configs.
+    return band_blocks + 1 < num_blocks
 
 
 # ============================================================================
