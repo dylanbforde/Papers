@@ -1711,6 +1711,24 @@ def _pallas_refinement_bwd_fixed_k(band_width, epsilon, support_reconstruction, 
     return dQ, dK, dV
 
 
+def _use_fused_k2_fast_path(Q, band_width, refine_steps, refine_tolerance, support_reconstruction):
+    """Choose the fused K=2 TPU kernel only for genuinely banded regimes.
+
+    The theorem-level method remains the same either way: fixed-depth
+    tail-refinement with R=2. This gate only selects the implementation.
+
+    On v6e, the fused dQ kernel overruns scoped VMEM for full-support
+    problems such as L=1024 with band_width>=L. In those cases we fall back
+    to the orbit-factorized fixed-K implementation, which is slower but
+    preserves the same R=2 estimator.
+    """
+    if int(refine_steps) != 2 or refine_tolerance is not None or support_reconstruction != "none":
+        return False
+    length = Q.shape[-2]
+    num_blocks, band_blocks, _slice_size = _resolve_block_layout(length, 128, band_width)
+    return band_blocks < num_blocks
+
+
 # ============================================================================
 # Public API: Custom VJP Wiring
 # ============================================================================
@@ -1729,7 +1747,7 @@ def pallas_sinkhorn_bwd_full(
 ):
     """Backward for the tail-refinement estimator with a K=2 optimized fast path."""
     del n_iters, epsilon_scaling_steps, epsilon_scaling_factor
-    if int(refine_steps) == 2 and refine_tolerance is None and support_reconstruction == "none":
+    if _use_fused_k2_fast_path(res[2], band_width, refine_steps, refine_tolerance, support_reconstruction):
         dQ, dK, dV = _pallas_refinement_bwd_k2(band_width, epsilon, support_reconstruction, res, g)
     elif refine_tolerance is None:
         dQ, dK, dV = _pallas_refinement_bwd_fixed_k(
