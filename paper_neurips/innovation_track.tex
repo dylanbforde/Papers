@@ -20,7 +20,7 @@
 \newtheorem{remark}{Remark}
 \newtheorem{corollary}{Corollary}
 
-\title{Tail-Refinement Sinkhorn Attention Beyond the Balanced Core:\\Unified Theorem Draft for the NeurIPS Program}
+\title{Tail-Refinement Sinkhorn Attention Beyond the Balanced Core:\\Toward a Unified NeurIPS Manuscript}
 
 \author{
 Dylan B. Forde \\
@@ -34,7 +34,7 @@ Dylan B. Forde \\
 \maketitle
 
 \begin{abstract}
-This internal draft stages the theorem spine for the unified NeurIPS paper. The central result remains the balanced fixed-support $R=2$ tail-refinement factorization from the arXiv preprint: that is the main theorem and the conceptual core of the project. The first extension carried here is deliberately minimal and experiment-facing: the current \texttt{dustbin\_block} implementation is formalized as balanced Sinkhorn attention on an augmented state space, so the balanced theorem lifts directly to the gap-aware transport path already exercised by the cloud runs. We also add a local surrogate-bias bound under fixed-support contraction assumptions, clarifying what is and is not controlled when the base solve is stopped and only a short tail is differentiated. A denser true-unbalanced fixed-support theorem is recorded as a secondary layer, numerically verified but not yet promoted to the production TPU path. Geometry-adaptive support and multimodal routing remain explicitly sequenced follow-ons rather than merged claims.
+This draft consolidates the theorem spine and the first TPU screening evidence for the unified NeurIPS paper. The central result remains the balanced fixed-support $R=2$ tail-refinement factorization from the arXiv preprint: that is the main theorem and the conceptual core of the project. The first extension carried here is deliberately minimal and experiment-facing: the current \texttt{dustbin\_block} implementation is formalized as balanced Sinkhorn attention on an augmented state space, so the balanced theorem lifts directly to the gap-aware transport path already exercised by the cloud runs. We also add a local surrogate-bias bound under fixed-support contraction assumptions, clarifying what is and is not controlled when the base solve is stopped and only a short tail is differentiated. A denser true-unbalanced fixed-support theorem is recorded as a secondary layer, numerically verified but not yet promoted to the production TPU path. On TPU v6e-8, the short Pfam screen now completes end-to-end for the four core balanced and dustbin-augmented configurations, while a narrower-band ablation path remains unstable under the current VMEM budget. Geometry-adaptive support and multimodal routing remain explicitly sequenced follow-ons rather than merged claims.
 \end{abstract}
 
 \section{Scope of the Unified Draft}
@@ -55,7 +55,7 @@ Beyond that merged core, the codebase still contains ingredients that are not ye
     \item multimodal routing, where coarse support summaries can represent repeated or duplicated structure rather than a single centerline.
 \end{itemize}
 
-The strategic decision in this draft is therefore to separate what is now merged into the NeurIPS theorem spine from what remains future work. Dustbin augmentation belongs in the merged spine because it already matches the active cloud path. The true-unbalanced theorem is promising, but remains secondary until there is a scalable path. Adaptive support geometry and multimodal routing do not belong in the main theorem spine at all unless later work materially changes that.
+The strategic decision in this draft is therefore to separate what is now merged into the NeurIPS theorem spine from what remains future work. Dustbin augmentation belongs in the merged spine because it already matches the active cloud path. The true-unbalanced theorem is promising, but remains secondary until there is a scalable path. Adaptive support geometry and multimodal routing do not belong in the main theorem spine at all unless later work materially changes that. Operationally, the merged draft should now be read as the consolidation target: the balanced paper supplies the centerpiece theorem, while this document absorbs the first theorem-facing cloud evidence and the gap-aware bridge needed for the final conference version.
 
 \section{Problem Statement}
 
@@ -155,10 +155,10 @@ The repository now includes a direct harness, \texttt{scripts/validate\_dustbin\
     \item the augmented staircase factorization holds numerically, with maximum absolute errors below $5\times 10^{-8}$ for $\widetilde P^{(2,1)}$, $\widetilde P^{(1,1)}$, and $\widetilde P^{(1,0)}$ reconstructed from $\widetilde P^{(2,2)}$;
     \item tail refinement on the augmented path remains close to exact autodiff through the same objective on this local problem, with maximum gradient deviation about $8.5\times 10^{-5}$ for the reconstruction-only and monotone settings and about $4.3\times 10^{-5}$ for the hybrid setting.
 \end{enumerate}
-This does not replace the theorem, but it does verify that the present implementation, the current cloud loss decomposition, and the theorem statement are aligned on the gap-aware path already running in GCP.
+This does not replace the theorem, but it does verify that the present implementation, the current cloud loss decomposition, and the theorem statement are aligned on the gap-aware path that the cloud stack is attempting to run.
 
 \paragraph{What remains open.}
-This corollary is intentionally modest. It shows that the current cloud runs already sit on theorem-friendly ground, because they reuse the balanced solver on an augmented state space. It does \emph{not} yet provide a theorem for genuinely unbalanced OT, nor does it make the support geometry differentiable. It also does not collapse the entire cloud objective into one tail-surrogate theorem, because the sparse-CE and monotonicity terms are exact augmented metrics rather than fixed-depth tail losses. Those are the right boundaries for the merged theorem layer.
+This corollary is intentionally modest. It shows that the current cloud design sits on theorem-friendly ground, because it reuses the balanced solver on an augmented state space. It does \emph{not} yet provide a theorem for genuinely unbalanced OT, nor does it make the support geometry differentiable. It also does not collapse the entire cloud objective into one tail-surrogate theorem, because the sparse-CE and monotonicity terms are exact augmented metrics rather than fixed-depth tail losses. Those are the right boundaries for the merged theorem layer.
 
 \paragraph{Why this route is plausible.}
 The balanced factorization in the first paper works because all staircase plans share the same score matrix and differ only through dual shifts. The dustbin-augmented route preserves exactly that structural advantage on a larger state space. By contrast, fully unbalanced OT changes the dual updates more fundamentally and should be treated as a second-stage generalization rather than as part of the first merged extension.
@@ -473,7 +473,7 @@ This unbalanced theorem layer is mathematically stronger than the current dustbi
 \end{remark}
 
 \begin{remark}[Relevance to the Current TPU Screen]
-The live screen configurations \texttt{muot\_dustbin\_mono} and \texttt{muot\_dustbin\_hybrid} already satisfy the theorem's architectural regime: they use \texttt{gap\_mode=dustbin\_block}, \texttt{support\_reconstruction=none}, fixed-depth tail refinement, and the same balanced solver as the first paper on the augmented state space. In the current launcher, the relevant hyperparameters are $T=15$ base iterations and $R=2$ refinement steps. Thus the theorem is not detached from the cloud workflow; it is the clean local statement for the exact path those runs already execute.
+The live screen configurations \texttt{muot\_dustbin\_mono} and \texttt{muot\_dustbin\_hybrid} already satisfy the theorem's architectural regime: they use \texttt{gap\_mode=dustbin\_block}, \texttt{support\_reconstruction=none}, fixed-depth tail refinement, and the same balanced solver as the first paper on the augmented state space. In the current launcher, the relevant hyperparameters are $T=15$ base iterations and $R=2$ refinement steps. Thus the theorem is not detached from the cloud workflow; it is the clean local statement for the exact path those runs are intended to execute. The empirical status is narrower: as of April~25,~2026, the balanced screen path has completed on TPU, while the dustbin reruns are still pending under the updated near-full-support VMEM gate.
 \end{remark}
 
 \subsection{Differentiable Support Geometry}
@@ -544,6 +544,9 @@ In practical terms, this means the first implementation target should be a clean
     \item a validation harness mirroring the balanced paper's exactness checks before any large-scale Pfam training.
 \end{itemize}
 
+\paragraph{Current runtime lesson from TPU v6e.}
+The theorem-level method and the production kernel policy should be kept distinct. The current cloud runs use the same tail-refinement estimator in both cases, but do not always use the same low-level kernel. On TPU v6e, the aggressively fused $R=2$ backward is appropriate only for genuinely banded regimes. For full-support and near-full-support problems, the fused custom call can exceed scoped VMEM even though the theorem itself is unchanged. This is already visible in the production screen: balanced full-band length-$1024$ runs became stable only after routing those cases to the orbit-factorized fixed-$K$ implementation, and the dustbin-augmented path required tightening that gate further because the augmented length-$1152$ problem still behaved as near-full support. The merged paper should state this explicitly: the contribution is the exact $R=2$ estimator and its factorization, not a claim that one particular fused kernel is optimal for every support regime.
+
 \section{Experimental Program}
 
 The unified NeurIPS paper should have a more ambitious empirical target than the first arXiv draft, but the experiments should still follow the theorem sequencing:
@@ -556,8 +559,28 @@ The unified NeurIPS paper should have a more ambitious empirical target than the
 
 For biology-facing runs, the evaluation should go beyond a positive-only metric on matched columns. The unified study should incorporate diagnostics for unmatched regions, false-positive transport mass, and robustness to repeats or translocations. If monotonicity is used, it should be presented as a domain prior rather than as a universal property of correct alignments.
 
-\paragraph{Bridge to the current TPU screen.}
-The immediate empirical bridge is already in place. The live TPU screen currently includes two dustbin-augmented short-budget configurations: one monotone reconstruction-oriented variant and one hybrid variant combining reconstruction and sparse cross-entropy. Both run with \texttt{gap\_mode=dustbin\_block}, \texttt{support\_reconstruction=none}, and tail refinement for the reconstruction term. This means the ongoing cloud jobs are not merely engineering probes; they are already the natural first experiments for the merged theorem layer above.
+\paragraph{Current TPU screen status.}
+The immediate empirical bridge is now in place for the core configurations. On April~25,~2026, the short Pfam screen completed end-to-end on a TPU v6e-8 slice for the four central configurations
+\[
+\texttt{k2\_eps1},\quad \texttt{k4\_eps1},\quad \texttt{muot\_dustbin\_mono},\quad \texttt{muot\_dustbin\_hybrid},
+\]
+all using $50{,}000$ training pairs, $T=15$ base iterations, band width $1024$, and global batch size $64$ (per-device batch size $8$ across $8$ devices). The step-50 screen snapshot was:
+\begin{center}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Config & Step 50 Loss & Step 50 CE & Step 50 Mono & Throughput (ex/s) \\
+\midrule
+\texttt{k2\_eps1} & 3.5778 & 5.3223 & 0.3353 & 8.46 \\
+\texttt{k4\_eps1} & 3.5779 & 5.3223 & 0.3353 & 8.38 \\
+\texttt{muot\_dustbin\_mono} & 3.9030 & 5.3258 & 0.4155 & 8.41 \\
+\texttt{muot\_dustbin\_hybrid} & 4.6250 & 5.3244 & 0.4162 & 8.45 \\
+\bottomrule
+\end{tabular}
+\end{center}
+At this screening budget, $R=2$ and $R=4$ are empirically indistinguishable on the balanced path, while $R=2$ remains slightly faster. The two dustbin-augmented configurations also now complete under the same theorem-level surrogate, which means the empirical bridge for the merged theorem layer is no longer hypothetical. The most defensible near-term reading is: (i) the short $R=2$ tail is sufficient in practice on the balanced path, and (ii) the theorem-aligned dustbin bridge is operational enough to support promotion into longer-budget runs.
+
+\paragraph{What is still incomplete.}
+The screen still did \emph{not} finish every ablation. After the four core configurations completed, the next narrow-band ablation, \texttt{narrow128\_diag}, failed with a TPU VMEM overrun at the same custom-call family implicated earlier. So the remaining instability is now confined to the narrow-support ablation path rather than to the balanced+dustbin core screen. For the unified paper, that changes the operational priority: the next runs should promote the best balanced and dustbin candidates to longer budgets, while the narrow-band/scout branch can be treated as optional follow-on ablation work rather than as a blocker for the main manuscript.
 
 \section{What Stays in the First Paper}
 

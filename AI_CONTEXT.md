@@ -75,6 +75,23 @@
   - `muot_dustbin_mono`
   - `muot_dustbin_hybrid`
   Both use `gap_mode=dustbin_block`, `support_reconstruction=none`, and `sinkhorn_gradient_mode=tail_refinement`.
+- As of **2026-04-25**, the short balanced TPU screen has now completed end-to-end for:
+  - `k2_eps1`
+  - `k4_eps1`
+  on a TPU v6e-8 slice with `pairs=50000`, `T=15`, `band_width=1024`, and global batch size `64`. At step 50, the two runs were effectively identical (`loss ≈ 3.5778/3.5779`, `CE ≈ 5.3223`, `mono ≈ 0.3353`), with `k2_eps1` slightly faster (`8.46 ex/s` vs `8.38 ex/s`). Treat this as the first real systems-facing empirical support for the central `R=2` claim.
+- A later **2026-04-25** rerun completed the two core dustbin-augmented configs as well:
+  - `muot_dustbin_mono`
+  - `muot_dustbin_hybrid`
+  Step-50 snapshots were:
+  - `muot_dustbin_mono`: `loss 3.9030`, `CE 5.3258`, `mono 0.4155`, `8.41 ex/s`
+  - `muot_dustbin_hybrid`: `loss 4.6250`, `CE 5.3244`, `mono 0.4162`, `8.45 ex/s`
+  This means the four core screen configs that matter most for the unified paper have all now completed successfully on TPU.
+- The same successful rerun still failed later on `narrow128_diag`. That failure was a TPU VMEM overrun in the narrower-band ablation path, not in the balanced+dustbin core screen. The current production understanding is:
+  - the theorem-level method remains `tail_refinement` with `R=2`;
+  - the fused `K=2` backward is only appropriate for genuinely banded regimes;
+  - full-support and near-full-support cases, including the dustbin-augmented screen path, must use the orbit-factorized fixed-`K` implementation instead;
+  - the remaining unstable branch is the narrow-band/scout ablation path, which is no longer on the critical path for the main paper.
+- Current code implements this via `_use_fused_k2_fast_path(...)` in `src/ot_kernel.py`, with the near-full-support guard `band_blocks + 1 < num_blocks`. This is now part of the production TPU policy and should be reflected in the unified NeurIPS draft as an implementation detail, not a theorem change.
 - `tmux` is optional, not required. If using `tmux` on `command-center`, export `TERM=xterm-256color` first because `xterm-kitty` is not recognized there.
 - The screen launcher log already includes queue status while the job is in Step 2 (`WAITING_FOR_RESOURCES` / `ACTIVE`), so separate queue polling is only needed for independent verification or after launcher disconnects.
 - Current stable recovery pattern: if `sinkhorn-screen-queue` already exists in `us-east5-a` and is still `WAITING_FOR_RESOURCES`, do not replace it with new queue experiments. Kill any stray helper wrapper, keep the canonical queue, and restart only the detached `scripts/tpu_sinkhorn_screen.sh` launcher so it reuses the existing queue.
@@ -89,3 +106,7 @@
   1. screen balanced and dustbin-augmented candidates;
   2. use `K` ablation to support the unified NeurIPS method section;
   3. promote the best balanced and/or dustbin-augmented candidate into the full long-budget run that will supply the empirical backbone of the combined paper.
+- Given the completed **2026-04-25** screen, the operational recommendation is now:
+  - do **not** rerun the whole screen immediately;
+  - do **not** block the paper on fixing `narrow128_diag` / scout ablations;
+  - next cloud priority should be promotion of the best balanced candidate (`k2_eps1`) and the best dustbin candidate (currently `muot_dustbin_hybrid`, slightly better CE than `muot_dustbin_mono`) into longer-budget runs.

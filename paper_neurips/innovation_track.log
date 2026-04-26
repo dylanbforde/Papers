@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.27 (TeX Live 2025/nixos.org) (preloaded format=pdflatex 1980.1.1)  22 APR 2026 19:54
+This is pdfTeX, Version 3.141592653-2.6-1.40.27 (TeX Live 2025/nixos.org) (preloaded format=pdflatex 1980.1.1)  25 APR 2026 23:28
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
@@ -674,7 +674,9 @@ cmtt/m/n/10 src / unbalanced _
 
 [10]
 
-[11] (./innovation_track.aux)
+[11]
+
+[12] (./innovation_track.aux)
  ***********
 LaTeX2e <2025-06-01> patch level 1
 L3 programming layer <2025-06-09>
@@ -683,13 +685,13 @@ Package rerunfilecheck Info: File `innovation_track.out' has not changed.
 (rerunfilecheck)             Checksum: 2D708F820CB2239113516F397ED3BEAC;2432.
  ) 
 Here is how much of TeX's memory you used:
- 14367 strings out of 469012
- 230665 string characters out of 5435860
- 681302 words of memory out of 5000000
- 42272 multiletter control sequences out of 15000+600000
- 645702 words of font info for 192 fonts, out of 8000000 for 9000
+ 14377 strings out of 469012
+ 230789 string characters out of 5435860
+ 681292 words of memory out of 5000000
+ 42276 multiletter control sequences out of 15000+600000
+ 646146 words of font info for 195 fonts, out of 8000000 for 9000
  430 hyphenation exceptions out of 8191
- 75i,13n,79p,1102b,606s stack positions out of 10000i,1000n,20000p,200000b,200000s
+ 75i,13n,79p,1346b,710s stack positions out of 10000i,1000n,20000p,200000b,200000s
 </nix/store/qsq67hcdwsr2j2q58wlcv4hhjk7jy97m-texlive-combined-medium-2025.202
 50703-texmfdist/fonts/type1/public/amsfonts/cm/cmbx10.pfb></nix/store/qsq67hcdw
 sr2j2q58wlcv4hhjk7jy97m-texlive-combined-medium-2025.20250703-texmfdist/fonts/t
@@ -731,10 +733,10 @@ dwsr2j2q58wlcv4hhjk7jy97m-texlive-combined-medium-2025.20250703-texmfdist/fonts
 m-texlive-combined-medium-2025.20250703-texmfdist/fonts/type1/public/amsfonts/s
 ymbols/msbm10.pfb></nix/store/qsq67hcdwsr2j2q58wlcv4hhjk7jy97m-texlive-combined
 -medium-2025.20250703-texmfdist/fonts/type1/public/cm-super/sfrm1000.pfb>
-Output written on innovation_track.pdf (11 pages, 325258 bytes).
+Output written on innovation_track.pdf (12 pages, 332709 bytes).
 PDF statistics:
- 308 PDF objects out of 1000 (max. 8388607)
- 244 compressed objects within 3 object streams
- 82 named destinations out of 1000 (max. 500000)
- 43121 words of extra memory for PDF output out of 51595 (max. 10000000)
+ 315 PDF objects out of 1000 (max. 8388607)
+ 250 compressed objects within 3 object streams
+ 85 named destinations out of 1000 (max. 500000)
+ 44145 words of extra memory for PDF output out of 51595 (max. 10000000)
 

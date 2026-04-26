@@ -218,6 +218,8 @@ INPUT /nix/store/qsq67hcdwsr2j2q58wlcv4hhjk7jy97m-texlive-combined-medium-2025.2
 INPUT /nix/store/qsq67hcdwsr2j2q58wlcv4hhjk7jy97m-texlive-combined-medium-2025.20250703-texmfdist/fonts/tfm/public/cm/cmss10.tfm
 INPUT /nix/store/qsq67hcdwsr2j2q58wlcv4hhjk7jy97m-texlive-combined-medium-2025.20250703-texmfdist/fonts/tfm/public/cm/cmss8.tfm
 INPUT /nix/store/qsq67hcdwsr2j2q58wlcv4hhjk7jy97m-texlive-combined-medium-2025.20250703-texmfdist/fonts/tfm/public/cm/cmss8.tfm
+INPUT /nix/store/qsq67hcdwsr2j2q58wlcv4hhjk7jy97m-texlive-combined-medium-2025.20250703-texmfdist/fonts/tfm/public/cm/cmtt8.tfm
+INPUT /nix/store/qsq67hcdwsr2j2q58wlcv4hhjk7jy97m-texlive-combined-medium-2025.20250703-texmfdist/fonts/tfm/public/cm/cmtt8.tfm
 INPUT innovation_track.aux
 INPUT ./innovation_track.out
 INPUT ./innovation_track.out
