@@ -749,6 +749,8 @@ def dq_kernel_multi(
     q_mask_m = m_data[:, 5] > 0.5
 
     scale = scale_ref[0]
+    # MACH ⚡: Pre-scaled query block outside the inner loop to save O(M*N) FLOPs on scaling.
+    q_block_scaled = q_block * scale
 
     N = K_ref.shape[0]
     BLOCK_N = 128
@@ -793,7 +795,7 @@ def dq_kernel_multi(
             valid = q_mask_m[:, None] & k_mask_n[None, :]
 
             # Score matrix
-            s_block = jnp.einsum("md,nd->mn", q_block, k_block) * scale
+            s_block = jnp.einsum("md,nd->mn", q_block_scaled, k_block)
             P22 = jnp.where(valid, safe_exp(s_block + u2_m[:, None] + v2_n[None, :]), 0.0)
             z_block = jnp.einsum("me,ne->mn", do_block, v_mat_block)
 
@@ -826,6 +828,9 @@ def dk_dv_kernel_multi(
     """
     k_block = K_ref[...]       # (BLOCK, D)
     v_mat_block = V_ref[...]   # (BLOCK, E)
+    scale = scale_ref[0]
+    # MACH ⚡: Pre-scaled key block outside the inner loop to save O(M*N) FLOPs on scaling.
+    k_block_scaled = k_block * scale
     n_data = N_data_ref[...]   # (BLOCK, 8)
     W = W_ref[0]
 
@@ -840,7 +845,6 @@ def dk_dv_kernel_multi(
     BLOCK_M = 128
     UNROLL = 4
     iters = M // BLOCK_M
-    scale = scale_ref[0]
 
     n = pl.program_id(0)
     start_block = jnp.maximum(0, n - W)
@@ -878,7 +882,7 @@ def dk_dv_kernel_multi(
             valid = k_mask_n[:, None] & q_mask_m[None, :]
 
             # Score matrix
-            s_block_T = jnp.einsum("nd,md->nm", k_block, q_block) * scale
+            s_block_T = jnp.einsum("nd,md->nm", k_block_scaled, q_block)
             P22_T = jnp.where(valid, safe_exp(s_block_T + v2_n[:, None] + u2_m[None, :]), 0.0)
             z_block_T = jnp.einsum("ne,me->nm", v_mat_block, do_block)
             
