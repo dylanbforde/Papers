@@ -86,6 +86,14 @@
   - `muot_dustbin_mono`: `loss 3.9030`, `CE 5.3258`, `mono 0.4155`, `8.41 ex/s`
   - `muot_dustbin_hybrid`: `loss 4.6250`, `CE 5.3244`, `mono 0.4162`, `8.45 ex/s`
   This means the four core screen configs that matter most for the unified paper have all now completed successfully on TPU.
+- The first promoted long-budget `tpu_auto_run.sh` attempt on **2026-04-26** did **not** start training successfully. Root cause: when launched through `scripts/tpu_multi_zone_race.sh`, `tpu_auto_run.sh` still used its canonical unsuffixed `ZONE` / `RESOURCE_ID` / `NODE_ID` defaults instead of the handed-off suffixed winner names, so it left `sinkhorn-queue-us-east5-a` active while polling a separate `sinkhorn-queue`. Treat that first promoted attempt as invalid; it does not contribute empirical results.
+- A project billing/write lock then blocked cleanup and TPU-VM SSH temporarily. Billing was later restored and the valid recovery path was to rebind `tpu_auto_run.sh` directly to the already-active suffixed resource/node pair instead of launching another queue.
+- Current launcher safeguards after that incident:
+  - `scripts/tpu_auto_run.sh` now honors handed-off `PROJECT_ID` / `ZONE` / `RESOURCE_ID` / `NODE_ID` env overrides and logs them at startup;
+  - `scripts/tpu_multi_zone_race.sh` now exports `REQUIRE_EXISTING_RESOURCE=1` and `REQUIRE_ACTIVE_RESOURCE=1` when handing off a winner;
+  - `scripts/tpu_auto_run.sh` now verifies that the queued resource is already present, already `ACTIVE`, and bound to the expected node before doing any TPU work;
+  - `RUN_FLASH_BASELINE=0` now cleanly skips the chained Flash phase for promoted Sinkhorn-only runs.
+- Canonical written postmortem for this incident: `docs/TPU_PROMOTION_POSTMORTEM_2026-04-26.md`. Use it as the operational reference for future promoted runs.
 - The same successful rerun still failed later on `narrow128_diag`. That failure was a TPU VMEM overrun in the narrower-band ablation path, not in the balanced+dustbin core screen. The current production understanding is:
   - the theorem-level method remains `tail_refinement` with `R=2`;
   - the fused `K=2` backward is only appropriate for genuinely banded regimes;
@@ -95,6 +103,9 @@
 - `tmux` is optional, not required. If using `tmux` on `command-center`, export `TERM=xterm-256color` first because `xterm-kitty` is not recognized there.
 - The screen launcher log already includes queue status while the job is in Step 2 (`WAITING_FOR_RESOURCES` / `ACTIVE`), so separate queue polling is only needed for independent verification or after launcher disconnects.
 - Current stable recovery pattern: if `sinkhorn-screen-queue` already exists in `us-east5-a` and is still `WAITING_FOR_RESOURCES`, do not replace it with new queue experiments. Kill any stray helper wrapper, keep the canonical queue, and restart only the detached `scripts/tpu_sinkhorn_screen.sh` launcher so it reuses the existing queue.
+- For promoted runs, the default paper-facing launch should now be:
+  - `RUN_FLASH_BASELINE=0 ./scripts/tpu_multi_zone_race.sh ./scripts/tpu_auto_run.sh`
+  This keeps the handoff invariant checks, avoids chained Flash by default, and makes the promoted Sinkhorn run a standalone artifact.
 
 ## TPU Workflow Order
 - Preferred order is staged, not monolithic:
@@ -109,4 +120,6 @@
 - Given the completed **2026-04-25** screen, the operational recommendation is now:
   - do **not** rerun the whole screen immediately;
   - do **not** block the paper on fixing `narrow128_diag` / scout ablations;
-  - next cloud priority should be promotion of the best balanced candidate (`k2_eps1`) and the best dustbin candidate (currently `muot_dustbin_hybrid`, slightly better CE than `muot_dustbin_mono`) into longer-budget runs.
+  - use the completed **2026-04-25** short screen as the present empirical basis for paper consolidation;
+  - promotion priority is the best balanced candidate (`k2_eps1`) first, then the best dustbin candidate (currently `muot_dustbin_hybrid`, slightly better CE than `muot_dustbin_mono`);
+  - if billing or project write access ever locks again, stop launching new queues immediately and reconcile any already-`ACTIVE` resource before attempting recovery.

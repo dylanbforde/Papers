@@ -81,7 +81,7 @@ This script:
 
 ### 5. Promote the winning config into the full run
 
-Set the winning Sinkhorn config via environment variables, then launch the automated production run:
+Set the winning Sinkhorn config via environment variables, then launch the automated production run. Prefer the multi-zone race wrapper here too, so the first zone to activate hands off the already-provisioned queue/node pair to `tpu_auto_run.sh`:
 
 ```bash
 SINKHORN_REFINE_STEPS=2 \
@@ -91,15 +91,29 @@ GAP_MODE=none \
 TRAIN_RECONSTRUCTION_WEIGHT=1.0 \
 TRAIN_SPARSE_CE_WEIGHT=0.0 \
 TRAIN_MONOTONICITY_WEIGHT=0.0 \
-./scripts/tpu_auto_run.sh
+RUN_FLASH_BASELINE=0 \
+./scripts/tpu_multi_zone_race.sh ./scripts/tpu_auto_run.sh
 ```
 
 This script:
-- waits for `sinkhorn-queue`,
+- waits for a zoned `sinkhorn-queue-<zone>` winner,
 - uploads the current local source snapshot,
 - fetches Pfam shards from GCS,
 - verifies the JAX TPU runtime before training,
-- runs Sinkhorn first, then Flash, with GCS checkpointing enabled.
+- runs Sinkhorn first, then optionally Flash, with GCS checkpointing enabled.
+
+Useful overrides:
+
+```bash
+RUN_FLASH_BASELINE=1 ./scripts/tpu_multi_zone_race.sh ./scripts/tpu_auto_run.sh
+RACE_ZONES="us-east5-a us-east5-b" ./scripts/tpu_multi_zone_race.sh ./scripts/tpu_auto_run.sh
+RESOURCE_ID=my-promoted-queue NODE_ID=my-promoted-node ./scripts/tpu_auto_run.sh
+```
+
+Important launch invariants:
+- When `tpu_auto_run.sh` is launched from `tpu_multi_zone_race.sh`, it now requires the handed-off queued resource to already exist and already be `ACTIVE`.
+- It also checks that the handed-off `RESOURCE_ID` is bound to the handed-off `NODE_ID` before doing any TPU work.
+- If either invariant fails, the launcher exits instead of silently creating a second canonical queue.
 
 Production checkpoints land under:
 
@@ -131,3 +145,17 @@ gcloud compute tpus queued-resources describe sinkhorn-screen-queue \
 
 - The automation scripts use `git archive` from your local checkout. You do not need to clone from GitHub on the TPU VM.
 - `scripts/tpu_sinkhorn_screen.sh` now preserves screen logs/checkpoints before teardown. Review the synced GCS artifacts before promoting a config.
+- `RUN_FLASH_BASELINE=0` is the preferred default when the goal is a promoted Sinkhorn-only run for the paper. Use `RUN_FLASH_BASELINE=1` only when you deliberately want the chained Flash baseline in the same launcher session.
+- If a promoted run is already bound to an `ACTIVE` queue, verify the pairing before restarting:
+
+```bash
+gcloud compute tpus queued-resources describe sinkhorn-queue-us-east5-a \
+  --project=sinkhorn-neurips \
+  --zone=us-east5-a \
+  --format="yaml(name,state.state,tpu.nodeSpec)"
+
+gcloud compute tpus tpu-vm describe sinkhorn-benchmark-cluster-us-east5-a \
+  --project=sinkhorn-neurips \
+  --zone=us-east5-a \
+  --format="yaml(name,state,queuedResource)"
+```

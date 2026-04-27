@@ -226,6 +226,8 @@ export BUCKET_NAME
 export ZONE="$WINNER_ZONE"
 export RESOURCE_ID="$WINNER_RESOURCE_ID"
 export NODE_ID="$WINNER_NODE_ID"
+export REQUIRE_EXISTING_RESOURCE=1
+export REQUIRE_ACTIVE_RESOURCE=1
 
 echo "[$(date)] Handing off to $LAUNCHER with winner zone $WINNER_ZONE ..."
 exec bash "$LAUNCHER" "$@"

@@ -1,5 +1,5 @@
 # Fdb version 4
-["pdflatex"] 1777156108.44537 "innovation_track.tex" "innovation_track.pdf" "innovation_track" 1777156109.30298 0
+["pdflatex"] 1777201361.19866 "innovation_track.tex" "innovation_track.pdf" "innovation_track" 1777201362.0208 0
   "/nix/store/002ql87s83nfw55mm428b05bc6625vgq-texlive-combined-medium-2025.20250703/share/texmf-var/fonts/map/pdftex/updmap/pdftex.map" 1 366585 a4d72b8d7b4a7b81c44f094465ffb43e ""
   "/nix/store/002ql87s83nfw55mm428b05bc6625vgq-texlive-combined-medium-2025.20250703/share/texmf-var/web2c/pdftex/pdflatex.fmt" 1 3398174 2041bab88e410fccdd0eb7af15abfa0e ""
   "/nix/store/002ql87s83nfw55mm428b05bc6625vgq-texlive-combined-medium-2025.20250703/share/texmf-var/web2c/texmf.cnf" 1 44519 8034b9bcad26bd36f2fdf4752145c840 ""
@@ -133,9 +133,9 @@
   "/nix/store/qsq67hcdwsr2j2q58wlcv4hhjk7jy97m-texlive-combined-medium-2025.20250703-texmfdist/tex/latex/tools/calc.sty" 1 10374 2ffd4f27c7f90b8a300608069537743c ""
   "/nix/store/qsq67hcdwsr2j2q58wlcv4hhjk7jy97m-texlive-combined-medium-2025.20250703-texmfdist/tex/latex/url/url.sty" 1 12796 8edb7d69a20b857904dd0ea757c14ec9 ""
   "/nix/store/qsq67hcdwsr2j2q58wlcv4hhjk7jy97m-texlive-combined-medium-2025.20250703-texmfdist/tex/latex/xcolor/xcolor.sty" 1 55384 b454dec21c2d9f45ec0b793f0995b992 ""
-  "innovation_track.aux" 1777156109.13645 3193 203df35392a336ec5d3df56b2eb75fd3 "pdflatex"
-  "innovation_track.out" 1777156109.13745 2432 2d708f820cb2239113516f397ed3beac "pdflatex"
-  "innovation_track.tex" 1777156078.41453 39233 a13aab4d74188b5dd0f35b5a8979542b ""
+  "innovation_track.aux" 1777201361.87868 3265 540631f02906311a4b85928a1d13d903 "pdflatex"
+  "innovation_track.out" 1777201361.87968 2213 aca37474b8816f5ee0cd11fd7eb82ee4 "pdflatex"
+  "innovation_track.tex" 1777201351.89936 39470 f4791dc6ef7029997fe89bc16745c47d ""
   (generated)
   "innovation_track.aux"
   "innovation_track.log"
