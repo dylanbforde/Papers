@@ -42,6 +42,7 @@ Official sources:
 - Official style file: `paper_neurips/neurips_2026.sty`
 - Anonymized supplementary code ZIP: `paper_neurips/neurips2026_package/neurips2026_supplementary_code.zip`
 - Final submission package folder: `paper_neurips/neurips2026_package/`
+- Do not upload `paper_neurips/neurips2026_package/source/`; it is only an internal build snapshot and contains non-anonymous source files.
 
 ## Recommended OpenReview metadata
 

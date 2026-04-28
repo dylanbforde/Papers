@@ -41,7 +41,11 @@ Official sources:
 - Filled checklist: `paper_neurips/neurips_checklist.tex`
 - Official style file: `paper_neurips/neurips_2026.sty`
 - Anonymized supplementary code ZIP: `paper_neurips/neurips2026_package/neurips2026_supplementary_code.zip`
+- Supplementary ZIP contents: `ot_kernel.py` and `train_sinkhorn_pfam.py`
 - Final submission package folder: `paper_neurips/neurips2026_package/`
+- Do not upload `paper_neurips/neurips2026_package/source/`; it is only an internal build snapshot and contains non-anonymous source files.
+
+The supplementary code is anonymized and Sinkhorn-only. It intentionally excludes cloud launchers, GCP/GCS paths, checkpoints, logs, data shards, embedding generation, and FlashAttention/FlashSinkhorn baseline branches.
 
 ## Recommended OpenReview metadata
 

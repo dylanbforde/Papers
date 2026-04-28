@@ -747,7 +747,7 @@ def sinkhorn_attention(Q, K, V, n_iters=15, band_width=None, q_mask=None, k_mask
     if gradient_mode == 'exact_autodiff':
         return exact_sinkhorn_attention(Q, K, V, n_iters=n_iters, band_width=band_width, q_mask=q_mask, k_mask=k_mask, refine_steps=refine_steps, refine_tolerance=refine_tolerance, epsilon=epsilon, epsilon_scaling_steps=epsilon_scaling_steps, epsilon_scaling_factor=epsilon_scaling_factor, support_reconstruction=support_reconstruction)
     if gradient_mode in ('tail_refinement', 'custom_vjp'):
-        return pallas_flash_sinkhorn(Q, K, V, n_iters=n_iters, band_width=band_width, q_mask=q_mask, k_mask=k_mask, refine_steps=refine_steps, refine_tolerance=refine_tolerance, epsilon=epsilon, epsilon_scaling_steps=epsilon_scaling_steps, epsilon_scaling_factor=epsilon_scaling_factor, support_reconstruction=support_reconstruction)
+        return pallas_sinkhorn_tail_refinement(Q, K, V, n_iters=n_iters, band_width=band_width, q_mask=q_mask, k_mask=k_mask, refine_steps=refine_steps, refine_tolerance=refine_tolerance, epsilon=epsilon, epsilon_scaling_steps=epsilon_scaling_steps, epsilon_scaling_factor=epsilon_scaling_factor, support_reconstruction=support_reconstruction)
     raise ValueError(f'Unsupported gradient_mode={gradient_mode!r}.')
 
 def _pallas_refinement_bwd_k2(band_width, epsilon, support_reconstruction, res, g):
@@ -949,14 +949,14 @@ def pallas_sinkhorn_bwd_full(n_iters, band_width, refine_steps, refine_tolerance
         dQ, dK, dV = pullback(g)
     return (dQ, dK, dV, None, None)
 
-def _pallas_flash_sinkhorn_fwd(Q, K, V, n_iters=15, band_width=None, q_mask=None, k_mask=None, refine_steps=2, refine_tolerance=None, epsilon=1.0, epsilon_scaling_steps=0, epsilon_scaling_factor=2.0, support_reconstruction='none'):
+def _pallas_sinkhorn_tail_refinement_fwd(Q, K, V, n_iters=15, band_width=None, q_mask=None, k_mask=None, refine_steps=2, refine_tolerance=None, epsilon=1.0, epsilon_scaling_steps=0, epsilon_scaling_factor=2.0, support_reconstruction='none'):
     return _sinkhorn_tail_forward_impl(Q, K, V, n_iters=n_iters, band_width=band_width, q_mask=q_mask, k_mask=k_mask, refine_steps=refine_steps, refine_tolerance=refine_tolerance, epsilon=epsilon, epsilon_scaling_steps=epsilon_scaling_steps, epsilon_scaling_factor=epsilon_scaling_factor, apply_mode='pallas', support_reconstruction=support_reconstruction)
 
 @partial(jax.custom_vjp, nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12))
-def pallas_flash_sinkhorn(Q, K, V, n_iters=15, band_width=None, q_mask=None, k_mask=None, refine_steps=2, refine_tolerance=None, epsilon=1.0, epsilon_scaling_steps=0, epsilon_scaling_factor=2.0, support_reconstruction='none'):
-    out_O, _ = _pallas_flash_sinkhorn_fwd(Q, K, V, n_iters=n_iters, band_width=band_width, q_mask=q_mask, k_mask=k_mask, refine_steps=refine_steps, refine_tolerance=refine_tolerance, epsilon=epsilon, epsilon_scaling_steps=epsilon_scaling_steps, epsilon_scaling_factor=epsilon_scaling_factor, support_reconstruction=support_reconstruction)
+def pallas_sinkhorn_tail_refinement(Q, K, V, n_iters=15, band_width=None, q_mask=None, k_mask=None, refine_steps=2, refine_tolerance=None, epsilon=1.0, epsilon_scaling_steps=0, epsilon_scaling_factor=2.0, support_reconstruction='none'):
+    out_O, _ = _pallas_sinkhorn_tail_refinement_fwd(Q, K, V, n_iters=n_iters, band_width=band_width, q_mask=q_mask, k_mask=k_mask, refine_steps=refine_steps, refine_tolerance=refine_tolerance, epsilon=epsilon, epsilon_scaling_steps=epsilon_scaling_steps, epsilon_scaling_factor=epsilon_scaling_factor, support_reconstruction=support_reconstruction)
     return out_O
-pallas_flash_sinkhorn.defvjp(_pallas_flash_sinkhorn_fwd, pallas_sinkhorn_bwd_full)
+pallas_sinkhorn_tail_refinement.defvjp(_pallas_sinkhorn_tail_refinement_fwd, pallas_sinkhorn_bwd_full)
 
 def _jax_ref_compute_next_uv(S, u_in, v_in):
     S_v = S + v_in[..., None, :]

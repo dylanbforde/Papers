@@ -1,4 +1,4 @@
-\begin{thebibliography}{8}
+\begin{thebibliography}{12}
 \providecommand{\natexlab}[1]{#1}
 \providecommand{\url}[1]{\texttt{#1}}
 \expandafter\ifx\csname urlstyle\endcsname\relax
@@ -15,12 +15,37 @@ Shaojie Bai, J~Zico Kolter, and Vladlen Koltun.
 Iz~Beltagy, Matthew~E. Peters, and Arman Cohan.
 \newblock Longformer: The long-document transformer.
 \newblock \emph{arXiv preprint arXiv:2004.05150}, 2020.
+\newblock \doi{10.48550/arXiv.2004.05150}.
+
+\bibitem[Birkhoff(1957)]{birkhoff1957extensions}
+Garrett Birkhoff.
+\newblock Extensions of {J}entzsch's theorem.
+\newblock \emph{Transactions of the American Mathematical Society}, 85\penalty0
+  (1):\penalty0 219--227, 1957.
+\newblock \doi{10.1090/S0002-9947-1957-0087058-6}.
+
+\bibitem[Bushell(1973)]{bushell1973hilbert}
+P.~J. Bushell.
+\newblock Hilbert's metric and positive contraction mappings in a {B}anach
+  space.
+\newblock \emph{Archive for Rational Mechanics and Analysis}, 52\penalty0
+  (4):\penalty0 330--338, 1973.
+\newblock \doi{10.1007/BF00247467}.
 
 \bibitem[Cuturi(2013)]{cuturi2013sinkhorn}
 Marco Cuturi.
 \newblock Sinkhorn distances: Lightspeed computation of optimal transport.
 \newblock In \emph{Advances in Neural Information Processing Systems},
   volume~26, 2013.
+
+\bibitem[Lin et~al.(2023)Lin, Akin, Rao, Hie, Zhu, Lu, Smetanin, Verkuil,
+  Kabeli, Shmueli, et~al.]{lin2023evolutionary}
+Zeming Lin, Halil Akin, Roshan Rao, Brian Hie, Zhongkai Zhu, Wenting Lu, Nikita
+  Smetanin, Robert Verkuil, Ori Kabeli, Yaniv Shmueli, et~al.
+\newblock Evolutionary-scale prediction of atomic-level protein structure with
+  a language model.
+\newblock \emph{Science}, 379\penalty0 (6637):\penalty0 1123--1130, 2023.
+\newblock \doi{10.1126/science.ade2574}.
 
 \bibitem[Luise et~al.(2018)Luise, Rudi, Pontil, and
   Ciliberto]{luise2018differential}
@@ -30,24 +55,36 @@ Giulia Luise, Alessandro Rudi, Massimiliano Pontil, and Carlo Ciliberto.
 \newblock In \emph{Advances in Neural Information Processing Systems},
   volume~31, 2018.
 
+\bibitem[Mistry et~al.(2021)Mistry, Chuguransky, Williams, Qureshi, Salazar,
+  et~al.]{mistry2021pfam}
+Jaina Mistry, Sara Chuguransky, Lowri Williams, Matloob Qureshi, Gustavo~A
+  Salazar, et~al.
+\newblock Pfam: The protein families database in 2021.
+\newblock \emph{Nucleic Acids Research}, 49\penalty0 (D1):\penalty0 D412--D419,
+  2021.
+\newblock \doi{10.1093/nar/gkaa913}.
+
 \bibitem[Peyr{\'e} and Cuturi(2019)]{peyre2019computational}
 Gabriel Peyr{\'e} and Marco Cuturi.
-\newblock Computational optimal transport.
+\newblock Computational optimal transport: With applications to data science.
 \newblock \emph{Foundations and Trends in Machine Learning}, 11\penalty0
   (5-6):\penalty0 355--607, 2019.
+\newblock \doi{10.1561/2200000073}.
 
 \bibitem[Smith and Waterman(1981)]{smith1981identification}
 Temple~F Smith and Michael~S Waterman.
 \newblock Identification of common molecular subsequences.
 \newblock \emph{Journal of Molecular Biology}, 147\penalty0 (1):\penalty0
   195--197, 1981.
+\newblock \doi{10.1016/0022-2836(81)90087-5}.
 
 \bibitem[Ye et~al.(2026)Ye, Li, Yu, Chang, Chu, and
-  Wertheimer]{flashsinkhorn2024}
+  Wertheimer]{flashsinkhorn2026}
 Felix X.-F. Ye, Xingjie Li, An~Yu, Ming-Ching Chang, Linsong Chu, and Davis
   Wertheimer.
 \newblock Flash{S}inkhorn: {IO}-aware entropic optimal transport.
 \newblock \emph{arXiv preprint arXiv:2602.03067}, 2026.
+\newblock \doi{10.48550/arXiv.2602.03067}.
 
 \bibitem[Zaheer et~al.(2020)Zaheer, Guruganesh, Dubey, Ainslie, Alberti,
   Onta{\~n}{\'o}n, Pham, Ravula, Wang, Yang, and Ahmed]{zaheer2020bigbird}

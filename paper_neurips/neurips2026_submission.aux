@@ -6,7 +6,7 @@
 \citation{cuturi2013sinkhorn,peyre2019computational}
 \citation{luise2018differential,bai2019deep}
 \@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{1}{section.1}\protected@file@percent }
-\citation{flashsinkhorn2024}
+\citation{flashsinkhorn2026}
 \citation{beltagy2020longformer}
 \citation{zaheer2020bigbird}
 \@writefile{toc}{\contentsline {paragraph}{Gap-aware bridge.}{2}{section*.1}\protected@file@percent }
@@ -16,55 +16,79 @@
 \@writefile{toc}{\contentsline {subsection}{\numberline {2.2}Balanced Tail Refinement and the $R=2$ Staircase}{3}{subsection.2.2}\protected@file@percent }
 \newlabel{prop:tail_adjoint_main}{{1}{3}{Exact Fixed-Depth Tail Adjoint}{proposition.1}{}}
 \newlabel{eq:generic_score_vjp_unified}{{7}{3}{Exact Fixed-Depth Tail Adjoint}{equation.7}{}}
-\newlabel{thm:single_base_main}{{2}{3}{Single-Base-Plan Reconstruction Identity}{proposition.2}{}}
-\newlabel{eq:r2_expanded_vjp}{{8}{3}{Balanced Tail Refinement and the \texorpdfstring {$R=2$}{R=2} Staircase}{equation.8}{}}
+\newlabel{thm:single_base_main}{{2}{3}{One-Reference-Tile \texorpdfstring {$R=2$}{R=2} Backward Schedule}{proposition.2}{}}
 \@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces The $R=2$ staircase. Only the base plan $P^{(2,2)}$ is materialized; the remaining three plans are reconstructed from dual differences by row and column rescaling.}}{4}{figure.1}\protected@file@percent }
 \newlabel{fig:staircase}{{1}{4}{The $R=2$ staircase. Only the base plan $P^{(2,2)}$ is materialized; the remaining three plans are reconstructed from dual differences by row and column rescaling}{figure.1}{}}
+\newlabel{eq:r2_expanded_vjp}{{8}{4}{Balanced Tail Refinement and the \texorpdfstring {$R=2$}{R=2} Staircase}{equation.8}{}}
 \@writefile{toc}{\contentsline {paragraph}{Why $R=2$.}{4}{section*.3}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsection}{\numberline {2.3}Gap-Aware Dustbin Bridge}{4}{subsection.2.3}\protected@file@percent }
 \newlabel{thm:dustbin_aug}{{3}{4}{Dustbin Augmentation Bridge}{proposition.3}{}}
 \newlabel{cor:dustbin_r2}{{1}{4}{Exact \texorpdfstring {$R=2$}{R=2} Adjoint on the Augmented State Space}{corollary.1}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {2.4}A Local Surrogate-Bias Bound}{4}{subsection.2.4}\protected@file@percent }
+\citation{birkhoff1957extensions,bushell1973hilbert}
 \newlabel{thm:surrogate_bias}{{1}{5}{Local Surrogate-Bias Bound}{theorem.1}{}}
-\@writefile{toc}{\contentsline {section}{\numberline {3}Validation and Experiments}{5}{section.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Exactness Validation of the Masked Surrogate}{5}{subsection.3.1}\protected@file@percent }
-\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Maximum absolute gradient deviations between the optimized masked $R=2$ kernel and exact autodiff through the same centered surrogate.}}{5}{table.1}\protected@file@percent }
-\newlabel{tab:exactness_unified}{{1}{5}{Maximum absolute gradient deviations between the optimized masked $R=2$ kernel and exact autodiff through the same centered surrogate}{table.1}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Short Pfam Screen on TPU v6e-8}{5}{subsection.3.2}\protected@file@percent }
-\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Short TPU v6e-8 Pfam screen across the four core balanced and dustbin-augmented configurations.}}{6}{table.2}\protected@file@percent }
-\newlabel{tab:screen_unified}{{2}{6}{Short TPU v6e-8 Pfam screen across the four core balanced and dustbin-augmented configurations}{table.2}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Promoted Balanced Run}{6}{subsection.3.3}\protected@file@percent }
-\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Held-out Pfam test-shard evaluation for the promoted balanced run.}}{6}{table.3}\protected@file@percent }
-\newlabel{tab:heldout_promoted}{{3}{6}{Held-out Pfam test-shard evaluation for the promoted balanced run}{table.3}{}}
-\@writefile{toc}{\contentsline {section}{\numberline {4}Discussion}{6}{section.4}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Limitations and scope.}{6}{section*.4}\protected@file@percent }
+\newlabel{prop:projective_contraction}{{4}{5}{Projective Sinkhorn Contraction Certificate}{proposition.4}{}}
+\newlabel{prop:bias_certificate}{{5}{6}{A Posteriori Bias Certificate}{proposition.5}{}}
+\newlabel{cor:certified_tail_depth}{{2}{6}{Certified Tail-Depth Selection}{corollary.2}{}}
+\newlabel{prop:orbit_certificate}{{6}{6}{Transport-Orbit Calculus}{proposition.6}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Maximum absolute gradient deviations between the optimized masked $R=2$ kernel and exact autodiff through the same centered surrogate.}}{7}{table.1}\protected@file@percent }
+\newlabel{tab:exactness_unified}{{1}{7}{Maximum absolute gradient deviations between the optimized masked $R=2$ kernel and exact autodiff through the same centered surrogate}{table.1}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {3}Validation and Experiments}{7}{section.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Exactness Validation of the Masked Surrogate}{7}{subsection.3.1}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces A posteriori surrogate-bias certificate. The residual is the maximum absolute difference between the actual full-vs-stopped gradient gap and the certified base-solve VJP $D_x z_T^\top \eta _R$.}}{7}{table.2}\protected@file@percent }
+\newlabel{tab:bias_certificate}{{2}{7}{A posteriori surrogate-bias certificate. The residual is the maximum absolute difference between the actual full-vs-stopped gradient gap and the certified base-solve VJP $D_x z_T^\top \eta _R$}{table.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Short Pfam Screen on TPU v6e-8}{7}{subsection.3.2}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Short TPU v6e-8 Pfam screen across the four core balanced and dustbin-augmented configurations.}}{8}{table.3}\protected@file@percent }
+\newlabel{tab:screen_unified}{{3}{8}{Short TPU v6e-8 Pfam screen across the four core balanced and dustbin-augmented configurations}{table.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Promoted Balanced Run}{8}{subsection.3.3}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {4}{\ignorespaces Held-out Pfam test-shard evaluation for the promoted balanced run.}}{8}{table.4}\protected@file@percent }
+\newlabel{tab:heldout_promoted}{{4}{8}{Held-out Pfam test-shard evaluation for the promoted balanced run}{table.4}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {4}Discussion}{8}{section.4}\protected@file@percent }
 \bibstyle{plainnat}
 \bibdata{references}
 \bibcite{bai2019deep}{{1}{2019}{{Bai et~al.}}{{Bai, Kolter, and Koltun}}}
 \bibcite{beltagy2020longformer}{{2}{2020}{{Beltagy et~al.}}{{Beltagy, Peters, and Cohan}}}
-\bibcite{cuturi2013sinkhorn}{{3}{2013}{{Cuturi}}{{}}}
-\bibcite{luise2018differential}{{4}{2018}{{Luise et~al.}}{{Luise, Rudi, Pontil, and Ciliberto}}}
-\bibcite{peyre2019computational}{{5}{2019}{{Peyr{\'e} and Cuturi}}{{}}}
-\bibcite{smith1981identification}{{6}{1981}{{Smith and Waterman}}{{}}}
-\bibcite{flashsinkhorn2024}{{7}{2026}{{Ye et~al.}}{{Ye, Li, Yu, Chang, Chu, and Wertheimer}}}
-\bibcite{zaheer2020bigbird}{{8}{2020}{{Zaheer et~al.}}{{Zaheer, Guruganesh, Dubey, Ainslie, Alberti, Onta{\~n}{\'o}n, Pham, Ravula, Wang, Yang, and Ahmed}}}
-\@writefile{toc}{\contentsline {paragraph}{Broader context.}{7}{section*.5}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {5}Conclusion}{7}{section.5}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {A}Balanced Tail-Refinement Proofs}{8}{appendix.A}\protected@file@percent }
-\newlabel{app:proofs}{{A}{8}{Balanced Tail-Refinement Proofs}{appendix.A}{}}
-\@writefile{toc}{\contentsline {paragraph}{Notation.}{8}{section*.7}\protected@file@percent }
-\newlabel{eq:u_update_app_unified}{{9}{8}{Notation}{equation.9}{}}
-\newlabel{eq:v_update_app_unified}{{10}{8}{Notation}{equation.10}{}}
-\@writefile{toc}{\contentsline {paragraph}{Centering map.}{8}{section*.8}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Proof of Proposition~\ref {prop:tail_adjoint_main}.}{9}{section*.9}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Proof of Proposition~\ref {thm:single_base_main}.}{9}{section*.10}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {B}Proofs for the Dustbin Bridge and Surrogate Bias}{9}{appendix.B}\protected@file@percent }
-\newlabel{app:bias}{{B}{9}{Proofs for the Dustbin Bridge and Surrogate Bias}{appendix.B}{}}
-\@writefile{toc}{\contentsline {paragraph}{Proof of Proposition~\ref {thm:dustbin_aug}.}{9}{section*.11}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Proof of Corollary~\ref {cor:dustbin_r2}.}{9}{section*.12}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Proof of Theorem~\ref {thm:surrogate_bias}.}{9}{section*.13}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {C}Experimental Protocol Notes}{10}{appendix.C}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {D}Kernel-Oriented Pseudocode}{10}{appendix.D}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Balanced stopped-base and $R=2$ tail.}{10}{section*.14}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Dustbin-augmented bridge.}{11}{section*.15}\protected@file@percent }
-\gdef \@abspage@last{13}
+\bibcite{birkhoff1957extensions}{{3}{1957}{{Birkhoff}}{{}}}
+\bibcite{bushell1973hilbert}{{4}{1973}{{Bushell}}{{}}}
+\bibcite{cuturi2013sinkhorn}{{5}{2013}{{Cuturi}}{{}}}
+\bibcite{lin2023evolutionary}{{6}{2023}{{Lin et~al.}}{{Lin, Akin, Rao, Hie, Zhu, Lu, Smetanin, Verkuil, Kabeli, Shmueli, et~al.}}}
+\bibcite{luise2018differential}{{7}{2018}{{Luise et~al.}}{{Luise, Rudi, Pontil, and Ciliberto}}}
+\bibcite{mistry2021pfam}{{8}{2021}{{Mistry et~al.}}{{Mistry, Chuguransky, Williams, Qureshi, Salazar, et~al.}}}
+\bibcite{peyre2019computational}{{9}{2019}{{Peyr{\'e} and Cuturi}}{{}}}
+\bibcite{smith1981identification}{{10}{1981}{{Smith and Waterman}}{{}}}
+\bibcite{flashsinkhorn2026}{{11}{2026}{{Ye et~al.}}{{Ye, Li, Yu, Chang, Chu, and Wertheimer}}}
+\@writefile{toc}{\contentsline {paragraph}{Limitations and scope.}{9}{section*.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Broader context.}{9}{section*.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5}Conclusion}{9}{section.5}\protected@file@percent }
+\bibcite{zaheer2020bigbird}{{12}{2020}{{Zaheer et~al.}}{{Zaheer, Guruganesh, Dubey, Ainslie, Alberti, Onta{\~n}{\'o}n, Pham, Ravula, Wang, Yang, and Ahmed}}}
+\@writefile{toc}{\contentsline {section}{\numberline {A}Balanced Tail-Refinement Proofs}{11}{appendix.A}\protected@file@percent }
+\newlabel{app:proofs}{{A}{11}{Balanced Tail-Refinement Proofs}{appendix.A}{}}
+\@writefile{toc}{\contentsline {paragraph}{Notation.}{11}{section*.7}\protected@file@percent }
+\newlabel{eq:u_update_app_unified}{{9}{11}{Notation}{equation.9}{}}
+\newlabel{eq:v_update_app_unified}{{10}{11}{Notation}{equation.10}{}}
+\@writefile{toc}{\contentsline {paragraph}{Centering map.}{11}{section*.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Proof of Proposition~\ref {prop:tail_adjoint_main}.}{12}{section*.9}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Proof of Proposition~\ref {thm:single_base_main}.}{12}{section*.10}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {B}Proofs for the Dustbin Bridge and Surrogate Bias}{12}{appendix.B}\protected@file@percent }
+\newlabel{app:bias}{{B}{12}{Proofs for the Dustbin Bridge and Surrogate Bias}{appendix.B}{}}
+\@writefile{toc}{\contentsline {paragraph}{Proof of Proposition~\ref {thm:dustbin_aug}.}{12}{section*.11}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Proof of Corollary~\ref {cor:dustbin_r2}.}{13}{section*.12}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Proof of Theorem~\ref {thm:surrogate_bias}.}{13}{section*.13}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Proof of Proposition~\ref {prop:projective_contraction}.}{13}{section*.14}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Proof of Proposition~\ref {prop:bias_certificate}.}{14}{section*.15}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Proof of Corollary~\ref {cor:certified_tail_depth}.}{14}{section*.16}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Proof of Proposition~\ref {prop:orbit_certificate}.}{14}{section*.17}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {C}Experimental Protocol Notes}{14}{appendix.C}\protected@file@percent }
+\newlabel{app:protocol}{{C}{14}{Experimental Protocol Notes}{appendix.C}{}}
+\citation{mistry2021pfam}
+\citation{lin2023evolutionary}
+\@writefile{toc}{\contentsline {paragraph}{Direct four-plan adjoint diagnostic.}{15}{section*.18}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {5}{\ignorespaces Controlled score-adjoint benchmark for direct four-plan materialization versus the one-reference representation. Logical active plan-factor storage is reduced by exactly $4\times $ in all rows: $3.15/0.79$ MB, $7.35/1.84$ MB, and $15.76/3.94$ MB for direct/one-reference respectively. Timings are mean post-compilation CPU times over 20 repetitions.}}{15}{table.5}\protected@file@percent }
+\newlabel{tab:four_plan_benchmark}{{5}{15}{Controlled score-adjoint benchmark for direct four-plan materialization versus the one-reference representation. Logical active plan-factor storage is reduced by exactly $4\times $ in all rows: $3.15/0.79$ MB, $7.35/1.84$ MB, and $15.76/3.94$ MB for direct/one-reference respectively. Timings are mean post-compilation CPU times over 20 repetitions}{table.5}{}}
+\@writefile{toc}{\contentsline {paragraph}{Projective contraction diagnostics on Pfam checkpoints.}{15}{section*.19}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {D}Kernel-Oriented Pseudocode}{15}{appendix.D}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Balanced stopped-base and $R=2$ tail.}{15}{section*.20}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {6}{\ignorespaces Production-checkpoint projective contraction diagnostics on local Pfam test shards. The exact projective certificate is computed from the active block score matrix; the range-only bound is the simpler sufficient bound stated in Proposition~\ref {prop:projective_contraction}.}}{16}{table.6}\protected@file@percent }
+\newlabel{tab:pfam_projective_certificate}{{6}{16}{Production-checkpoint projective contraction diagnostics on local Pfam test shards. The exact projective certificate is computed from the active block score matrix; the range-only bound is the simpler sufficient bound stated in Proposition~\ref {prop:projective_contraction}}{table.6}{}}
+\@writefile{toc}{\contentsline {paragraph}{Dustbin-augmented bridge.}{16}{section*.21}\protected@file@percent }
+\gdef \@abspage@last{19}
