@@ -763,6 +763,8 @@ def dq_kernel_multi(
 
     init_state = (jnp.zeros_like(q_block),)
 
+    # MACH ⚡: Pre-scale the query block outside the loop to change O(M*N) scaling inside the einsum to O(M*D). Readability sacrificed for FLOPs.
+    q_block_scaled = q_block * scale
 
     def body_fn(i, state):
         (dq_acc,) = state
@@ -793,7 +795,7 @@ def dq_kernel_multi(
             valid = q_mask_m[:, None] & k_mask_n[None, :]
 
             # Score matrix
-            s_block = jnp.einsum("md,nd->mn", q_block, k_block) * scale
+            s_block = jnp.einsum("md,nd->mn", q_block_scaled, k_block)
             P22 = jnp.where(valid, safe_exp(s_block + u2_m[:, None] + v2_n[None, :]), 0.0)
             z_block = jnp.einsum("me,ne->mn", do_block, v_mat_block)
 
@@ -850,6 +852,8 @@ def dk_dv_kernel_multi(
 
     init_state = (jnp.zeros_like(k_block), jnp.zeros_like(v_mat_block))
 
+    # MACH ⚡: Pre-scale the key block outside the loop to change O(M*N) scaling inside the einsum to O(N*D). Readability sacrificed for FLOPs.
+    k_block_scaled = k_block * scale
 
     def body_fn(i, state):
         dk_acc, dv_acc = state
@@ -878,7 +882,7 @@ def dk_dv_kernel_multi(
             valid = k_mask_n[:, None] & q_mask_m[None, :]
 
             # Score matrix
-            s_block_T = jnp.einsum("nd,md->nm", k_block, q_block) * scale
+            s_block_T = jnp.einsum("nd,md->nm", k_block_scaled, q_block)
             P22_T = jnp.where(valid, safe_exp(s_block_T + v2_n[:, None] + u2_m[None, :]), 0.0)
             z_block_T = jnp.einsum("ne,me->nm", v_mat_block, do_block)
             

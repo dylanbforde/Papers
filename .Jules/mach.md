@@ -9,3 +9,6 @@
 ## 2026-04-09 - [Hoisting Loop-Invariant Operations from Inner Loops]
 **Learning:** In nested multi-transport dS equations, potential arrays corresponding to the block index of the outer loop (e.g., `u1_m`, `u2_m` when outer looping over `m`) are invariant to the inner unrolled loop. Leaving exponentiations of these invariant arrays inside the inner loop wastes cycles recomputing the exact same array operations repeatedly.
 **Action:** Always inspect the indices of the inner unrolled loops in Pallas kernels. Hoist any operations (especially expensive ones like `jnp.exp`) that depend strictly on the outer loop block index out of the inner loop, minimizing redundant compute overhead.
+## 2026-04-28 - Pre-scaling Attention Blocks in Multi-Transport Kernels
+**Learning:** In JAX Pallas custom kernels, XLA does not automatically factor and hoist mathematically equivalent scaling operations out of unrolled inner loops across the `pl.pallas_call` boundary. O(M*N) scaling inside einsums starves compute cycles.
+**Action:** Always pre-scale query and key blocks by constant factors (like 1/sqrt(D)) outside of inner loops to reduce scaling FLOPs from O(M*N) to O(M*D) or O(N*D).
