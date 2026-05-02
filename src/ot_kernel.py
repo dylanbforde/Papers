@@ -603,7 +603,9 @@ def tile_sinkhorn_kernel(q_ref, k_ref, v_ref, u_ref, v_pot_ref, q_mask_ref, k_ma
     q_mask = q_mask_ref[..., 0]
     k_mask = k_mask_ref[..., 0]
     scale = scale_ref[0]
-    logits = jnp.dot(q, k.T) * scale
+    # MACH ⚡: Pre-scaled query block before attention dot product to replace O(M*N) scalar multiplications with O(M*D).
+    q_scaled = q * scale
+    logits = jnp.dot(q_scaled, k.T)
     log_alpha = logits + u[:, None] + v_pot[None, :]
     log_alpha = jnp.where(k_mask[None, :], log_alpha, -jnp.inf)
     out = jnp.dot(_exp_for_tpu(log_alpha), v)
