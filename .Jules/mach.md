@@ -9,3 +9,6 @@
 ## 2026-04-09 - [Hoisting Loop-Invariant Operations from Inner Loops]
 **Learning:** In nested multi-transport dS equations, potential arrays corresponding to the block index of the outer loop (e.g., `u1_m`, `u2_m` when outer looping over `m`) are invariant to the inner unrolled loop. Leaving exponentiations of these invariant arrays inside the inner loop wastes cycles recomputing the exact same array operations repeatedly.
 **Action:** Always inspect the indices of the inner unrolled loops in Pallas kernels. Hoist any operations (especially expensive ones like `jnp.exp`) that depend strictly on the outer loop block index out of the inner loop, minimizing redundant compute overhead.
+## 2026-05-03 - [XLA Compiler Inability to Optimize Pre-Scaling in Pallas]
+**Learning:** The XLA compiler fails to automatically optimize mathematically equivalent constant scaling operations across Pallas boundaries, resulting in redundant O(M*N) scalar operations instead of O(M*D) vector scaling.
+**Action:** Always pre-scale query and key tensor blocks by scalar constants outside of inner loops and before computing dot products/einsums in Pallas kernels to save FLOPs.
