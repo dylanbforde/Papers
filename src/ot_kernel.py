@@ -769,6 +769,8 @@ def dq_kernel_multi(
 
 # MACH ⚡: Hoisted loop-invariant exponentiated potential differences out of the inner unrolled loop.
         exp_du12 = _exp_for_tpu(u1_m - u2_m)
+# MACH ⚡: Pre-scaled query block before the inner loop to replace O(M*N) scaling with O(M*D). Original block retained for dK accumulator einsum.
+        q_block_scaled = q_block * scale
 
         for u_i in range(UNROLL):
             k_idx = i * UNROLL + u_i
@@ -793,7 +795,7 @@ def dq_kernel_multi(
             valid = q_mask_m[:, None] & k_mask_n[None, :]
 
             # Score matrix
-            s_block = jnp.einsum("md,nd->mn", q_block, k_block) * scale
+            s_block = jnp.einsum("md,nd->mn", q_block_scaled, k_block)
             P22 = jnp.where(valid, safe_exp(s_block + u2_m[:, None] + v2_n[None, :]), 0.0)
             z_block = jnp.einsum("me,ne->mn", do_block, v_mat_block)
 
@@ -857,6 +859,8 @@ def dk_dv_kernel_multi(
 # MACH ⚡: Hoisted loop-invariant exponentiated potential differences out of the inner unrolled loop.
         exp_dv12_n = _exp_for_tpu(v1_n - v2_n)
         exp_dv01_n = _exp_for_tpu(v0_n - v1_n)
+# MACH ⚡: Pre-scaled key block before the inner loop to replace O(M*N) scaling with O(N*D). Original block retained for dQ accumulator einsum.
+        k_block_scaled = k_block * scale
 
         for u_i in range(UNROLL):
             m_idx = i * UNROLL + u_i
@@ -878,7 +882,7 @@ def dk_dv_kernel_multi(
             valid = k_mask_n[:, None] & q_mask_m[None, :]
 
             # Score matrix
-            s_block_T = jnp.einsum("nd,md->nm", k_block, q_block) * scale
+            s_block_T = jnp.einsum("nd,md->nm", k_block_scaled, q_block)
             P22_T = jnp.where(valid, safe_exp(s_block_T + v2_n[:, None] + u2_m[None, :]), 0.0)
             z_block_T = jnp.einsum("ne,me->nm", v_mat_block, do_block)
             
