@@ -9,3 +9,7 @@
 ## 2026-04-09 - [Hoisting Loop-Invariant Operations from Inner Loops]
 **Learning:** In nested multi-transport dS equations, potential arrays corresponding to the block index of the outer loop (e.g., `u1_m`, `u2_m` when outer looping over `m`) are invariant to the inner unrolled loop. Leaving exponentiations of these invariant arrays inside the inner loop wastes cycles recomputing the exact same array operations repeatedly.
 **Action:** Always inspect the indices of the inner unrolled loops in Pallas kernels. Hoist any operations (especially expensive ones like `jnp.exp`) that depend strictly on the outer loop block index out of the inner loop, minimizing redundant compute overhead.
+
+## 2026-04-10 - [Hoisting Mathematical Constants from Inner Loops]
+**Learning:** Pre-scaling `q_block` and `k_block` by a scalar value (`scale`) outside of the inner Sinkhorn backward kernel loop reduces the total FLOPs in the score matrix calculations drastically by skipping the repeated scalar multiplication for each inner block processing.
+**Action:** Always pre-scale outer loop variable blocks prior to entering the unrolled Pallas loop whenever mathematically identical and loop-invariant over inner loop variables. Ensure that variables required for standard backpropagation are untouched (keeping original unscaled variables accessible for accumulations) while the scaled blocks are used in the forward passes.
