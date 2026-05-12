@@ -1,0 +1,171 @@
+#!/bin/bash
+# scripts/tpu_k_ablation.sh
+set -euo pipefail
+export CLOUDSDK_CORE_DISABLE_PROMPTS=1
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+PROJECT_ID="${PROJECT_ID:?Set PROJECT_ID to your GCP project id.}"
+ZONE="${ZONE:-us-east5-a}"
+NODE_ID="${NODE_ID:-sinkhorn-k-ablation-cluster}"
+RESOURCE_ID="${RESOURCE_ID:-sinkhorn-k-ablation-queue}"
+RUNTIME_VERSION="${RUNTIME_VERSION:-v2-alpha-tpuv6e}"
+BUCKET_NAME="${BUCKET_NAME:?Set BUCKET_NAME to your GCS bucket name.}"
+GCS_CKPT_ROOT="${GCS_CKPT_ROOT:-gs://$BUCKET_NAME/checkpoints_k_ablation}"
+K_VALUES="${K_VALUES:-2 4}"
+MAX_HOURS_PER_RUN="${MAX_HOURS_PER_RUN:-0.25}"
+TRAIN_RECONSTRUCTION_WEIGHT="${TRAIN_RECONSTRUCTION_WEIGHT:-1.0}"
+TRAIN_SPARSE_CE_WEIGHT="${TRAIN_SPARSE_CE_WEIGHT:-0.0}"
+TRAIN_MONOTONICITY_WEIGHT="${TRAIN_MONOTONICITY_WEIGHT:-0.0}"
+JAX_TPU_INSTALL_SPEC="${JAX_TPU_INSTALL_SPEC:-jax[tpu]}"
+JAX_TPU_PROBE_RETRIES="${JAX_TPU_PROBE_RETRIES:-10}"
+JAX_TPU_PROBE_SLEEP_SECS="${JAX_TPU_PROBE_SLEEP_SECS:-30}"
+ACTIVE_ACCOUNT="${ACTIVE_ACCOUNT:-$(gcloud config get-value account 2>/dev/null || true)}"
+SOURCE_COMMIT="${SOURCE_COMMIT:-$(git -C "$REPO_ROOT" rev-parse HEAD)}"
+SOURCE_ARCHIVE="${SOURCE_ARCHIVE:-/tmp/sinkhorn-aligner-${SOURCE_COMMIT}.tar.gz}"
+REMOTE_SOURCE_ARCHIVE="${REMOTE_SOURCE_ARCHIVE:-/tmp/sinkhorn-aligner-${SOURCE_COMMIT}.tar.gz}"
+DELETE_WAITING_QUEUE_ON_EXIT="${DELETE_WAITING_QUEUE_ON_EXIT:-0}"
+
+if [ -z "$ACTIVE_ACCOUNT" ]; then
+  echo "✗ No active gcloud account found. Run 'gcloud auth login' or 'gcloud config set account ACCOUNT' before launching TPU jobs."
+  exit 1
+fi
+
+cleanup() {
+  local status
+  status="$(gcloud compute tpus queued-resources describe "$RESOURCE_ID" --project="$PROJECT_ID" --zone="$ZONE" --format='value(state.state)' 2>/dev/null || true)"
+  if [ "$status" = "WAITING_FOR_RESOURCES" ] && [ "$DELETE_WAITING_QUEUE_ON_EXIT" != "1" ]; then
+    echo "[$(date)] Preserving queued resource $RESOURCE_ID (state: $status). Set DELETE_WAITING_QUEUE_ON_EXIT=1 to force deletion while waiting."
+    return
+  fi
+  echo "[$(date)] Initiating mandatory cleanup to stop billing..."
+  gcloud compute tpus queued-resources delete "$RESOURCE_ID" --project="$PROJECT_ID" --zone="$ZONE" --force --quiet
+  echo "[$(date)] Cleanup complete."
+}
+trap cleanup EXIT
+
+echo "Step 1: Queuing TPU for K ablation..."
+EXISTING_STATE="$(gcloud compute tpus queued-resources describe "$RESOURCE_ID" --project="$PROJECT_ID" --zone="$ZONE" --format='value(state.state)' 2>/dev/null || true)"
+if [ -n "$EXISTING_STATE" ]; then
+  echo "✓ Reusing existing queued resource $RESOURCE_ID (state: $EXISTING_STATE)"
+else
+  gcloud compute tpus queued-resources create "$RESOURCE_ID" \
+    --project="$PROJECT_ID" --zone="$ZONE" --node-id="$NODE_ID" \
+    --accelerator-type=v6e-8 --runtime-version="$RUNTIME_VERSION" --quiet
+fi
+
+echo "Step 2: Waiting for TPU to become ACTIVE..."
+while true; do
+  STATUS=$(gcloud compute tpus queued-resources describe "$RESOURCE_ID" --project="$PROJECT_ID" --zone="$ZONE" --format="value(state.state)")
+  if [ -z "$STATUS" ]; then
+    sleep 60
+    continue
+  fi
+
+  echo "[$(date)] Status: $STATUS"
+  if [ "$STATUS" == "ACTIVE" ]; then
+    echo "✓ TPU is ACTIVE!"
+    break
+  fi
+
+  if [ "$STATUS" == "FAILED" ]; then
+    echo "✗ TPU Provisioning FAILED."
+    exit 1
+  fi
+  sleep 60
+done
+
+echo "Step 3: Installing dependencies..."
+gcloud compute tpus tpu-vm ssh "$NODE_ID" --project="$PROJECT_ID" --zone="$ZONE" --worker=all --command="
+  set -euo pipefail && \
+  export DEBIAN_FRONTEND=noninteractive && \
+  sudo apt-get update -qq && sudo apt-get install -y -qq python3-pip && \
+  export PATH=\"\$PATH:/home/\$USER/.local/bin\" && \
+  pip install -U -q \"$JAX_TPU_INSTALL_SPEC\" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html && \
+  pip install -U -q optax" --quiet --ssh-flag="-o StrictHostKeyChecking=no" --ssh-flag="-o UserKnownHostsFile=/dev/null"
+
+echo "Step 4: Packaging and uploading source snapshot at commit $SOURCE_COMMIT..."
+git -C "$REPO_ROOT" archive --format=tar.gz --output="$SOURCE_ARCHIVE" "$SOURCE_COMMIT"
+gcloud compute tpus tpu-vm ssh "$NODE_ID" --project="$PROJECT_ID" --zone="$ZONE" --worker=all --command="
+  set -euo pipefail && \
+  rm -rf sinkhorn-aligner && \
+  mkdir -p sinkhorn-aligner" --quiet --ssh-flag="-o StrictHostKeyChecking=no" --ssh-flag="-o UserKnownHostsFile=/dev/null"
+gcloud compute tpus tpu-vm scp "$SOURCE_ARCHIVE" "$NODE_ID:$REMOTE_SOURCE_ARCHIVE" --project="$PROJECT_ID" --zone="$ZONE" --worker=all --quiet --scp-flag="-o StrictHostKeyChecking=no" --scp-flag="-o UserKnownHostsFile=/dev/null"
+gcloud compute tpus tpu-vm ssh "$NODE_ID" --project="$PROJECT_ID" --zone="$ZONE" --worker=all --command="
+  set -euo pipefail && \
+  test -f $REMOTE_SOURCE_ARCHIVE && \
+  tar -xzf $REMOTE_SOURCE_ARCHIVE -C sinkhorn-aligner && \
+  rm -f $REMOTE_SOURCE_ARCHIVE && \
+  echo source_commit=$SOURCE_COMMIT" --quiet --ssh-flag="-o StrictHostKeyChecking=no" --ssh-flag="-o UserKnownHostsFile=/dev/null"
+
+echo "Step 4b: Fetching pre-computed Pfam shards from gs://$BUCKET_NAME..."
+gcloud compute tpus tpu-vm ssh "$NODE_ID" --project="$PROJECT_ID" --zone="$ZONE" --worker=all --command="
+  set -euo pipefail && \
+  cd sinkhorn-aligner && \
+  mkdir -p data/pfam_shards && \
+  gsutil -m cp -r gs://$BUCKET_NAME/pfam_shards/* data/pfam_shards/" --quiet --ssh-flag="-o StrictHostKeyChecking=no" --ssh-flag="-o UserKnownHostsFile=/dev/null"
+
+echo "Step 4c0: Logging TPU control-plane details..."
+gcloud compute tpus queued-resources describe "$RESOURCE_ID" --project="$PROJECT_ID" --zone="$ZONE" || true
+gcloud compute tpus tpu-vm describe "$NODE_ID" --project="$PROJECT_ID" --zone="$ZONE" || true
+
+echo "Step 4c: Verifying JAX TPU runtime..."
+gcloud compute tpus tpu-vm ssh "$NODE_ID" --project="$PROJECT_ID" --zone="$ZONE" --worker=all --command="
+  set -euo pipefail && \
+  export PATH=\"\$PATH:/home/\$USER/.local/bin\" && \
+  export JAX_FORCE_TPU_INIT=true && \
+  cd sinkhorn-aligner && \
+  for ATTEMPT in \$(seq 1 $JAX_TPU_PROBE_RETRIES); do \
+    if python3 scripts/tpu_jax_probe.py; then \
+      exit 0; \
+    fi; \
+    if [ \"\$ATTEMPT\" -eq $JAX_TPU_PROBE_RETRIES ]; then \
+      echo \"✗ JAX TPU probe failed after $JAX_TPU_PROBE_RETRIES attempts.\" >&2; \
+      exit 1; \
+    fi; \
+    echo \"JAX TPU probe failed on attempt \$ATTEMPT/$JAX_TPU_PROBE_RETRIES. Retrying in $JAX_TPU_PROBE_SLEEP_SECS seconds...\" >&2; \
+    sleep $JAX_TPU_PROBE_SLEEP_SECS; \
+  done" --quiet --ssh-flag="-o StrictHostKeyChecking=no" --ssh-flag="-o UserKnownHostsFile=/dev/null"
+
+echo "Step 5: Starting Sinkhorn K ablation..."
+gcloud compute tpus tpu-vm ssh "$NODE_ID" --project="$PROJECT_ID" --zone="$ZONE" --worker=all --command="
+  set -euo pipefail && \
+  export PATH=\"\$PATH:/home/\$USER/.local/bin\" && \
+  export JAX_FORCE_TPU_INIT=true && \
+  cd sinkhorn-aligner && \
+  mkdir -p logs checkpoints && \
+  for K in $K_VALUES; do \
+    RUN_TAG=\"sinkhorn_k\${K}\" && \
+    echo \"Running \${RUN_TAG} for $MAX_HOURS_PER_RUN hours\" && \
+    python3 -u src/benchmarks/benchmark_pfam_training.py \
+      --method sinkhorn_ot \
+      --max_hours $MAX_HOURS_PER_RUN \
+      --data_dir data/pfam_shards \
+      --ckpt_dir checkpoints/\${RUN_TAG} \
+      --gcs_ckpt_dir $GCS_CKPT_ROOT/\${RUN_TAG} \
+      --band_width 1024 \
+      --n_iters 15 \
+      --sinkhorn_gradient_mode tail_refinement \
+      --sinkhorn_refine_steps \${K} \
+      --sinkhorn_epsilon 1.0 \
+      --sinkhorn_epsilon_scaling_steps 0 \
+      --sinkhorn_epsilon_scaling_factor 2.0 \
+      --train_reconstruction_weight $TRAIN_RECONSTRUCTION_WEIGHT \
+      --train_sparse_ce_weight $TRAIN_SPARSE_CE_WEIGHT \
+      --train_monotonicity_weight $TRAIN_MONOTONICITY_WEIGHT \
+      --projection_manifold stiefel_qk \
+      --gap_mode none \
+      --metric_every 50 \
+      --autotune_batch_size \
+      --autotune_max_per_device_batch_size 8 \
+      --batch_size_file checkpoints/pfam_batch_size_\${RUN_TAG}.json \
+      --checkpoint_every 250 2>&1 | tee logs/\${RUN_TAG}.log ; \
+    status=\${PIPESTATUS[0]} && \
+    if [ \"\$status\" -ne 0 ]; then \
+      echo \"✗ Ablation run \${RUN_TAG} failed with exit code \$status\" >&2; \
+      exit \$status; \
+    fi; \
+  done" --quiet --ssh-flag="-o StrictHostKeyChecking=no" --ssh-flag="-o UserKnownHostsFile=/dev/null"
+
+echo "✓ K ablation complete!"
