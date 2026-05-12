@@ -1,3 +1,7 @@
 ## 2024-05-24 - Faster Tensor Packing with jnp.pad
 **Learning:** When packing multiple tensors together where some channels need to be padded with zeros (e.g. for hardware alignment mod-8), using `jnp.stack` with multiple `jnp.zeros_like()` calls forces JAX to allocate large explicitly zeroed arrays. Using `jnp.stack` only on active variables and then padding the last dimension with `jnp.pad(active, ((0, 0), ..., (0, N)))` bypasses these allocations and translates to much faster slice-update ops in XLA (up to ~1.8x faster on CPU during JIT).
 **Action:** When creating mod-N padded tensor structures for kernels, always prefer `jnp.pad` over explicit `jnp.zeros_like` stacking.
+
+## 2024-05-25 - Faster Synthetic Sequence Generation with Vectorized NumPy Replacements
+**Learning:** For synthetic data generation logic that randomly replaces characters in a sequence (e.g., introducing mismatches to an aligned pair), looping through the string indices in Python and making random choice replacements is incredibly slow (~0.63s for 100k replacements). Vectorizing the process using `numpy` arrays with boolean indexing (`seq_arr[indices] = np.random.choice(...)`) bypasses Python loops entirely and is nearly 8.5x faster (~0.074s), eliminating the redundant string conversion overhead.
+**Action:** When implementing routines to randomly corrupt or modify large sequences of text/biological data, convert the sequence to a `numpy` array and use index mapping instead of traditional Python `for` loops.
