@@ -1,9 +1,5 @@
 .env
 .venv/
-.agents/
-.codex
-.Jules/
-.jules/
 .ruff_cache/
 __pycache__/
 *.py[cod]
@@ -28,6 +24,3 @@ logs/
 *.run.xml
 *.synctex.gz
 *.toc
-
-paper_neurips/*_source.zip
-paper_neurips/*_source.tar.gz

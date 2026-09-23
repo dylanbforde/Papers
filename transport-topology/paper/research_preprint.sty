@@ -1,0 +1,17 @@
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{research_preprint}[2026/09/05 Local research-preprint layout]
+\RequirePackage[T1]{fontenc}
+\DeclareFontShape{T1}{cmr}{m}{scit}{<->ssub*cmr/m/sc}{}
+\RequirePackage[utf8]{inputenc}
+\RequirePackage[round,authoryear]{natbib}
+\RequirePackage[letterpaper,margin=1in,headheight=14pt]{geometry}
+\RequirePackage{fancyhdr}
+\pagestyle{fancy}\fancyhf{}
+\fancyhead[L]{\small Preprint}\fancyhead[R]{\small Dylan B. Forde}
+\fancyfoot[C]{\thepage}\renewcommand{\headrulewidth}{0.3pt}
+\setlength{\emergencystretch}{2em}
+\makeatletter
+\renewcommand{\maketitle}{%
+\begin{center}{\Large\bfseries \@title\par}\vspace{0.7em}
+{\normalsize \@author\par}\end{center}\vspace{0.7em}}
+\makeatother
