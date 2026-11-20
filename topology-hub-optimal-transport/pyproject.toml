@@ -1,0 +1,22 @@
+[project]
+name = "topology-hub-optimal-transport"
+version = "0.1.0"
+description = "Kernels and capacity gates for Topology Hub Optimal Transport (THOT)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "jax",
+    "numpy",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+

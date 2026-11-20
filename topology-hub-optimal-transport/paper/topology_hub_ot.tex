@@ -1,0 +1,504 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage[font=small,labelfont=bf]{caption}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage{microtype}
+\usepackage[numbers]{natbib}
+\usepackage{url}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\definecolor{navy}{RGB}{0,56,118}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=navy,
+  citecolor=navy,
+  urlcolor=navy,
+  pdftitle={Topology Hub Optimal Transport},
+  pdfauthor={Dylan B. Forde}
+}
+
+\setlength{\emergencystretch}{1.8em}
+\setlength{\bibsep}{1.5pt plus 0.5pt}
+\newcommand{\one}{\mathbf{1}}
+\newcommand{\ReLU}{\operatorname{ReLU}}
+\newcommand{\sparsemax}{\operatorname{sparsemax}}
+\newcommand{\softmax}{\operatorname{softmax}}
+
+\title{\vspace{-1.2em}\rule{\linewidth}{1.2pt}\\[0.55em]
+\textbf{Topology Hub Optimal Transport:}\\
+Eliminating Long-Context Dilution at Flash-Competitive Speed\\[0.35em]
+\rule{\linewidth}{0.6pt}}
+\author{\textbf{Dylan B.~Forde}}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-1.2em}
+
+\begin{abstract}
+Long-context sequence models rely on sparse or structured attention to avoid quadratic complexity, yet even exact dense attention suffers severe dilution when relevant information is embedded among tens of thousands of distractors. Hub-and-spoke optimal transport (OT) replaces the dense $L \times L$ attention matrix with a linear-size graph connecting tokens across local windows and $K$ shared global hubs balanced by Sinkhorn scaling. Building on recent analyses of block-wise tail refinement and fixed-support transport topology \citep{forde2026blockwise,forde2026topology}, we diagnose and overcome four fundamental obstacles that prevented differentiable OT layers from scaling cleanly in practice: (i) softmax capacity allocation dilutes signal mass as $\Theta(1/(1+\alpha L))$, (ii) bipartite hub routing exhibits period-2 parity oscillation during finite Sinkhorn iterations, (iii) unrolled backpropagation and unaligned GPU tiles trail FlashAttention by an order of magnitude, and (iv) two-sided Sinkhorn normalization violates autoregressive causality. We resolve all four limitations with \emph{Topology Hub Optimal Transport} (THOT). First, replacing global softmax capacity gates with bounded-support $\sparsemax$ or sorting-free $O(L)$ thresholded $\ReLU$ gates drives background filler leakage to zero. Second, a three-sweep \emph{1+2 annealed row-closed} Sinkhorn schedule---one detached aperiodic warm-start sweep followed by two differentiated bipartite sweeps and exact row normalization---damps parity oscillation rapidly without impairing gradient flow. Third, a Two-Call One-Reference-Tile adjoint executed with batched, split-factor Triton kernels using BF16 Tensor Cores and FP32 dual potentials reduces $H=8, D=64, L=262\text{K}$ operator latency to $100.1\,\text{ms}$ forward-plus-backward and $1{,}132\,\text{MiB}$ static compiler temporary memory---$4.8\times$ faster than our unfused OT baseline, $2.2\times$ faster with $4.0\times$ smaller compiler temporaries than latent softmax attention, and $3.3\times$ faster than cuDNN FlashAttention at $L=4{,}096$. Fourth, a chunked exclusive prefix scan over hub summaries enforces strict causality with verified zero future leakage. Across NVIDIA L4 experiments, pure end-to-end training ($\alpha=0$) achieves $97.40\%$ zero-shot associative recall at $L=262{,}144$, reaches $100.00\%$ zero-shot multi-needle retrieval in WikiText-103 prose at $L=65{,}536$ where dense FlashAttention drops to $0.78\%$, and outperforms local-window, latent-softmax, and dense FlashAttention baselines on causal and masked WikiText-4K language modeling.
+\end{abstract}
+
+% ===========================================================================
+\section{Introduction}
+\label{sec:intro}
+
+Scaling attention to sequences of tens or hundreds of thousands of tokens poses two coupled bottlenecks. The computational bottleneck is the quadratic $O(L^2)$ cost of standard attention \citep{vaswani2017attention}: even with IO-aware tiling such as FlashAttention \citep{dao2022flashattention,dao2023flashattention2,shah2024flashattention3}, dense forward-plus-backward passes at $L=262{,}144$ require multiple seconds on a single mid-range GPU. Less widely appreciated is a statistical and normalization bottleneck: even when sequences fit in memory, Transformers lose retrieval fidelity in long contexts \citep{liu2024lost,hsieh2024ruler} and struggle to extrapolate zero-shot beyond training lengths without specialized positional rescaling or sink caches \citep{press2022train,peng2024yarn,xiao2024efficient}. On zero-shot multi-needle retrieval embedded in real WikiText-103 prose \citep{merity2017pointer}, dense FlashAttention with rotary position embeddings (RoPE) \citep{su2024roformer} reaches $99.22\%$ accuracy at its $512$-token training length, then collapses to $0.78\%$ at $L=8{,}192$ and $L=65{,}536$.
+
+A natural architectural alternative is a \emph{hub-and-spoke} topology---combining a local sliding window of radius $r$ with $K$ shared global hubs \citep{beltagy2020longformer,zaheer2020bigbird}, latent bottleneck tokens \citep{jaegle2021perceiver}, or global register slots \citep{darcet2024vision}. Formulated as an entropic Optimal Transport (OT) problem \citep{cuturi2013sinkhorn,peyre2019computational,tay2020sparse,sander2022sinkformers}, every token and hub receives an input-dependent routing capacity, and Sinkhorn matrix scaling allocates attention mass across $O(L(r+K))$ edges. Unlike unconstrained softmax attention, marginal capacity constraints prevent hubs from collapsing onto a single popular key and enable tokens to regulate their own routing budget---directly addressing the associative-recall fragility observed in sub-quadratic sequence models \citep{arora2024zoology}.
+
+% Optional: remove forde2026topology citation below if this manuscript supersedes arXiv:2609.07954.
+This work builds directly on \citet{forde2026blockwise}, who introduced block-wise differentiable Sinkhorn tail refinement, and \citet{forde2026topology}, who analyzed gradient propagation across fixed sparse transport supports. Bridging these foundations to end-to-end long-context training on modern GPUs revealed four concrete failure modes that stopped prior fixed-support OT layers from scaling:
+
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{Softmax capacity dilution ($\Theta(1/(1+\alpha L))$).} Even on an $O(L)$ sparse topology, allocating token capacities with a global softmax assigns small positive mass $\alpha$ to every distractor token. As length grows to $L=262{,}144$, cumulative background mass overwhelms the $K$ hubs, dropping zero-shot associative recall from $98.31\%$ ($L=128$) to $3.52\%$ ($L=262{,}144$).
+  \item \textbf{Bipartite period-2 parity oscillation.} Blocking hub-to-hub shortcuts stabilizes two-hop routing \citep{forde2026blockwise,forde2026topology}, but renders the active graph nearly bipartite. Alternating row and column scaling updates then oscillate across partitions, leaving significant unnormalized marginal errors unless six or more expensive Sinkhorn sweeps are unrolled.
+  \item \textbf{Reverse-mode memory and kernel padding overhead.} Unrolled differentiation through multiple Sinkhorn sweeps via standard automatic differentiation materializes $O(T)$ intermediate log-sum-exp tensors and incurs heavy tile-padding waste, making a $262\text{K}$ OT layer over $4\times$ slower than latent softmax attention.
+  \item \textbf{Non-causality.} Full-sequence Sinkhorn column normalization couples future column totals into earlier row potentials, preventing standard OT layers from operating in autoregressive language models.
+\end{enumerate}
+
+We resolve all four failure modes with \emph{Topology Hub Optimal Transport} (THOT), making the following contributions:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{Bounded-support and $O(L)$ capacity gating (\S\ref{sec:gates}).} Replacing softmax capacity allocation with simplex $\sparsemax$ \citep{martins2016softmax,correia2019adaptively} or a sorting-free token-local thresholded $\ReLU$ gate clamps irrelevant filler capacities to exact zero, eliminating length dilution from $L=128$ through $L=262{,}144$.
+  \item \textbf{Swept topological annealing: the $1+2$ row-closed schedule (\S\ref{sec:annealed}).} Combining a marginal warm start \citep{thornton2023initialization} and degree balancing with one detached aperiodic sweep, two differentiated bipartite sweeps, and final row closure damps parity oscillation in three total sweeps and supports a balanced-to-semirelaxed variant that avoids $\alpha=0$ collapse.
+  \item \textbf{Two-call One-Reference-Tile adjoint and split-factor Triton kernels (\S\ref{sec:kernels}).} We reduce sparse backward launches from $14$ down to $2$ via a custom adjoint over saved terminal potentials and implement batched multi-head Triton kernels \citep{triton2019tillet} with split accumulators and BF16 Tensor Cores (retaining FP32 potentials). On NVIDIA L4 at $H=8, D=64, L=262{,}144$, this reaches $100.1\,\text{ms}$ forward+VJP ($2.2\times$ faster and $4.0\times$ smaller compiler temporaries than latent softmax) and runs $3.3\times$ faster than cuDNN FlashAttention at $L=4{,}096$.
+  \item \textbf{Strictly causal chunked transport and empirical validation (\S\ref{sec:causal}--\S\ref{sec:experiments}).} A chunked exclusive prefix scan yields an $O(L)$ causal operator with exact $0.0$ future perturbation, reaching $90.10\%$ zero-shot causal recall at $L=262\text{K}$, $100.00\%$ zero-shot WikiText-103 multi-needle retrieval at $L=65\text{K}$ ($\alpha=0$), and consistent perplexity gains on causal and masked WikiText-4K language modeling.
+\end{itemize}
+
+% ===========================================================================
+\section{Background: Failure Modes of Hub-and-Spoke OT}
+\label{sec:background}
+
+We first formalize the hub-and-spoke optimal transport attention layer and establish quantitatively why prior formulations degrade as sequence length grows or auxiliary gate supervision is removed.
+
+\subsection{Hub-and-Spoke Transport Formulation}
+
+Consider an input sequence of $L$ real tokens augmented with $K \ll L$ shared global hub slots ($N = L + K$ nodes per attention head). Each real token $i \in \{1,\dots,L\}$ connects via an active sparse edge set $\Omega$ to: (i) a local sliding window $\{j : |i-j| \le r\}$, and (ii) all $K$ global hubs. Hence $|\Omega| = O(L(2r + 1 + K))$ scales linearly in sequence length $L$, reducing edge count from $O(L^2)$ to $O(L)$.
+
+Given query and key projections $q_i, k_j \in \mathbb{R}^D$ and a learned $2 \times 2$ node-type bias matrix $B$ indexed by whether $(i,j)$ is real-to-real ($B_{RR}$), real-to-hub ($B_{RH}$), hub-to-real ($B_{HR}$), or hub-to-hub ($B_{HH}$), the edge affinity score is
+\begin{equation}
+  S_{ij} = \frac{q_i^\top k_j}{\sqrt{D}} + B_{\tau(i),\tau(j)}, \qquad (i,j) \in \Omega.
+\end{equation}
+Given positive row marginals $a \in \mathbb{R}_{>0}^N$ (emitting budget per query or hub) and column marginals $b \in \mathbb{R}_{>0}^N$ (absorbing budget per key or hub, satisfying $\sum_i a_i = \sum_j b_j = T$), Sinkhorn scaling \citep{sinkhornknopp1967,cuturi2013sinkhorn,knight2008sinkhorn} iteratively updates log-space dual potentials $u, v \in \mathbb{R}^N$ defining the transport plan $P_{ij} = \exp(S_{ij} + u_i + v_j)$ on $\Omega$:
+\begin{align}
+  u_i &\leftarrow \ln a_i - \log\sum_{j:(i,j)\in\Omega} \exp(S_{ij} + v_j), \label{eq:sinkhorn-u}\\
+  v_j &\leftarrow \ln b_j - \log\sum_{i:(i,j)\in\Omega} \exp(S_{ij} + u_i). \label{eq:sinkhorn-v}
+\end{align}
+Row-stochastic attention weights $W_{ij} = P_{ij} / \sum_{k:(i,k)\in\Omega} P_{ik}$ aggregate value vectors via $Y = WV$. Following \citet{forde2026blockwise}, one can execute $T_{\text{base}}$ initial sweeps without tracking gradients and backpropagate only through a short refinement tail of $T_{\text{tail}}$ sweeps.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/fig_dilution_and_retrieval.pdf}
+  \caption{\textbf{Capacity dilution vs.\ THOT from $L=128$ to $L=262{,}144$.}
+  \textbf{(a)} On synthetic associative recall (trained at $L=128$), softmax-gated Hub OT (\emph{Hub OT (Softmax Gate)}, dashed crimson) collapses from $98.31\%$ to $3.52\%$ at $L=262\text{K}$ as background filler absorbs $93.4\%$ of transport mass. Sparse gating with our $1+2$ annealed row-closed schedule (THOT) holds $98.83\%$ with light gate supervision ($\alpha=0.05$) and $97.40\%$ under pure cross-entropy training ($\alpha=0$).
+  \textbf{(b)} On zero-shot multi-needle retrieval embedded in real WikiText-103 prose (pure cross-entropy, trained at $L=512$), dense cuDNN FlashAttention drops from $99.22\%$ to $0.78\%$ beyond the training window, while THOT generalizes to $100.00\%$ ($0.0514$ NLL) at $L=65{,}536$.}
+  \label{fig:dilution-and-retrieval}
+\end{figure}
+
+\subsection{Failure Mode 1: The \texorpdfstring{$1/(1+\alpha L)$}{1/(1 + alpha L)} Capacity Dilution Law}
+\label{sec:dilution}
+
+Suppose a routing gate allocates a total excess capacity budget $M$ across real tokens on top of a uniform local baseline $1/L$. When normalized via a global softmax, $b^{\text{ex}}_j = M \cdot \softmax(g)_j$, true signal tokens (e.g., $R$ key-value bindings) exceed irrelevant background filler by a finite logit margin $\Delta$. Because every background token receives strictly positive softmax mass $\propto \exp(g_{\text{fill}})$, if filler tokens maintain relative weight $\alpha = \exp(-\Delta) > 0$, the partition denominator grows as $R + \alpha(L - R)$. Consequently, the fraction of routing capacity retained by the $R$ signal positions decays with sequence length as
+\begin{equation}
+  \text{Signal Share}(L) \approx \frac{1}{1 + (\alpha / R)(L - R)} = \Theta\!\left(\frac{1}{1 + \alpha L}\right).
+  \label{eq:dilution-law}
+\end{equation}
+Figure~\ref{fig:dilution-and-retrieval}(a) confirms this decay empirically: under softmax gating, \emph{Hub OT (Softmax Gate)} achieves $98.31\%$ accuracy at $L=128$ ($99.2\%$ source capacity share) and $83.98\%$ at $L=8{,}192$ ($67.3\%$ share), before plunging to $12.24\%$ at $L=131\text{K}$ and $3.52\%$ at $L=262{,}144$ ($6.6\%$ share). Non-OT global-softmax attention with the same structural bias prior (\emph{Support Softmax}) degrades even more severely, falling from $12.63\%$ to $0.65\%$. Cross-attending into a fixed $K=16$ bottleneck (\emph{Latent Softmax}, following \citet{jaegle2021perceiver}) resists query-side dilution better, yet key-side softmax normalization still dilutes source mass share from $96.2\%$ down to $1.4\%$, pulling accuracy down from $87.24\%$ to $76.30\%$.
+
+\subsection{Failure Mode 2: Period-2 Oscillation Under Bipartite Routing}
+\label{sec:oscillation}
+
+Once sparse gating eliminates irrelevant filler tokens, a structural optimization bottleneck emerges inside the Sinkhorn solver. Prior hub routing \citep{forde2026blockwise} sets a large negative hub-to-hub penalty ($B_{HH} = -20$) so queries route through hubs to source tokens rather than circulating mass among hubs. With inactive background tokens masked out and $B_{HH}$ blocked, however, the active subgraph becomes nearly bipartite between real tokens and hubs.
+
+On any near-bipartite graph, alternating row updates \eqref{eq:sinkhorn-u} and column updates \eqref{eq:sinkhorn-v} produces a pronounced \emph{period-2 parity oscillation}: mass shifts back and forth between the two partitions on odd and even half-steps. Our spectral audit on the $2\times 2$ partition transition matrix at $L=262{,}144$ reveals that a standard bipartite schedule retains a subdominant eigenvalue of $\lambda_2 = -0.9924$ after three sweeps, leaving $5.53\%$ row total-variation (TV) error and only $89.4\%$ query-to-hub flow share (Table~\ref{tab:spectral}). Stopping early at $3$ warm-started sweeps reaches only $70.57\%$ recall at $L=262\text{K}$ unless stretched to $6$ unrolled sweeps ($96.48\%$). Meanwhile, replacing explicit tail differentiation with an uncentered implicit-gradient solver (\emph{Uncentered Implicit-VJP OT}) fails to train altogether ($0.91\%$ at $262\text{K}$).
+
+% ===========================================================================
+\section{Topology Hub Optimal Transport}
+\label{sec:method}
+
+Topology Hub Optimal Transport (THOT) eliminates capacity dilution, finite-step Sinkhorn oscillation, backward-pass bottlenecks, and autoregressive leakage through four coordinated components, summarized in \hyperlink{alg:thot}{Algorithm~1}.
+
+\subsection{Bounded-Support Capacity Gating: Sparsemax and \texorpdfstring{$O(L)$}{O(L)} Thresholded ReLU}
+\label{sec:gates}
+
+To defeat the $\Theta(1/(1+\alpha L))$ dilution law \eqref{eq:dilution-law}, capacity allocation must map background filler scores to \emph{exact zero} excess budget while preserving clean gradients on salient positions. We evaluate two sparse gate parameterizations:
+
+\paragraph{Simplex $\sparsemax$ gate (\texorpdfstring{$O(L \log L)$}{O(L log L)}).}
+Given scalar routing logits $s_{\text{rec}}, s_{\text{src}} \in \mathbb{R}^L$ produced by a lightweight token-wise MLP, we replace $\softmax$ with Euclidean simplex projection $\sparsemax$ \citep{martins2016softmax,correia2019adaptively} on top of a uniform local baseline $1/L$:
+\begin{equation}
+  a_i = \frac{1}{L} + M \cdot \sparsemax(s_{\text{rec}})_i, \qquad
+  b_j = \frac{1}{L} + M \cdot \sparsemax(s_{\text{src}})_j,
+  \label{eq:sparsemax-gate}
+\end{equation}
+with total excess mass $M=8.0$ distributed across real queries and sources and matched across the $K$ hubs ($b^{\text{hub}}_h = a^{\text{hub}}_h = 1/L + M/K$ in balanced mode). Because $\sparsemax$ projects low logits below a data-dependent simplex threshold $\tau(s)$ to zero, active filler share drops to identically $0.00\%$ across $L=128\dots 262{,}144$.
+
+\paragraph{Token-local thresholded ReLU gate (\texorpdfstring{$O(L)$}{O(L)}, sorting-free).}
+Global $\sparsemax$ requires sorting across all $L$ tokens, which introduces $O(L\log L)$ synchronization and leaks future tokens through $\tau(s)$ in causal models. Inspired by ReLU-based sparse attention \citep{wortsman2023replacing}, once salient tokens maintain a clear score gap over filler, learned scalar thresholds $\theta_{\text{rec}}, \theta_{\text{src}} \in \mathbb{R}$ yield a purely token-local gate:
+\begin{equation}
+  a_i = \frac{1}{L} + M \cdot \frac{\ReLU(s_{\text{rec},i} - \theta_{\text{rec}})}{\sum_{m=1}^L \ReLU(s_{\text{rec},m} - \theta_{\text{rec}}) + \epsilon},
+  \label{eq:relu-thresh}
+\end{equation}
+and symmetrically for $b_j$ (or unnormalized $a_i = 1/L + c\cdot\ReLU(s_{\text{rec},i} - \theta_{\text{rec}})$ in streaming causal mode). Whenever filler scores remain below $\theta$, excess distractor mass is strictly zero without cross-token sorting.
+
+\subsection{Swept Topological Annealing: The \texorpdfstring{$1+2$}{1+2} Row-Closed Schedule}
+\label{sec:annealed}
+
+\begin{figure}[t]
+  \centering
+  \rule{\linewidth}{0.8pt}
+  \vspace{-0.35em}
+  \begin{flushleft}
+  \small
+  \hypertarget{alg:thot}{\textbf{Algorithm 1: Topology Hub Optimal Transport (THOT) --- Forward Pass and Two-Call Adjoint}}
+  \end{flushleft}
+  \vspace{-0.45em}
+  \rule{\linewidth}{0.4pt}
+  \begin{minipage}{\linewidth}
+  \small
+  \setlength{\parskip}{0.25em}
+  \textbf{Input:} Token queries/keys/values $(Q, K, V) \in \mathbb{R}^{N \times D}$ ($N=L+K$), node-type biases $B \in \mathbb{R}^{2\times 2}$, local radius $r$, marginals $(a,b) \in \mathbb{R}_{>0}^N$ from \eqref{eq:sparsemax-gate} or \eqref{eq:relu-thresh}.
+
+  \textbf{1.\ Warm start \& degree prior:} Set $v_0 \leftarrow \ln b$ and add local degree offset $B_{RR} \leftarrow B_{RR} + \ln(L/\min(L,2r+1))$.
+
+  \textbf{2.\ Detached aperiodic Sweep 1:} Using open hub-to-hub coupling $B_{HH}$ (no gradient tracking), perform one Sinkhorn cycle \eqref{eq:sinkhorn-u}--\eqref{eq:sinkhorn-v} and center $u_1$ across active rows to fix additive potential gauge, yielding $(u_1, v_1)$.
+
+  \textbf{3.\ Differentiable bipartite Sweeps 2--3:} Block hub shortcuts ($B_{HH} \leftarrow -20$) and run two differentiable Sinkhorn cycles starting from $\mathrm{detach}(u_1, v_1)$, producing $(u_3, v_3)$ (with optional semi-relaxed column exponent $\gamma_b=0.92$ on Sweep 3 for THOT-SR).
+
+  \textbf{4.\ Exact row closure \& attention read:} Perform one final row log-sum-exp update $u_{\text{out}} = \ln a - \operatorname{LSE}_j(S_{\cdot j} + v_{3,j})$ and return $Y = \exp(S + u_{\text{out}} + v_3^\top) V$ while saving only terminal potentials $(u_{\text{out}}, v_3)$ for backward.
+
+  \textbf{5.\ Two-Call One-Reference-Tile Adjoint (backward):} Given $\bar{Y}$, evaluate all tail log-potential adjoints $(\bar{u},\bar{v})$ analytically via $O(L)$ vector recurrences; execute \emph{Call 1} (row-major SRAM sweep) for $\nabla_V$ and row scalars, and \emph{Call 2} (transposed SRAM sweep) for $(\nabla_Q, \nabla_K, \nabla_B)$ in one pass.
+  \end{minipage}
+  \vspace{0.3em}
+  \rule{\linewidth}{0.8pt}
+\end{figure}
+
+To converge rapidly within only $3$ total Sinkhorn sweeps while maintaining sharp two-hop routing through hubs, we introduce \emph{swept topological annealing}: begin on an aperiodic graph to equilibrate mass globally in one sweep, switch to a bipartite hub graph for two differentiated sweeps, and finish with exact row normalization:
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{Marginal warm start and degree prior.} We initialize column potentials at the target log-marginals $v_0 = \ln b$ \citep{thornton2023initialization} and add a structural degree prior $\ln(L/d)$ to real-to-real edges $B_{RR}$ (where $d=\min(L,2r+1)$ is the local window size) so local neighborhoods remain balanced against hubs as $L$ scales.
+  \item \textbf{Sweep 1 (detached aperiodic warm-start).} Keeping hub-to-hub affinity $B_{HH}$ open rather than clamped to $-20$, we run a single stop-gradient Sinkhorn sweep and center row potentials across active tokens. Opening $B_{HH}$ gives the two-class routing transition a strong self-mixing path, dropping the oscillatory eigenvalue $|\lambda_2|$ from $0.99$ to $0.7451$ in one step at $L=262{,}144$ (Table~\ref{tab:spectral}).
+  \item \textbf{Sweeps 2--3 (differentiated bipartite refinement).} Clamping $B_{HH} \leftarrow -20$ suppresses hub-to-hub shortcuts and routes long-range interactions cleanly along Query $\to$ Hub $\to$ Source two-hop paths across two differentiable Sinkhorn sweeps.
+  \item \textbf{Exact row closure.} Column updates leave $4\%$--$5\%$ row-marginal residual at finite sweep count. Performing one final row log-normalization directly inside the attention read enforces exact row stochasticity ($\text{row TV} = 0.0000$) and $100.0\%$ Query $\to$ Hub attention utilization without extra kernel launches.
+\end{enumerate}
+
+\paragraph{Balanced-to-semirelaxed annealing (THOT-SR).}
+When many active bindings compete for fewer hubs ($R > K$), slightly relaxing column constraints via KL-regularized semi-relaxed Sinkhorn scaling \citep{chizat2018scaling} ($\tilde{v}_3 = \ln b - \gamma_b \operatorname{LSE}_i(S_{ij} + u_{3,i})$ on real columns, $\gamma_b=0.92$) reduces marginal residuals. Crucially, applying semi-relaxed updates naively from Sweep 1 (\emph{Naive Semi-Relaxed OT}, $\gamma_b=0.85$) collapses completely under pure cross-entropy training ($\alpha=0$, $0.13\%$ accuracy; \S\ref{sec:exp-synth}). Running two balanced sweeps before enabling $\gamma_b=0.92$ on Sweep 3 keeps $\alpha=0$ training stable ($95.57\%$ at $L=262\text{K}$) while cutting six-sweep marginal TV error nearly in half ($0.0209 \to 0.0102$, Table~\ref{tab:spectral}).
+
+\begin{table}[t]
+  \centering
+  \caption{\textbf{Spectral convergence and marginal residual audit at $L=262{,}144$.} Here $\lambda_2$ is the subdominant eigenvalue of the $2\times 2$ partition transition matrix (closer to $0$ indicates faster oscillation damping), and TV error measures half the $L_1$ deviation from target marginals at sweep $s_k$. THOT's detached aperiodic warm-start breaks oscillation on Sweep 1 ($\lambda_2=-0.7451$) and achieves exact row stochasticity ($\text{row TV}=0.0000$, $100.0\%$ $Q\!\to\!H$ flow) with lowest 3-sweep residual among balanced schedules.}
+  \label{tab:spectral}
+  \setlength{\tabcolsep}{4.5pt}
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}lcccc@{}}
+    \toprule
+    Schedule & $s_1$ TV ($\lambda_2$) & $s_3$ TV (Row / Col, $\lambda_2$) & $s_6$ TV & $s_3$ Flow ($Q\!\to\!H$ / $H\!\to\!S$) \\
+    \midrule
+    Standard Bipartite OT & $0.0323$ ($-0.9532$) & $0.0276$ ($0.0553$ / $0.0000$, $-0.9924$) & $0.0263$ & $89.4\%$ / $100.0\%$ \\
+    Bipartite OT (3-sweep) & $0.0263$ ($-0.9866$) & $0.0253$ ($0.0506$ / $0.0000$, $-0.9827$) & $0.0231$ & $90.2\%$ / $100.0\%$ \\
+    Bipartite OT (3-sweep, RC) & $0.0262$ ($-0.9879$) & $0.0250$ ($0.0000$ / $0.0499$, $-0.9831$) & $0.0227$ & $100.0\%$ / $90.3\%$ \\
+    Aperiodic OT (3-sweep, RC) & $0.0760$ ($-0.7451$) & $0.0396$ ($0.0000$ / $0.0792$, $-0.8596$) & $0.0238$ & $100.0\%$ / $84.0\%$ \\
+    \textbf{THOT (1+2, Row-Closed)} & $0.0760$ ($-0.7451$) & $\mathbf{0.0209}$ ($\mathbf{0.0000}$ / $0.0419$, $-0.9680$) & $0.0185$ & $\mathbf{100.0\%}$ / $91.7\%$ \\
+    \textbf{THOT-SR ($\gamma_b=0.92$)} & $0.0760$ ($-0.7451$) & $\mathbf{0.0201}$ ($\mathbf{0.0000}$ / $0.0402$, $-0.9389$) & $\mathbf{0.0102}$ & $\mathbf{100.0\%}$ / $91.5\%$ \\
+    \bottomrule
+  \end{tabular}}
+\end{table}
+
+\subsection{Hardware-Efficient Execution: Two-Call Adjoint and Split-Factor Kernels}
+\label{sec:kernels}
+
+Standard reverse-mode automatic differentiation through two Sinkhorn sweeps plus final value aggregation launches $14$ separate sparse passes per layer, taking $42.17\,\text{ms}$ forward+VJP and $412.1\,\text{MiB}$ static XLA compiler temporary storage even for a single $D=32, L=262\text{K}$ head. We eliminate this bottleneck with two systems optimizations tailored for IO-aware Triton execution \citep{triton2019tillet,flashsinkhorn2026}:
+
+\paragraph{Two-Call One-Reference-Tile Adjoint.}
+All parameter gradients ($\nabla_Q, \nabla_K, \nabla_B$) and marginal gradients ($\nabla_a, \nabla_b$) across Sweeps 2--3 and the terminal read depend on the same sparse graph $\Omega$ and input scores $(Q,K)$. By checkpointing only the final dual potentials $(u_{\text{out}}, v_3)$ from forward execution and propagating reverse-mode sensitivities analytically through the two-sweep recurrence using $O(L)$ vector reductions (see Appendix~\ref{app:details}), backward differentiation requires just \textbf{two sparse sweeps}: one row-major pass for $\nabla_V$ and row sensitivities, and one transposed pass accumulating $(\nabla_Q, \nabla_K, \nabla_B)$. On a single $D=32, L=262\text{K}$ head, this alone cuts forward+VJP latency by $1.58\times$ ($42.17 \to 26.64\,\text{ms}$) and shrinks static compiler temporaries by $2.86\times$ ($412.1 \to 144.0\,\text{MiB}$).
+
+\paragraph{Split-Factor Multi-Head Triton Tiling with BF16 Tensor Cores.}
+We further remove four multi-head GPU bottlenecks in our custom Triton kernels:
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{Split feature and neighborhood accumulators:} Stacking $D$-dimensional $Q/K$ vectors with $(2r+1)$-wide local edge adjoints into one tile forces power-of-two padding up to width $128$ at $D=64$. Separating them into independent $(D)$ and $(2r+1)$ SRAM accumulators halves register footprint.
+  \item \textbf{Native head-batch grid scheduling:} Dispatching across heads and batch items directly in the GPU thread-block grid avoids per-head vectorization wrappers and removes padding/concatenation HBM copies on every half-sweep via predicated register masking.
+  \item \textbf{Specialized scalar passes and fused bias gradients:} Log-sum-exp passes omit vector payload padding, and the $2\times 2$ node-type bias gradient $\nabla_B$ accumulates in registers alongside the transposed pass rather than launching auxiliary reductions.
+  \item \textbf{Mixed-precision BF16 Tensor Cores with FP32 duals:} Matrix multiplies execute on BF16 Tensor Cores with FP32 accumulation, while potentials $(u, v)$ and log-sum-exp states stay strictly FP32---analogous to mixed-precision FlashAttention \citep{dao2023flashattention2,shah2024flashattention3}. Against exact FP32 reference differentiation, worst-case maximum absolute error across $(Y, \nabla_Q, \nabla_K, \nabla_V, \nabla_a, \nabla_b, \nabla_B)$ stays within $4.47\times 10^{-8}$ in FP32 mode and $3.27\times 10^{-4}$ in BF16 Tensor-Core mode.
+\end{enumerate}
+
+\subsection{Strictly Causal Autoregressive Chunked Transport}
+\label{sec:causal}
+
+Full-sequence Sinkhorn scaling couples future key budgets into earlier query potentials via \eqref{eq:sinkhorn-v}. To support linear-time autoregressive modeling---on par with causal linear attention and selective state-space architectures \citep{katharopoulos2020transformers,gu2024mamba,yang2024gla}---we partition sequences into contiguous chunks of size $C=32$:
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{Token-local $O(1)$ threshold gating:} Each position computes its write/read budget via the token-local threshold gate \eqref{eq:relu-thresh} without global sorting or future dependence.
+  \item \textbf{Chunk-local write and exclusive parallel prefix scan:} Within chunk $c$, tokens write to $K$ local hub summaries via semi-relaxed chunk-internal Sinkhorn scaling. An exclusive parallel prefix scan (following hardware-efficient linear-attention scans \citep{yang2024gla}) then accumulates strictly preceding hub key/value summaries $H_{<c} = \sum_{c' < c} P^{\text{write}}_{c'} V_{c'}$ alongside cumulative hub capacities.
+  \item \textbf{Causal local plus past-hub read:} Each query $i$ in chunk $c$ runs our $1+2$ annealed row-closed OT read restricted strictly to (a) its causal local window $\max(0, i-r) \le j \le i$, and (b) the $K$ strictly past hub summaries $H_{<c}$ from chunks $c' < c$.
+\end{itemize}
+End-to-end adversarial future-token perturbation tests confirm a maximum output change of identically \textbf{0.0} across all evaluated lengths and model depths.
+
+% ===========================================================================
+\section{Experiments}
+\label{sec:experiments}
+
+All experiments were conducted on NVIDIA L4 GPUs using JAX under matched training budgets, fixed random seeds, and deterministic evaluation splits. For all length-extrapolation benchmarks, models are trained exclusively on short sequences ($L=128$ or $L=512$) and evaluated zero-shot without length fine-tuning out to $L=65{,}536$ or $L=262{,}144$.
+
+\subsection{Synthetic Long-Context Extrapolation, Pure \texorpdfstring{$\alpha=0$}{alpha=0} Training, and Ablations}
+\label{sec:exp-synth}
+
+\paragraph{Experimental setup.}
+We evaluate associative key-value recall using a 2-layer MoE Transformer ($D=32$, 4 experts, $K=16$ hubs, local radius $r=4$, $R=8$ bindings and $Q=8$ queries embedded among distractor tokens over $512$ distinct keys and $256$ values). Each configuration is trained for $1{,}536$ updates at $L=128$ across three seeds and evaluated zero-shot on length scaling ($L \in \{128, 8{,}192, 262{,}144\}$), $L=8{,}192$ key-group collision stress ($C \in \{0,16,32,64\}$ competing distractors sharing a key group), and $L=512$ hub-capacity overload ($R=Q \in \{8,16,32\}$ against $K=16$ hubs). Auxiliary gate supervision weight $\alpha \in \{0.05, 0\}$ tests whether models still learn clean routing purely from task cross-entropy alone ($\alpha=0$).
+
+\begin{table}[t]
+  \centering
+  \caption{\textbf{Zero-shot length extrapolation ($L=128 \to 262\text{K}$), key-group collisions ($L=8\text{K}$), and capacity overload ($L=512$)} across 3 seeds. Bounded-support gating eliminates softmax capacity collapse ($3.52\%$), while THOT reaches $98.83\%$ ($\alpha=0.05$) and $97.40\%$ ($\alpha=0$) at $L=262{,}144$.}
+  \label{tab:synth-main}
+  \setlength{\tabcolsep}{3.8pt}
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}lcccccc@{}}
+    \toprule
+    Method & $\alpha$ & $L=128$ & $L=8{,}192$ & $L=262{,}144$ & Coll.\ $8\text{K}$ (C0/16/32/64) & Cap.\ $512$ (R8/16/32) \\
+    \midrule
+    Hub OT (Softmax Gate) & $0.05$ & $98.31\%$ & $83.98\%$ & $3.52\%$ & --- & --- \\
+    Support Softmax & $0.05$ & $12.63\%$ & $4.17\%$ & $0.65\%$ & --- & --- \\
+    Support Softmax + Sparsemax & $0.05$ & $38.15\%$ & $38.02\%$ & $38.02\%$ & $38.80 / 13.02 / 7.29 / 2.21$ & $36.85 / 18.49 / 8.76$ \\
+    Latent Softmax & $0.05$ & $87.24\%$ & $85.29\%$ & $76.30\%$ & --- & --- \\
+    Latent Softmax + Sparsemax & $0.05$ & $84.77\%$ & $81.77\%$ & $69.79\%$ & $81.38 / 38.67 / 19.66 / 9.24$ & $84.64 / 64.06 / 37.92$ \\
+    Hub OT (4+2, Sparsemax) & $0.05$ & $91.41\%$ & $91.02\%$ & $89.71\%$ & $90.76 / 37.11 / 16.02 / 6.90$ & $89.71 / 62.96 / 26.24$ \\
+    Bipartite OT (3-sweep, RC) & $0.05$ & $97.40\%$ & $97.66\%$ & $97.79\%$ & $96.88 / 39.19 / 22.53 / 10.03$ & $97.92 / 75.98 / 36.07$ \\
+    \textbf{THOT (1+2, Sparsemax)} & $\mathbf{0.05}$ & $\mathbf{98.44\%}$ & $\mathbf{98.96\%}$ & $\mathbf{98.83\%}$ & $\mathbf{97.92} / 42.06 / 20.44 / 9.77$ & $97.01 / \mathbf{78.12} / \mathbf{37.66}$ \\
+    \midrule
+    Bipartite OT (3-sweep, RC) & $0.00$ & $98.18\%$ & $95.57\%$ & $95.96\%$ & $95.18 / \mathbf{44.53} / \mathbf{24.48} / \mathbf{12.76}$ & $96.22 / 75.00 / 36.52$ \\
+    \textbf{THOT (1+2, Sparsemax)} & $\mathbf{0.00}$ & $\mathbf{98.57\%}$ & $\mathbf{97.66\%}$ & $\mathbf{97.40\%}$ & $\mathbf{97.53} / 36.33 / 18.88 / 9.24$ & $\mathbf{97.92} / \mathbf{79.95} / \mathbf{38.41}$ \\
+    \bottomrule
+  \end{tabular}}
+\end{table}
+
+\paragraph{Findings (Tables~\ref{tab:synth-main}--\ref{tab:adv-ablations}).}
+Replacing softmax capacity gating with $\sparsemax$ boosts $L=262\text{K}$ recall from $3.52\%$ to $89.71\%$ even with the legacy $4+2$ schedule, while adding our $1+2$ annealed row-closed schedule raises accuracy to \textbf{$98.83\%$} at $\alpha=0.05$ and \textbf{$97.40\%$} under pure end-to-end training ($\alpha=0$). Table~\ref{tab:adv-ablations} highlights three architectural ablations and two negative controls:
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{Sorting-free $O(L)$ gating:} \emph{THOT (1+2, ReLU-Thresh)} matches $\sparsemax$ at $\alpha=0.05$ ($98.83\%$ at $L=262\text{K}$, $80.66\%$ at $R=16$) with zero cross-token sorting, lowering gate-only forward latency from $0.355\,\text{ms}$ to $0.220\,\text{ms}$ at $L=8\text{K}$ and from $0.709\,\text{ms}$ to $0.596\,\text{ms}$ at $L=262\text{K}$. Without gate supervision ($\alpha=0$), however, ReLU thresholding drops to $80.60\%$ at $L=262\text{K}$, whereas $\sparsemax$ retains $97.40\%$.
+  \item \textbf{Balanced-to-semirelaxed annealing:} Naive semi-relaxed OT (\emph{Naive Semi-Relaxed OT}, $\gamma_b=0.85$) collapses completely at $\alpha=0$ ($0.13\%$ accuracy). Preceding relaxation with two balanced sweeps (\emph{THOT-SR}, $\gamma_b=0.92$) preserves stability at $\alpha=0$ ($95.57\%$ at $262\text{K}$) and yields the strongest overloaded $R=32$ accuracy ($39.91\%$).
+  \item \textbf{Multi-head capacity trade-off and negative controls:} Parameter-matched 4-head THOT ($H=4, d_h=8$, $56{,}651 \le 56{,}688$ active parameters) retains $95.96\%$ ($\alpha=0.05$) and $94.14\%$ ($\alpha=0$) at $L=262\text{K}$, though narrower head dimension slightly reduces overloaded $R=32$ accuracy ($34.31\%$ vs.\ $38.41\%$). Meanwhile, uncentered implicit differentiation fails to optimize ($0.91\%$ at $262\text{K}$).
+\end{itemize}
+
+\begin{table}[t]
+  \centering
+  \caption{\textbf{Gate complexity, semi-relaxed annealing, multi-head scaling, and falsified negative controls} across 3 seeds. Naive semi-relaxed OT and uncentered implicit differentiation fail during training, whereas 2-stage balanced-to-semirelaxed annealing (THOT-SR) and $O(L)$ thresholded ReLU (with $\alpha=0.05$) sustain high accuracy at $L=262\text{K}$.}
+  \label{tab:adv-ablations}
+  \setlength{\tabcolsep}{4pt}
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}lcccc@{}}
+    \toprule
+    Variant & $\alpha$ & $L=128$ / $8\text{K}$ / $262\text{K}$ & Coll.\ $8\text{K}$ (C0/16/32/64) & Cap.\ $512$ (R8/16/32) \\
+    \midrule
+    THOT (1+2, ReLU-Thresh, $O(L)$) & $0.05$ & $\mathbf{99.09 / 98.96 / 98.83}$ & $98.18 / 40.10 / 20.83 / 8.98$ & $98.05 / \mathbf{80.66} / 39.81$ \\
+    THOT (1+2, ReLU-Unnorm, $O(L)$) & $0.05$ & $97.92 / 96.88 / 94.79$ & $96.74 / 42.58 / 18.62 / 7.55$ & $97.66 / 78.32 / \mathbf{40.20}$ \\
+    THOT-SR ($\gamma_b=0.92$, Sparsemax) & $0.05$ & $97.79 / 97.53 / 97.40$ & $\mathbf{98.57} / 42.06 / 23.57 / \mathbf{11.33}$ & $97.53 / 78.84 / 38.90$ \\
+    THOT (4-Head, $d_h=8$, Sparsemax) & $0.05$ & $96.74 / 96.74 / 95.96$ & $95.57 / 38.93 / 18.49 / 6.51$ & $95.31 / 73.63 / 34.31$ \\
+    \midrule
+    THOT (1+2, ReLU-Thresh, $O(L)$) & $0.00$ & $97.92 / 93.49 / 80.60$ & $93.62 / 35.16 / 18.10 / 7.03$ & $96.74 / 77.67 / 37.57$ \\
+    \textbf{THOT-SR ($\gamma_b=0.92$, Sparsemax)} & $\mathbf{0.00}$ & $\mathbf{98.44 / 97.01 / 95.57}$ & $\mathbf{95.70} / 40.23 / \mathbf{22.53} / 10.03$ & $\mathbf{97.27} / \mathbf{76.89} / \mathbf{39.91}$ \\
+    THOT (4-Head, $d_h=8$, Sparsemax) & $0.00$ & $97.01 / 95.44 / 94.14$ & $95.05 / 36.98 / 15.76 / 6.77$ & $96.09 / 72.98 / 34.67$ \\
+    \midrule
+    \textit{Control:} Naive Semi-Relaxed OT ($\gamma_b=0.85$) & $0.00$ & $0.13 / 0.13 / 0.13$ & $0.65 / 0.65 / 0.65 / 0.65$ & $0.26 / 0.33 / 0.33$ \\
+    \textit{Control:} Uncentered Implicit-VJP OT & $0.05$ & $0.65 / 0.52 / 0.91$ & --- & --- \\
+    \bottomrule
+  \end{tabular}}
+\end{table}
+
+\subsection{GPU Latency and Compiler Memory Benchmarks}
+\label{sec:exp-sys}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/fig_systems_pareto.pdf}
+  \caption{\textbf{GPU operator latency and static XLA compiler temporary memory on NVIDIA L4.}
+  \textbf{(a)} At multi-head transformer geometry ($H=8, D=64, L=262{,}144$), our batched split-factor BF16 Tensor-Core kernel completes forward+VJP in $100.1\,\text{ms}$ ($1{,}132\,\text{MiB}$ static compiler temp), outperforming Unfused Hub OT by $4.8\times$, Latent Softmax by $2.2\times$ ($4.0\times$ less compiler temp), and dense cuDNN FlashAttention by $92\times$.
+  \textbf{(b)} On a practical WikiText-4K layer ($B=2, L=4{,}096, H=8, D=32, r=32$), THOT (BF16 TC) is $3.3\times$ faster forward+VJP than cuDNN FlashAttention ($1.34\,\text{ms}$ vs.\ $4.37\,\text{ms}$).}
+  \label{fig:systems-pareto}
+\end{figure}
+
+Table~\ref{tab:systems} and Figure~\ref{fig:systems-pareto} report operator and attention-layer microbenchmarks on NVIDIA L4 (median of five timed runs after compilation warmup). At $H=8, D=64, L=262{,}144$, \emph{THOT Kernel (BF16 TC)} executes forward in \textbf{$34.71\,\text{ms}$} and forward+VJP in \textbf{$100.10\,\text{ms}$} with $1{,}132.1\,\text{MiB}$ static compiler temporary allocation. Even in full FP32 precision, split accumulators and native grid batching reduce forward+VJP latency from $480.83\,\text{ms}$ (\emph{Unfused Hub OT}) down to $268.90\,\text{ms}$ while halving compiler temporary storage ($2{,}160.6 \to 1{,}132.1\,\text{MiB}$). Relative to \emph{Latent Softmax}, our BF16 Tensor-Core kernel is $2.22\times$ faster forward+VJP with $4.0\times$ lower static temporary memory ($1{,}132.1$ vs.\ $4{,}521.3\,\text{MiB}$). Moreover, linear scaling outperforms quadratic attention even at moderate sequence lengths: on a WikiText-4K attention layer ($B=2, L=4{,}096, H=8, D=32, r=32$), THOT beats cuDNN FlashAttention by $2.02\times$ forward ($0.544$ vs.\ $1.100\,\text{ms}$) and $3.27\times$ forward+VJP ($1.337$ vs.\ $4.368\,\text{ms}$).
+
+At the full 2-layer MoE model level ($D=32, L=262{,}144$, measured prior to split-factor kernel integration), THOT runs forward+grad in $139.26\,\text{ms}$ ($2{,}614.1\,\text{MiB}$ static temp), beating \emph{Latent Softmax + Sparsemax} ($144.34\,\text{ms}$, $2{,}851.1\,\text{MiB}$) and outpacing the dense FlashAttention MoE ($1{,}426.69\,\text{ms}$) by over $10\times$. Note that reported memory figures denote XLA static compiler temporary buffer estimates rather than runtime peak device memory allocations.
+
+\begin{table}[t]
+  \centering
+  \caption{\textbf{Operator and WikiText-4K attention-layer benchmarks on NVIDIA L4.} Memory reports XLA compiler static temporary buffer size (separate from runtime peak VRAM).}
+  \label{tab:systems}
+  \setlength{\tabcolsep}{5pt}
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}llrrr@{}}
+    \toprule
+    Geometry & Operator & Forward (ms) & Forward+VJP (ms) & Comp.\ Temp (MiB) \\
+    \midrule
+    $H=8, D=64, L=262{,}144$ & \textbf{THOT Kernel (BF16 TC)} & $\mathbf{34.708}$ & $\mathbf{100.097}$ & $\mathbf{1{,}132.1}$ \\
+    ($B=1, r=4, K=16$) & THOT Kernel (FP32) & $111.293$ & $268.897$ & $1{,}132.1$ \\
+    & Unfused Hub OT & $109.278$ & $480.834$ & $2{,}160.6$ \\
+    & Latent Softmax & $42.966$ & $221.889$ & $4{,}521.3$ \\
+    & FlashAttention (cuDNN) & $2{,}227.004$ & $9{,}235.409$ & $1{,}040.0$ \\
+    \midrule
+    $H=1, D=32, L=262{,}144$ & \textbf{THOT Kernel (BF16 TC)} & $\mathbf{1.684}$ & $\mathbf{5.380}$ & $\mathbf{74.3}$ \\
+    ($B=1, r=4, K=16$) & Unfused Hub OT & $7.175$ & $24.448$ & $142.0$ \\
+    & Latent Softmax & $5.593$ & $22.964$ & $292.1$ \\
+    & FlashAttention (cuDNN) & $279.524$ & $1{,}287.432$ & $66.0$ \\
+    \midrule
+    WikiText-4K Layer & \textbf{THOT Kernel (BF16 TC)} & $\mathbf{0.544}$ & $\mathbf{1.337}$ & $33.0$ \\
+    ($B=2, L=4{,}096, H=8$) & THOT Kernel (FP32) & $2.186$ & $5.138$ & $33.0$ \\
+    ($D=32, r=32, K=16$) & Unfused Hub OT & $3.959$ & $12.795$ & $59.3$ \\
+    & Latent Softmax & $1.045$ & $4.906$ & $80.8$ \\
+    & FlashAttention (cuDNN) & $1.100$ & $4.368$ & $\mathbf{16.5}$ \\
+    \bottomrule
+  \end{tabular}}
+\end{table}
+
+\subsection{Strictly Causal Autoregressive Benchmarks}
+\label{sec:exp-causal}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/fig_causal_and_wikitext.pdf}
+  \caption{\textbf{Strictly causal associative recall and WikiText-103 4K language modeling.}
+  \textbf{(a)} Under verified $0.0$ future leakage, \emph{Causal THOT} sustains $90.10\%$ zero-shot recall at $L=262\text{K}$ ($0.00\%$ filler share), outperforming \emph{Causal Latent Softmax} ($81.77\%$) and \emph{Causal Hub OT (Softmax Gate)} ($32.81\%$).
+  \textbf{(b)} On both Causal Next-Token LM ($512$ steps) and Deep 4-Layer MLM ($640$ steps) over WikiText-103 $4\text{K}$ documents, THOT achieves the largest NLL gain over the unigram baseline and lowest held-out NLL.}
+  \label{fig:causal-and-wikitext}
+\end{figure}
+
+Table~\ref{tab:causal} and Figure~\ref{fig:causal-and-wikitext}(a) summarize our autoregressive evaluations. On strictly causal associative recall (all $R=8$ bindings precede all $Q=8$ queries beyond window radius), \emph{Causal Local Window} fails ($0.52\%$) and softmax-gated causal OT collapses to $32.81\%$ at $L=262\text{K}$ as background filler absorbs $98.87\%$ of capacity. In contrast, \emph{Causal THOT} retains $0.00\%$ filler mass and sustains \textbf{$90.10\%$} accuracy at $L=262{,}144$ ($0.564$ NLL), beating \emph{Causal Latent Softmax} ($81.77\%$, $1.162$ NLL) by $+8.3$ percentage points.
+
+We further train 4-layer, 8-head ($D=256$, $r=32$, $K=16$, $C=32$, 4 MoE experts) causal language models on $L=4{,}096$ WikiText-103 documents (batch size $2$, 2 seeds, $512$ steps, unigram NLL $6.4770$). We evaluate held-out NLL both on intact $4\text{K}$ sequences (\emph{Intact}) and when documents are segmented into isolated $16 \times 256$-token blocks (\emph{Blocked}); their difference (\emph{Ctx Gain}) quantifies long-range context utilization beyond $256$ tokens. \emph{Causal THOT} achieves the lowest intact NLL (\textbf{$4.1560$}) and highest token accuracy (\textbf{$22.48\%$}), outperforming \emph{Causal Local Window} ($4.1706$), \emph{Causal Latent Softmax} ($4.2074$), and \emph{Causal FlashAttention} ($4.3903$). While \emph{Causal Latent Softmax} shows slightly higher relative block-to-4K difference ($+0.0256$ vs.\ $+0.0165$ nats), \emph{Causal THOT} leads across both intact and blocked settings by more than $0.05$ nats.
+
+\begin{table}[t]
+  \centering
+  \caption{\textbf{Strictly causal associative recall ($L=128\to 262\text{K}$, 3 seeds) and causal WikiText-4K next-token LM (2 seeds $\times 512$ steps).} Every model verifies $0.0$ future-token leakage.}
+  \label{tab:causal}
+  \setlength{\tabcolsep}{4pt}
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}lccccccc@{}}
+    \toprule
+    & \multicolumn{2}{c}{Causal Recall Zero-Shot} & \multicolumn{5}{c}{Causal WikiText-4K LM (Unigram $6.4770$)} \\
+    \cmidrule(lr){2-3} \cmidrule(lr){4-8}
+    Causal Model & $128 \to 8\text{K} \to 262\text{K}$ & $262\text{K}$ Fill & Step (ms) & Intact & Blocked & Ctx Gain & Acc \\
+    \midrule
+    \textbf{Causal THOT} & $\mathbf{94.27 / 90.23 / 90.10\%}$ & $\mathbf{0.00\%}$ & $211.41$ & $\mathbf{4.1560}$ & $\mathbf{4.1724}$ & $+0.0165$ & $\mathbf{22.48\%}$ \\
+    Causal Latent Softmax & $83.46 / 82.16 / 81.77\%$ & $0.00\%$ & $151.03$ & $4.2074$ & $4.2330$ & $\mathbf{+0.0256}$ & $21.57\%$ \\
+    Causal Local Window & $0.52 / 0.52 / 0.52\%$ & $99.99\%$ & $\mathbf{121.54}$ & $4.1706$ & $4.1786$ & $+0.0080$ & $22.33\%$ \\
+    Causal FlashAttention & --- & --- & $126.45$ & $4.3903$ & $4.4137$ & $+0.0234$ & $18.21\%$ \\
+    Causal Hub OT (Softmax Gate) & $84.77 / 75.39 / 32.81\%$ & $98.87\%$ & --- & --- & --- & --- & --- \\
+    \bottomrule
+  \end{tabular}}
+\end{table}
+
+\subsection{Real Natural Language: Multi-Needle Prose Retrieval and WikiText-4K MLM}
+\label{sec:exp-wikitext}
+
+To assess generalization beyond synthetic tokens on natural English prose, we evaluate two benchmarks derived from WikiText-103:
+
+\paragraph{Zero-shot multi-needle retrieval in WikiText-103 prose (\texorpdfstring{$\alpha=0$}{alpha=0}).}
+We insert $R=8$ multi-needle key-value pairs constructed from real vocabulary tokens into contiguous WikiText-103 passages without any auxiliary gate supervision ($\alpha=0$), train 2 seeds for $512$ steps at $L=512$, and evaluate zero-shot at $L=512$, $8{,}192$, and $65{,}536$. Table~\ref{tab:wikitext}(left) and Figure~\ref{fig:dilution-and-retrieval}(b) demonstrate sharp separation: \emph{FlashAttention (cuDNN)} reaches $99.22\%$ at its $512$-token training length, then collapses to $0.78\%$ ($8.0463$--$8.1803$ NLL) when evaluated at $8\text{K}$ and $64\text{K}$. Legacy $4+2$ OT ($83.59\%$), \emph{Latent Softmax + Sparsemax} ($79.69\%$), and \emph{Support Softmax + Sparsemax} ($78.91\%$) maintain functional prose retrieval, whereas \textbf{THOT (1+2, Sparsemax)} generalizes cleanly with scale and hits \textbf{$100.00\%$} across both seeds at $L=65{,}536$ ($0.0514$ NLL).
+
+\paragraph{Deep 4-layer WikiText-4K masked language modeling.}
+We next evaluate bidirectional 4-layer ($D=256, H=8, r=32, K=16$) models on $4{,}096$-token WikiText-103 masked language modeling (MLM) over $640$ matched steps ($\sim 15\%$ masked across 1--3 word geometric spans, learning rate $10^{-3}$, unigram NLL $6.4788$). To ensure a fair comparison with full-capacity dense attention, we enforce four uniform stabilization practices across all architectures: (1) non-zero learned mask embeddings rather than zero vectors (avoiding RMSNorm Jacobian spikes that trigger excessive gradient clipping), (2) unit output logit scaling without redundant $1/\sqrt{D}$ attenuation, (3) independent query and key initializations alongside full rotary dimensionality ($d_{\text{rope}}=32$, base $10{,}000$) for dense FlashAttention to prevent diagonal self-attention lock and frequency aliasing, and (4) standard short $1$--$3$ word masking spans. Under this balanced setup (Table~\ref{tab:wikitext}, right), \textbf{THOT (1+2, Sparsemax)} achieves the best held-out NLL (\textbf{$5.5657$}, $+0.9130$ gain over unigram, $10.07\%$ accuracy), outperforming \emph{Support Softmax + Sparsemax} ($5.5819$), \emph{Latent Softmax + Sparsemax} ($5.6430$), and full-RoPE \emph{FlashAttention} ($6.3424$). While \emph{Support Softmax + Sparsemax} exhibits the largest block-to-4K contrast ($+0.2135$ vs.\ $+0.0151$ nats), THOT achieves the lowest NLL in both intact and blocked evaluations.
+
+\begin{table}[t]
+  \centering
+  \caption{\textbf{Natural-language evaluation on WikiText-103} (2 seeds). \emph{Left:} Zero-shot multi-needle prose retrieval ($R=8, \alpha=0$, trained at $L=512$). \emph{Right:} Deep 4-layer $D=256$ WikiText-4K MLM ($640$ steps, Unigram NLL $6.4788$).}
+  \label{tab:wikitext}
+  \setlength{\tabcolsep}{4pt}
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}lcc|ccccc@{}}
+    \toprule
+    & \multicolumn{2}{c|}{Multi-Needle Prose ($\alpha=0$)} & \multicolumn{5}{c}{Deep WikiText-4K MLM (Unigram $6.4788$)} \\
+    Method & $512 \to 8\text{K} \to 64\text{K}$ & $64\text{K}$ NLL & Step (ms) & Intact & Blocked & Ctx Gain & Acc \\
+    \midrule
+    \textbf{THOT (1+2, Sparsemax)} & $\mathbf{95.31 / 98.05 / 100.0\%}$ & $\mathbf{0.0514}$ & $174.15$ & $\mathbf{5.5657}$ & $\mathbf{5.5808}$ & $+0.0151$ & $\mathbf{10.07\%}$ \\
+    Hub OT (4+2, Sparsemax) & $84.77 / 81.64 / 83.59\%$ & $0.5269$ & --- & --- & --- & --- & --- \\
+    Support Softmax + Sparsemax & $81.25 / 79.30 / 78.91\%$ & $0.7507$ & $139.45$ & $5.5819$ & $5.7954$ & $\mathbf{+0.2135}$ & $9.98\%$ \\
+    Latent Softmax + Sparsemax & $88.28 / 87.50 / 79.69\%$ & $0.8376$ & $136.78$ & $5.6430$ & $5.6663$ & $+0.0233$ & $9.41\%$ \\
+    FlashAttention (cuDNN) & $99.22 / 0.78 / 0.78\%$ & $8.1803$ & $\mathbf{136.32}$ & $6.3424$ & $6.4496$ & $+0.1072$ & $4.07\%$ \\
+    \bottomrule
+  \end{tabular}}
+\end{table}
+
+% ===========================================================================
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Sparse, latent, and linear long-context architectures.}
+Longformer \citep{beltagy2020longformer} and BigBird \citep{zaheer2020bigbird} introduced combined local sliding windows and global tokens for linear-time Transformers, while Perceiver \citep{jaegle2021perceiver} routes sequence representations through learned latent bottleneck arrays and Vision Transformers employ global register tokens as routing scratchpads \citep{darcet2024vision}. Our \emph{Latent Softmax} baseline realizes this latent-bottleneck design under an equal parameter budget, showing that unconstrained key-side softmax normalization still suffers capacity dilution at $262\text{K}$ scale whereas balanced OT preserves source capacity. Complementary sub-quadratic methods---including linear attention \citep{katharopoulos2020transformers}, selective state-space models \citep{gu2024mamba}, and gated linear attention \citep{yang2024gla}---compress history via parallel scans, and \citet{arora2024zoology} highlighted their associative-recall deficits relative to selective attention. Empirical long-context evaluations similarly reveal U-shaped positional drop-offs \citep{liu2024lost}, multi-needle degradation \citep{hsieh2024ruler}, and dependence on positional biases, RoPE extensions, or attention sinks for length generalization \citep{press2022train,peng2024yarn,xiao2024efficient}.
+
+\paragraph{IO-aware attention and OT kernels.}
+The FlashAttention family \citep{dao2022flashattention,dao2023flashattention2,shah2024flashattention3} eliminates $O(L^2)$ memory traffic through SRAM tiling, online softmax, and asynchronous Tensor-Core scheduling implemented in CUDA or Triton \citep{triton2019tillet}. For dense entropic optimal transport, FlashSinkhorn \citep{flashsinkhorn2026} recently introduced IO-aware streaming kernels for full $N\times N$ Sinkhorn scaling. Our custom split-factor Triton kernels apply analogous SRAM tiling and mixed-precision BF16 Tensor Cores directly to the \emph{sparse hub-and-spoke graph} while keeping dual potentials strictly FP32 and compressing adjoint execution to two kernel calls.
+
+\paragraph{Differentiable optimal transport and Sinkhorn attention.}
+Entropic regularization \citep{cuturi2013sinkhorn,peyre2019computational} made Sinkhorn scaling \citep{sinkhornknopp1967,knight2008sinkhorn} practical inside neural layers, inspiring graph feature matching \citep{sarlin2020superglue}, unbalanced/semi-relaxed extensions \citep{chizat2018scaling}, smooth quadratic transport \citep{blondel2018smooth}, doubly-stochastic attention \citep{tay2020sparse,sander2022sinkformers}, warm-start initialization \citep{thornton2023initialization}, and unrolled or implicit Sinkhorn differentiation \citep{luise2018differential,eisenberger2022unified}. Most directly, this paper builds on \citet{forde2026blockwise}, which introduced block-wise Sinkhorn attention with stopped-base tail refinement, and \citet{forde2026topology},% Remove forde2026topology citation if this manuscript supersedes arXiv:2609.07954.
+{} which examined gradient propagation on fixed transport supports. Rather than restricting attention to small fixed-length theory checks, we resolve the capacity-dilution and period-2 oscillation failures that arise at quarter-million-token scale and deliver an end-to-end, causal, Flash-competitive system.
+
+\paragraph{Sparse attention normalization and ReLU gating.}
+Sparsemax \citep{martins2016softmax} and $\alpha$-entmax \citep{correia2019adaptively} replace softmax with compact-support simplex projections, while \citet{wortsman2023replacing} explored point-wise $\ReLU$ attention scaling. We demonstrate that compact sparse support applied specifically at the \emph{marginal capacity gate}---via $\sparsemax$ or $O(L)$ thresholded $\ReLU$---is crucial for preventing $1/(1+\alpha L)$ dilution in OT attention.
+
+% ===========================================================================
+\section{Limitations, Reproducibility, and Conclusion}
+\label{sec:conclusion}
+
+\paragraph{Limitations.}
+We highlight four clear boundaries of our current empirical study:
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{Operator vs.\ full-model kernel integration:} Our split-factor BF16 Tensor-Core kernels were benchmarked at the operator and WikiText-4K attention-layer level ($1.337\,\text{ms}$ vs.\ $4.368\,\text{ms}$ FlashAttention), whereas the multi-layer WikiText-4K training loops ran on our unfused reference path ($174.15$--$211.41\,\text{ms/step}$). Wiring the split-factor kernels into multi-layer training remains engineering integration work. Additionally, maximum operator speedups depend on BF16 Tensor Cores ($100.10\,\text{ms}$ vs.\ $268.90\,\text{ms}$ in FP32 at $H=8, D=64, L=262\text{K}$).
+  \item \textbf{Static compiler vs.\ runtime memory:} Reported memory figures reflect static XLA compiler temporary allocations rather than dynamic peak runtime VRAM profiles during training.
+  \item \textbf{Language-model scale and context-gain nuances:} Our WikiText-103 language modeling experiments use compact 4-layer ($D=256$, $2{,}048$-token vocabulary, $512$--$640$ updates) models rather than billion-parameter pretraining runs. While THOT achieves the strongest overall intact and blocked NLL on both WikiText-4K tasks, \emph{Support Softmax + Sparsemax} ($+0.2135$ vs.\ $+0.0151$ nats in MLM) and \emph{Causal Latent Softmax} ($+0.0256$ vs.\ $+0.0165$ nats in causal LM) exhibit higher relative intact-vs.-blocked differences.
+  \item \textbf{Gate trade-offs and hub bottleneck:} The sorting-free $O(L)$ thresholded ReLU gate relies on light gate supervision ($\alpha=0.05$) to hold $98.83\%$ at $L=262\text{K}$, falling to $80.60\%$ at $\alpha=0$. Under severe hub overload ($R=32$ active bindings competing for $K=16$ hubs), recall remains bounded near $38\%$--$40\%$.
+\end{enumerate}
+
+\paragraph{Reproducibility Statement.}
+All experiments were conducted on NVIDIA L4 GPUs in JAX with fixed random seeds, deterministic data generators, and identical parameter budgets across compared arms. Timing benchmarks report the median of five repeated timed executions following JIT compilation warmup; full hyperparameters and backward adjoint equations appear in Appendix~\ref{app:details}. Notice on \texttt{arXiv:2609.07954}: this manuscript extends our earlier preprint architecture with empirical scaling, kernel engineering, causal chunking, and natural-language validation.
+
+\paragraph{Conclusion.}
+Topology Hub Optimal Transport resolves the four practical obstacles---softmax capacity dilution, finite-step Sinkhorn oscillation, unrolled backward overhead, and non-causality---that previously constrained optimal-transport attention. By pairing bounded-support capacity gates with a $1+2$ annealed row-closed Sinkhorn schedule, a Two-Call One-Reference-Tile adjoint implemented in split-factor BF16 Tensor-Core Triton kernels, and a strictly causal prefix scan, THOT extrapolates cleanly from $L=128$ to $L=262{,}144$ ($97.40\%$ pure cross-entropy recall), achieves $100.00\%$ zero-shot multi-needle prose retrieval at $L=65{,}536$, and surpasses FlashAttention speed already at $4{,}096$ tokens.
+
+% ===========================================================================
+\appendix
+\section{Experimental Hyperparameters and Adjoint Derivation}
+\label{app:details}
+
+\begin{table}[htbp]
+  \centering
+  \small
+  \caption{\textbf{Summary of experimental configurations across all benchmarks.}}
+  \label{tab:hparams}
+  \begin{tabular}{@{}l p{0.68\linewidth}@{}}
+    \toprule
+    Benchmark & Configuration Details \\
+    \midrule
+    Hardware & NVIDIA L4 GPU; timings are medians of 5 timed repeats after compilation warmup \\
+    Synthetic Recall & 2-layer MoE ($D=32$, 4 experts, hidden $48$), $K=16$, $r=4$, $M=8.0$, $1{,}536$ steps at $L=128$, 3 seeds ($1711, 2917, 4129$) \\
+    Kernel Benchmarks & Batched split-factor Triton; BF16 Tensor-Core matmuls with FP32 accumulation and strictly FP32 potentials/LSE \\
+    Causal Recall / WT-4K & Chunk size $C=32$, $r=4$ (Recall) / $r=32$ (WT-4K), $K=16$, 4-layer $H=8, D=256$, $512$ steps ($\text{lr}=2.5\times 10^{-3}, \beta_2=0.98$) \\
+    WikiText Prose / MLM & 4-layer $H=8, D=256$, vocab $2{,}048$, $r=32, K=16$, 2 seeds ($1711, 2917$), $640$ MLM / $512$ needle steps \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Two-call One-Reference-Tile adjoint derivation.}
+Let $(u_{\text{out}}, v_3)$ denote the saved terminal log-potentials at convergence of Algorithm~1, defining row-stochastic attention weights $W_{ij} = \exp(S_{ij} + u_{\text{out},i} + v_{3,j})$ on $\Omega$, and output $Y = WV$. Given upstream loss gradient $\bar{Y} = \partial \ell / \partial Y$, standard differentiation yields the value gradient $\nabla_V = W^\top \bar{Y}$ and attention-weight sensitivity
+\begin{equation}
+  \delta^{\text{out}}_i = \sum_{j:(i,j)\in\Omega} W_{ij} \big(\bar{Y}_i^\top V_j - \bar{Y}_i^\top Y_i\big).
+\end{equation}
+Because the final row closure $u_{\text{out},i} = \ln a_i - \operatorname{LSE}_j(S_{ij} + v_{3,j})$ and the two differentiable Sinkhorn sweeps depend on $(S, a, b)$ exclusively through alternating log-sum-exp operations on the same sparse support $\Omega$, reverse-mode differentiation through Sweeps 2--3 collapses into two $O(L)$ vector adjoints $(\alpha^{\text{tail}}, \beta^{\text{tail}})$ accumulated from terminal dual sensitivities $(\bar{u}, \bar{v})$ using only the cached forward log-sum-exp states and marginals. Collecting these row and column terms, the exact score adjoint simplifies to
+\begin{equation}
+  \bar{S}_{ij} = W_{ij} \Big( \bar{Y}_i^\top (V_j - Y_i) + \alpha^{\text{tail}}_i + \beta^{\text{tail}}_j \Big),
+\end{equation}
+evaluated without materializing intermediate $T_{\text{tail}}$ matrices. Call~1 computes $\nabla_V = W^\top \bar{Y}$ and $\bar{Y}_i^\top Y_i$ in a single row-major SRAM pass; Call~2 computes $\nabla_Q, \nabla_K$, and $\nabla_B = \sum_{\tau} \bar{S}$ in a single transposed SRAM pass directly from $\bar{S}_{ij}$.
+
+\paragraph{WikiText-4K optimization stabilization details.}
+In preliminary MLM prototypes, four subtle initialization interactions selectively degraded baselines: (i) zero-initialized masked token embeddings produced zero vectors entering RMSNorm ($\approx 10^3\times$ backward Jacobian amplification), triggering global gradient-norm clipping; (ii) applying $1/\sqrt{D}$ scaling after unit-norm embeddings doubly attenuated output logits by $16\times$; (iii) nearly aligned query and key initializations combined with short-period partial RoPE locked dense FlashAttention onto the diagonal self-token; and (iv) overly long 10-word corruption spans hindered early optimization. Applying non-zero learned mask embeddings, unit logit scaling, independent query/key projections with full rotary coverage ($d_{\text{rope}}=32$, base $10{,}000$), and 1--3 word geometric masking spans uniformly resolves all four pathologies across every baseline and THOT model.
+
+{\footnotesize
+\setlength{\bibsep}{2pt plus 0.5pt}
+\bibliographystyle{plainnat}
+\bibliography{references}
+}
+
+\end{document}
