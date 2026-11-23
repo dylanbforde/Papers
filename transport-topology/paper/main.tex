@@ -1,16 +1,23 @@
 \documentclass[10pt]{article}
 
 \usepackage{research_preprint}
+\usepackage{lmodern}
 \usepackage{amsmath,amssymb,amsthm}
 \usepackage{array}
 \usepackage{booktabs}
 \usepackage{graphicx}
+\usepackage{tikz}
+\usepackage{xcolor}
 \usepackage{hyperref}
 \hypersetup{hidelinks}
 
 \usepackage{url}
 \usepackage{microtype}
 \usepackage{enumitem}
+
+\definecolor{navy}{RGB}{0,56,118}
+\definecolor{crimson}{RGB}{165,28,48}
+\definecolor{slate}{RGB}{90,100,110}
 
 \newtheorem{theorem}{Theorem}
 \newtheorem{proposition}{Proposition}
@@ -22,2199 +29,738 @@
 \newcommand{\one}{\mathbf{1}}
 \newcommand{\TV}{\mathrm{TV}}
 \newcommand{\supp}{\mathrm{supp}}
+\DeclareMathOperator{\diag}{diag}
 
+\title{Support Topology and Gradient Mixing in Sinkhorn Layers}
 \author{Dylan B. Forde\\Independent Researcher\\\texttt{forde.dylan@gmail.com}}
 \date{}
 
-\hypersetup{pdfauthor={Dylan B. Forde},pdftitle={Transport Topology for Fixed-Support Sinkhorn Layers}}
+\hypersetup{pdfauthor={Dylan B. Forde},pdftitle={Support Topology and Gradient Mixing in Sinkhorn Layers}}
 \begin{document}
 \maketitle
 
 \begin{abstract}
-Fixed-support Sinkhorn scaling exposes an exact quotient Markov operator.  For
-finite active scores, compatible positive marginals, and a fixed support
-$\Omega$, a finite row-column cycle has homogeneous column-potential
-linearization $\delta v^+=C_t^\top R_t\,\delta v$, with
-$R_t=\diag(a)^{-1}P_t^r$ and $C_t=P_t^c\diag(b)^{-1}$ formed from the two
-actual half-step plans. At a balanced fixed point these plans coincide with
-$P$, giving $M=\diag(b)^{-1}P^\top\diag(a)^{-1}P$. Both derivative forms
-are row-stochastic, descend to potentials modulo constants, and their
-transposes govern homogeneous zero-mass quotient cotangents.  This paper
-makes that fixed-support calculus self-contained, including score/source terms
-in the first-order half-step equations and the projected-source tail recurrence
-$\eta_t=M_t^\top\eta_{t+1}+\xi_t$.  Dobrushin and minorization coefficients
-then give rigorous homogeneous and inhomogeneous tail-cotangent bounds for this
-quotient-transport component.  The main structural result is a face-lattice
-dichotomy: a support--marginal pair has a score-uniform one-step quotient-mixing
-certificate if and only if every feasible face of its transportation polytope
-has pairwise two-hop column overlap; otherwise finite score directions can make
-$\tau(M)$ arbitrarily close to one.  Windowed products, partition heat-bath
-supports, product-coordinate sweeps, forced bus mass, and register examples are
-proved as support-schedule certificates.  The validation scope is deliberately
-certificate-level: small exact VJPs, quotient implicit VJPs, cost benchmarks,
-generated-score stress tests, and adversarial faces check theorem objects and
-failure modes, not system speedups or downstream accuracy.
+Sinkhorn attention layers normalize weights over a fixed sparse mask by alternating row and column scaling. When training these layers, sparse masks are usually judged by their edge count, graph diameter, or forward reachability. We show that the sparsity pattern and marginal budgets also govern how gradients flow backward through the scaling steps. Differentiating one row--column cycle on column log-potentials yields an explicit row-stochastic Markov kernel built from the two half-step transport plans, which reduces to a reversible two-step random walk at a balanced fixed point. Because potentials are defined only up to additive constants on each connected component, reverse-mode gradients propagate as zero-sum vectors whose total-variation norm contracts at a rate given by the kernel's Dobrushin coefficient. This coefficient bounds both unrolled backpropagation and implicit-differentiation truncation error. Crucially, graph connectivity alone does not prevent gradient trapping: we prove a face-lattice dichotomy showing that a mask and marginals guarantee score-uniform one-step contraction if and only if every nonempty face of the transportation polytope retains pairwise two-hop column overlap; otherwise, large learned scores can push the contraction rate arbitrarily close to one. We extend this criterion to multi-layer schedules, prove exact one-sweep mixing for coordinate-factorized and butterfly masks, and derive closed-form bounds for expanders, local bands, and global hub tokens. Deterministic numerical checks verify our finite-difference adjoints, canonical sparse masks, adversarial score limits, and spectral formulas.
 \end{abstract}
 
 \section{Introduction}
 
-Block-Wise Differentiable Sinkhorn Attention \citep{forde2026blockwise}
-studies the local differentiated-surrogate problem for fixed-support Sinkhorn
-attention: after a stopped base solve, a short refinement tail is
-differentiated exactly and scheduled blockwise. The question here is
-different and complementary: given a fixed support or scheduled family of
-supports, which topologies make the induced quotient reverse dynamics mix,
-trap, or require windowed products?
+Attention builds an output by weighting and combining values. In standard softmax attention, each query normalizes its row independently, so many queries can concentrate on the same key \citep{vaswani2017attention}. Differentiable optimal transport (OT) layers add a second constraint: every key also has a target capacity, and Sinkhorn iteration alternates row and column rescalings to balance both budgets \citep{cuturi2013sinkhorn,tay2020sparse,sander2022sinkformers}. On long sequences, computing a dense all-pairs transport plan is too expensive, so practical layers restrict attention to a fixed sparse support mask---such as a local sliding window, a random expander, or a small set of global hub tokens \citep{beltagy2020longformer,zaheer2020bigbird,forde2026blockwise}.
 
-Transformer architecture papers often separate topology from differentiation.
-The topology specifies who can attend to whom, which registers or global
-tokens exist, how experts are reachable, and how residual branches merge; the
-gradient analysis then treats the resulting computation graph as given. For
-Sinkhorn-style transport attention, this separation leaves useful structure on
-the table. Once the support is fixed, a transport layer is a matrix-scaling
-problem, and a full scaling step has an explicit Markov kernel in reverse
-mode. The support graph therefore constrains not only the FLOP pattern but also
-which cotangent modes can mix, which modes remain trapped, and which residual
-paths can amplify truncation error.
+Sparse attention masks are usually evaluated in the forward pass: how many edges they keep, how many hops separate distant tokens, or how many FLOPs they save. Once the support mask is fixed, however, the scaling iterations also define a structured linear map in the backward pass. Whether training uses a short unrolled refinement tail \citep{forde2026blockwise} or implicit differentiation at a fixed point \citep{luise2018differential,eisenberger2022unified,pauwels2023derivatives}, reverse-mode gradients through the dual potentials move according to a two-step Markov kernel on columns. Its Dobrushin contraction coefficient determines whether gradient errors wash out across iterations or stay trapped in isolated modes.
 
-This paper proposes the following design principle:
-\begin{quote}
-Sparse transport topologies should be evaluated by quotient-gradient mixing,
-not only by density, graph diameter, or token reachability.
-\end{quote}
+The main surprise is that a well-connected graph can still fail to mix gradients once edge scores are learned. Even if a mask has a global hub row connected to every token, strong score preferences can starve the hub edges and push the transport plan onto a disconnected boundary face of the feasible polytope. At that boundary, two-hop column neighborhoods stop overlapping, and the contraction rate approaches one. Preventing that collapse requires either keeping realized edge masses bounded away from zero or sizing the marginal budgets so the hub cannot empty out.
 
-The coefficient is a derivative certificate, not a generic graph statistic. A
-fixed support and a score-induced plan produce a testable operator for
-reverse-mode transport, and the resulting certificate distinguishes dense
-masks, narrow local windows, disconnected supports, global-token supports,
-register-augmented supports, and residual DAGs. In the equal-score biregular
-baseline the certificate is a pure graph quantity; away from that baseline it
-is controlled by the realized scaled plan, plan-distortion bounds, or
-mass-floor hypotheses.
+\begin{figure}[t]
+  \centering
+  \resizebox{\linewidth}{!}{%
+  \begin{tikzpicture}[>=stealth, font=\small]
+    % Left panel: Two-hop walk M = C^T R
+    \node[anchor=west, font=\bfseries] at (-0.2, 3.12) {(a) Two-hop column walk $M = C^\top R$};
+    \draw[rounded corners, draw=black!25, fill=black!2] (-0.2,-0.32) rectangle (6.4,2.80);
 
-\paragraph{Mathematical setting.}
-The scope is fixed support, compatible positive marginals, finite active
-scores, and quotient cotangents.  The theory proves exact statements about the
-fixed-support quotient-transport component.  It does not prove support-changing
-training rules, production kernels, hardware speedups, or task-quality gains.
-When neural parameters, values, Q/K/V maps, residual branches, or losses add
-source terms, the theorem applies after those source cotangents are projected
-and their norms are bounded separately.
+    % Rows (top)
+    \node[draw, circle, fill=white, minimum size=0.62cm] (i1) at (1.9, 2.08) {$i_1$};
+    \node[draw, circle, fill=white, minimum size=0.62cm] (i2) at (4.5, 2.08) {$i_2$};
+    \node[anchor=east, font=\scriptsize, text=slate] at (1.35, 2.08) {Rows};
 
+    % Columns (bottom)
+    \node[draw, circle, fill=white, minimum size=0.62cm] (a) at (1.1, 0.48) {$\alpha$};
+    \node[draw, circle, fill=white, minimum size=0.62cm] (g) at (3.2, 0.48) {$\gamma$};
+    \node[draw, circle, fill=white, minimum size=0.62cm] (b) at (5.3, 0.48) {$\beta$};
+    \node[anchor=east, font=\scriptsize, text=slate] at (0.6, 0.48) {Cols};
 
-Matrix scaling has classical foundations in \citet{sinkhornknopp1967};
-\citet{idel2016review} surveys existence, support conditions, and convergence.
-Entropic optimal transport connects this scaling problem to computational
-transport \citep{cuturi2013sinkhorn,peyre2019computational}.
+    % Edges in Omega
+    \draw[thick, color=navy, ->] (a) -- node[left, font=\scriptsize] {$C_{i_1\alpha}$} (i1);
+    \draw[thick, color=navy, ->] (i1) -- node[right, pos=0.35, font=\scriptsize] {$R_{i_1\gamma}$} (g);
+    \draw[thick, color=crimson, ->] (b) -- node[right, font=\scriptsize] {$C_{i_2\beta}$} (i2);
+    \draw[thick, color=crimson, ->] (i2) -- node[left, pos=0.35, font=\scriptsize] {$R_{i_2\gamma}$} (g);
 
-\section{Fixed-Support Sinkhorn Calculus}
+    \node[align=center, font=\scriptsize, text=black!80] at (3.2, -0.06)
+      {Rows $\alpha$ and $\beta$ of $M$ share positive mass at $\gamma$};
 
-Let $\Omega\subseteq[m]\times[n]$ be a fixed active support with row
-neighborhoods $\Omega_i=\{j:(i,j)\in\Omega\}$ and column neighborhoods
-$\Omega^j=\{i:(i,j)\in\Omega\}$.  Let $a\in\mathbb{R}^m_{>0}$ and
-$b\in\mathbb{R}^n_{>0}$ be compatible marginals with
-$\one^\top a=\one^\top b=T$.  Scores are dimensionless active-edge scores
-$s_{ij}\in\mathbb{R}$ for $(i,j)\in\Omega$; inactive entries are omitted, or
-viewed as $-\infty$.  If raw logits are $\theta_{ij}$ at temperature
-$\varepsilon>0$, then $s_{ij}=\theta_{ij}/\varepsilon$, so raw-score source
-terms below acquire the factor $1/\varepsilon$.
+    % Right panel: Local band vs Hub
+    \node[anchor=west, font=\bfseries] at (7.1, 3.12) {(b) Two-hop overlap and contraction $\tau(M)$};
+    \draw[rounded corners, draw=black!25, fill=black!2] (7.1,-0.32) rectangle (15.45,2.80);
 
-A log-potential pair $(u,v)\in\mathbb{R}^m\times\mathbb{R}^n$ represents the
-active-edge plan
+    % Top strip: local band
+    \node[anchor=west, font=\scriptsize\bfseries] at (7.35, 2.48) {Local band ($r=1, n=10$): disjoint 2-hop sets ($\tau=1$)};
+    \foreach \k in {1,...,10} {
+      \node[draw, minimum width=0.46cm, minimum height=0.35cm, fill=white, font=\scriptsize] (t\k) at (7.18 + 0.72*\k, 1.92) {\k};
+    }
+    \draw[very thick, color=navy] (7.90-0.27, 1.69) rectangle (10.06+0.27, 2.15);
+    \draw[very thick, color=crimson] (11.50-0.27, 1.69) rectangle (14.38+0.27, 2.15);
+    \node[font=\scriptsize, text=navy] at (8.98, 1.44) {from col $2$};
+    \node[font=\scriptsize, text=crimson] at (12.94, 1.44) {from col $8$};
+
+    % Bottom strip: shared hub
+    \node[anchor=west, font=\scriptsize\bfseries] at (7.35, 1.04) {With shared hub row $h$: common mass ($\tau \le 1 - \gamma_{\mathrm{shared}}$)};
+    \node[draw, rounded corners, fill=navy!10, minimum width=1.15cm, minimum height=0.38cm, font=\scriptsize\bfseries] (hub) at (11.1, 0.48) {hub $h$};
+    \node[draw, circle, fill=white, minimum size=0.46cm, font=\scriptsize] (c2) at (8.4, 0.48) {$2$};
+    \node[draw, circle, fill=white, minimum size=0.46cm, font=\scriptsize] (c8) at (13.8, 0.48) {$8$};
+    \draw[thick, color=navy, ->] (c2) -- (hub);
+    \draw[thick, color=crimson, ->] (c8) -- (hub);
+    \node[font=\scriptsize, text=slate] at (11.1, -0.06) {all columns overlap through $h$ if hub edges stay positive};
+  \end{tikzpicture}
+  }
+  \caption{\textbf{Support structure and two-hop gradient mixing.} \textbf{(a)} Differentiating one Sinkhorn cycle produces the column-to-column kernel $M = C^\top R$, which moves from column $\alpha$ to an active row $i$ and back to column $\gamma$. \textbf{(b)} In a narrow local band, distant columns have disjoint two-hop neighborhoods, leaving $\tau(M)=1$. Adding a shared hub row creates common overlap as long as the hub keeps positive mass.}
+  \label{fig:two-hop-walk}
+\end{figure}
+
+\paragraph{Contributions.}
+We make four contributions:
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{Fixed-support differential calculus (Section~\ref{sec:calculus}).} We derive the exact forward linearization and reverse-mode equations for a finite Sinkhorn cycle on a fixed support, distinguishing the two half-step plans $P_t^r \neq P_t^c$ out of equilibrium. Using Dobrushin's coefficient on zero-sum dual gradients, we bound both unrolled tail backpropagation and implicit-differentiation truncation error.
+  \item \textbf{Equal-score baselines and score sensitivity (Section~\ref{sec:baselines}).} When scores are equal on a biregular mask, the derivative kernel is the two-step simple random walk on the support graph. We bound how contraction degrades under plan distortion and show that the dimension of scores that can change the plan equals the graph's cycle rank.
+  \item \textbf{Face-lattice dichotomy for score-uniform contraction (Section~\ref{sec:face-lattice}).} We prove that a mask and marginals force one-step contraction uniformly over all finite scores if and only if every nonempty face of the transportation polytope has pairwise two-hop column overlap. We pair this tight condition with checkable lower bounds via Doeblin minorization and marginal-forced global hubs.
+  \item \textbf{Multi-layer schedules, canonical masks, and verification (Sections~\ref{sec:schedules}--\ref{sec:verification}).} We extend the face-lattice characterization to ordered sequences of sparse layers, prove exact one-sweep mixing for coordinate-factorized and hypercube butterfly schedules whose individual layers do not contract ($\tau = 1$), and derive spectral and closed-form bounds for expanders, local bands, and global hubs. Deterministic numerical checks verify our finite-difference adjoints, canonical masks, adversarial score limits, and spectral formulas.
+\end{enumerate}
+
+\paragraph{Scope.}
+All results apply to fixed active supports, finite edge scores, and compatible positive marginals. We study the Sinkhorn scaling map itself; when surrounding neural layers inject upstream gradients, our bounds apply after projecting those terms onto the zero-sum space and bounding their norms separately. Downstream language or alignment benchmarks are outside the scope of this paper.
+
+\paragraph{Relation to prior work.}
+Matrix scaling dates to \citet{sinkhornknopp1967} and \citet{franklin1989scaling}, with support conditions surveyed in \citet{idel2016review}, local convergence rates analyzed via $C^\top R$ in \citet{knight2008sinkhorn}, and phase transitions studied in \citet{he2026phase}. Entropic regularization \citep{cuturi2013sinkhorn,peyre2019computational} and warm-start rules \citep{thornton2023initialization} made Sinkhorn practical inside neural architectures, while \citet{luise2018differential}, \citet{eisenberger2022unified}, \citet{pauwels2023derivatives}, \citet{greco2023sinkhorn}, and \citet{forde2026blockwise} analyzed unrolled, implicit, and tail-refinement differentiation. On the architectural side, sparse and register-augmented attention \citep{child2019sparse,beltagy2020longformer,zaheer2020bigbird,roy2020routing,darcet2023registers} and sparse mixture-of-experts routing \citep{shazeer2017outrageously,fedus2022switch} motivate our mask families, alongside doubly-stochastic attention and OT kernels \citep{tay2020sparse,sander2022sinkformers,shahbazi2025lotformer,flashsinkhorn2026}, constrained hyper-connections \citep{mhc2025}, and topological message passing \citep{bodnar2022neural_sheaf,hajij2022topological}. Our contraction tools come from Markov chain ergodicity and stochastic matrix products \citep{doeblin1938expose,dobrushin1956central,wolfowitz1963products,seneta2006nonnegative,gaubert2013dobrushin,levin2017markov}, and our score-uniform characterization builds on transportation polytopes \citep{kleewitzgall1968faces,brualdi2006combinatorial,deloera2013transportation} and zero-temperature linear programming limits \citep{cominetti1994asymptotic,weed2018explicit}.
+
+\section{How Sparse Sinkhorn Gradients Move}
+\label{sec:calculus}
+
+Consider a bipartite sparsity pattern $\Omega \subseteq [m]\times[n]$ with row neighborhoods $\Omega_i = \{j : (i,j)\in\Omega\}$ and column neighborhoods $\Omega^j = \{i : (i,j)\in\Omega\}$. Each row $i$ has an emitting budget $a_i > 0$ and each column $j$ has an absorbing budget $b_j > 0$, with total mass $T = \one^\top a = \one^\top b$. Active edges $(i,j) \in \Omega$ carry finite scores $s_{ij} \in \mathbb{R}$ (for logits $\theta_{ij}$ at temperature $\varepsilon > 0$, $s_{ij} = \theta_{ij}/\varepsilon$). Table~\ref{tab:notation} summarizes the notation used throughout the paper.
+
+\begin{table}[t]
+  \centering
+  \small
+  \caption{\textbf{Notation used in the main text.}}
+  \label{tab:notation}
+  \begin{tabular}{@{}ll@{}}
+    \toprule
+    Symbol & Meaning \\
+    \midrule
+    $\Omega \subseteq [m]\times[n]$ & Fixed active support mask; row/column neighborhoods $\Omega_i, \Omega^j$ \\
+    $a \in \mathbb{R}^m_{>0},\; b \in \mathbb{R}^n_{>0}$ & Compatible positive row and column marginals with $\one^\top a = \one^\top b = T$ \\
+    $s_{ij} \in \mathbb{R}$ & Active-edge score ($\theta_{ij}/\varepsilon$ under temperature $\varepsilon > 0$) \\
+    $u, v;\; P$ & Dual log-potentials and transport plan $P_{ij} = \exp(s_{ij}+u_i+v_j)$ on $\Omega$ \\
+    $P_t^r, P_t^c;\; R_t, C_t$ & Row- and column-normalized half-step plans; $R_t = \diag(a)^{-1}P_t^r$, $C_t = P_t^c\diag(b)^{-1}$ \\
+    $M_t = C_t^\top R_t;\; M$ & Finite-cycle column Jacobian ($M_t$) and balanced fixed-point kernel ($M$) \\
+    $Q, Q^*;\; \|\eta\|_{\TV}$ & Column potentials mod constants; zero-sum adjoints $\one^\top \eta = 0$ with $\|\eta\|_{\TV} = \frac{1}{2}\|\eta\|_1$ \\
+    $\tau(M)$ & Dobrushin contraction coefficient $\frac{1}{2}\max_{p,q}\|M_{p\cdot} - M_{q\cdot}\|_1 \in [0,1]$ \\
+    $\Pi(a,b;\Omega)$ & Transportation polytope of nonnegative plans on $\Omega$ with marginals $(a,b)$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Given dual log-potentials $(u,v) \in \mathbb{R}^m \times \mathbb{R}^n$, the active-edge plan is
 \[
-P_{ij}(u,v;s)=\exp(s_{ij}+u_i+v_j)\quad ((i,j)\in\Omega),
-\qquad P_{ij}=0\quad ((i,j)\notin\Omega).
+  P_{ij}(u,v;s) = \exp(s_{ij} + u_i + v_j) \quad ((i,j)\in\Omega),
+  \qquad P_{ij} = 0 \quad ((i,j)\notin\Omega).
 \]
-The pair is a Sinkhorn solution when $P\one=a$ and $P^\top\one=b$.
-The potentials have gauge freedom: on each connected component of the bipartite
-support graph, adding a constant to all row potentials and subtracting the same
-constant from all column potentials leaves $P$ unchanged.  The plan and all
-kernels below are gauge-invariant.
+Adding a constant $c_\Gamma$ to $u$ and subtracting $c_\Gamma$ from $v$ on any connected component $\Gamma$ of $\Omega$ leaves $P$ unchanged. A Sinkhorn solution satisfies $P\one = a$ and $P^\top \one = b$.
 
-\begin{assumption}[Fixed support, finite scores, and feasible marginals]
+\begin{assumption}[Fixed support and strict feasibility]
 \label{ass:fixed-support-feasible}
-The support $\Omega$ is fixed during differentiation, all active scores are
-finite, and every connected component of the active bipartite support has equal
-row and column marginal mass.  When strict positivity on active edges is needed,
-we assume that $\Pi(a,b;\Omega)$ contains a relative-interior point positive on
-every active edge.
+The support $\Omega$ is fixed during differentiation, active scores $s_{ij}$ are finite, and every connected component $\Gamma = (I_\Gamma, J_\Gamma)$ of $\Omega$ has equal row and column marginal mass: $\sum_{i \in I_\Gamma} a_i = \sum_{j \in J_\Gamma} b_j$. When strict edgewise positivity is invoked, $\Pi(a,b;\Omega)$ contains a point positive on every edge of $\Omega$.
 \end{assumption}
 
-For differentiation of transport layers, \citet{eisenberger2022unified}
-develop implicit gradients with respect to costs and target capacities, while
-\citet{pauwels2023derivatives} establish convergence of differentiated
-Sinkhorn iterates under their hypotheses. The calculation below makes the
-individual half-step source terms explicit and distinguishes a finite cycle
-from a balanced fixed point.
+\subsection{One-Cycle Linearization and Reverse-Mode Equations}
 
-\subsection{Half-Step Equations and Linearization}
-
-Given a column potential $v$, the exact row-normalization half-step is
+Starting from an input column potential $v$, one row--column scaling cycle at step $t$ computes
 \begin{align}
- u_i^+(v;s,a)
- &= \log a_i-\log\sum_{j\in\Omega_i}\exp(s_{ij}+v_j),\label{eq:row-half-step}\\
- P^{r}_{ij}
- &= \exp(s_{ij}+u_i^+(v;s,a)+v_j),
- \qquad \sum_{j}P^{r}_{ij}=a_i .
+  u_i^+(v; s, a) &= \log a_i - \log \sum_{j \in \Omega_i} \exp(s_{ij} + v_j),
+  & (P_t^r)_{ij} &= \exp(s_{ij} + u_i^+ + v_j), \label{eq:row-half-step}\\
+  v_j^+(u^+; s, b) &= \log b_j - \log \sum_{i \in \Omega^j} \exp(s_{ij} + u_i^+),
+  & (P_t^c)_{ij} &= \exp(s_{ij} + u_i^+ + v_j^+), \label{eq:column-half-step}
 \end{align}
-Given a row potential $u$, the exact column-normalization half-step is
-\begin{align}
- v_j^+(u;s,b)
- &= \log b_j-\log\sum_{i\in\Omega^j}\exp(s_{ij}+u_i),\label{eq:column-half-step}\\
- P^{c}_{ij}
- &= \exp(s_{ij}+u_i+v_j^+(u;s,b)),
- \qquad \sum_i P^{c}_{ij}=b_j .
-\end{align}
-A full row-column cycle maps $v$ to
-$\mathcal{T}(v)=v^+(u^+(v;s,a);s,b)$.  At a fixed point of this map, the plan
-$P$ has both marginals.
-
-For a balanced fixed-point plan $P$, define
+for $(i,j)\in\Omega$. The first update enforces $P_t^r\one = a$, and the second enforces $(P_t^c)^\top\one = b$. Normalizing each half-step by its enforced marginal defines the stochastic matrices
 \[
- R=\diag(a)^{-1}P\in\mathbb{R}^{m\times n},
- \qquad
- C=P\diag(b)^{-1}\in\mathbb{R}^{m\times n}.
+  R_t = \diag(a)^{-1} P_t^r,
+  \qquad
+  C_t = P_t^c \diag(b)^{-1},
+  \qquad
+  M_t = C_t^\top R_t \in \mathbb{R}^{n\times n}.
 \]
-Rows of $R$ sum to one and columns of $C$ sum to one.  For an active-edge score
-perturbation $\dot s$, define the row and column score averages
-\[
- r_i(\dot s)=\sum_{j\in\Omega_i}R_{ij}\dot s_{ij},
- \qquad
- c_j(\dot s)=\sum_{i\in\Omega^j}C_{ij}\dot s_{ij}.
-\]
-For marginal perturbations write $d_a=\dot a\oslash a$ and
-$d_b=\dot b\oslash b$, componentwise.
+Because rows of $R_t$ and columns of $C_t$ sum to one, $M_t$ is always row-stochastic ($M_t\one = \one$). Out of equilibrium, $P_t^r \neq P_t^c$, so $M_t$ need not be reversible or preserve $b$. At a balanced fixed point $P_t^r = P_t^c = P$, we write $R = \diag(a)^{-1}P$, $C = P\diag(b)^{-1}$, and $M = C^\top R = \diag(b)^{-1}P^\top \diag(a)^{-1}P$.
 
-\begin{proposition}[Full first-order half-step linearization]
+Write $d_a = \dot a \oslash a$ and $d_b = \dot b \oslash b$ for log-marginal perturbations, and define the half-step score averages $r_t(\dot s)_i = \sum_{j\in\Omega_i} (R_t)_{ij}\dot s_{ij}$ and $c_t(\dot s)_j = \sum_{i\in\Omega^j} (C_t)_{ij}\dot s_{ij}$.
+
+\begin{proposition}[First-order linearization of a Sinkhorn cycle]
 \label{prop:half-step-linearization}
-At a balanced fixed-point plan $P$ with positive marginals, the row half-step and
-column half-step have differentials
-\begin{align}
- \dot u^+ &= d_a - R\dot v - r(\dot s),\label{eq:linear-row-half-step}\\
- \dot v^+ &= d_b - C^\top\dot u^+ - c(\dot s).\label{eq:linear-column-half-step}
-\end{align}
-Consequently one full row-column cycle on column potentials has linearization
+Under Assumption~\ref{ass:fixed-support-feasible}, the half-steps \eqref{eq:row-half-step}--\eqref{eq:column-half-step} at cycle $t$ satisfy $\dot u^+ = d_a - R_t \dot v - r_t(\dot s)$ and $\dot v^+ = d_b - C_t^\top \dot u^+ - c_t(\dot s)$, so
 \begin{equation}
 \label{eq:full-linearization-with-sources}
- \dot v^+ = C^\top R\,\dot v
- + \underbrace{d_b-C^\top d_a+C^\top r(\dot s)-c(\dot s)}_{\zeta(\dot s,\dot a,\dot b)} .
+  \dot v^+ = M_t \dot v + d_b - C_t^\top d_a + C_t^\top r_t(\dot s) - c_t(\dot s).
 \end{equation}
-For fixed marginals, the source term is
-$\zeta(\dot s)=C^\top r(\dot s)-c(\dot s)$.  For raw logits
-$\theta$ at temperature $\varepsilon$, substitute
-$\dot s=\dot\theta/\varepsilon$.
+At a balanced fixed point, $R_t$ and $C_t$ coincide with $R$ and $C$.
 \end{proposition}
 
-\begin{proof}
-Differentiate \eqref{eq:row-half-step}.  The derivative of the log-sum-exp
-normalizer in row $i$ is the $R_{ij}$-weighted average of
-$\dot s_{ij}+\dot v_j$, because at the fixed point
-$R_{ij}=P_{ij}/a_i$.  This gives
-$\dot u_i^+=\dot a_i/a_i-\sum_jR_{ij}\dot v_j-\sum_jR_{ij}\dot s_{ij}$, which
-is \eqref{eq:linear-row-half-step}.  Differentiating
-\eqref{eq:column-half-step} gives
-$\dot v_j^+=\dot b_j/b_j-\sum_iC_{ij}\dot u_i^+-\sum_iC_{ij}\dot s_{ij}$,
-which is \eqref{eq:linear-column-half-step}.  Substituting the first display
-into the second gives \eqref{eq:full-linearization-with-sources}.  The signs
-come from the fact that both half-steps subtract a log normalizer; the two
-minus signs in the homogeneous composition yield the positive map
-$C^\top R$.
-\end{proof}
+Differentiating each log-sum-exp replaces it with an average under that half-step's normalized plan, and composing the two negative signs yields the nonnegative transition matrix $M_t = C_t^\top R_t$. Transposing \eqref{eq:full-linearization-with-sources} immediately gives the one-cycle vector-Jacobian product (VJP).
 
-\paragraph{Finite-cycle extension: two distinct half-step plans.}
-The preceding single-plan formulas are evaluated at a balanced fixed point.
-For an actual finite cycle, let $P_t^r$ and $P_t^c$ be the row-normalized and
-column-normalized plans from \eqref{eq:row-half-step}--\eqref{eq:column-half-step},
-and define
-\[
- R_t=\diag(a)^{-1}P_t^r,\qquad
- C_t=P_t^c\diag(b)^{-1},\qquad M_t=C_t^\top R_t.
-\]
-With $r_t(\dot s)_i=\sum_j(R_t)_{ij}\dot s_{ij}$ and
-$c_t(\dot s)_j=\sum_i(C_t)_{ij}\dot s_{ij}$, direct differentiation gives
-\[
- \dot v^{+}=M_t\dot v+d_b-C_t^\top d_a+
- C_t^\top r_t(\dot s)-c_t(\dot s).
-\]
-Indeed, each log-normalizer differentiates to the conditional probabilities
-of its own half-step, and composing the two minus signs gives $M_t$.
-Rows of $R_t$ and columns of $C_t$ are normalized, so $M_t\one=\one$.
-Transposing this identity gives the source ledger in
-Proposition~\ref{prop:adjoint-source-ledger} with $R_t,C_t$ in place of $R,C$.
-In general $P_t^r\ne P_t^c$; neither plan may be substituted for both.
-The finite kernel need not be reversible or have stationary mass $b$.
-The general stochastic-kernel tail bounds below apply to these actual $M_t$.
-By contrast, the single-plan support weights, face-lattice characterization,
-and stationary implicit system concern balanced feasible plans, not arbitrary
-unbalanced intermediate iterates.
-
-\begin{definition}[Quotient convention]
-\label{def:quotient-convention}
-For a connected support, column potentials are functions modulo additive
-constants.  We write
-$Q=\mathbb{R}^n/\mathrm{span}\{\one\}$ and identify its dual with
-\[
- Q^*=\{\eta\in\mathbb{R}^n:\one^\top\eta=0\}.
-\]
-The total-variation norm on $Q^*$ is
-$\|\eta\|_{\TV}=\frac12\|\eta\|_1$.  Centering, for example
-$\Pi_0x=x-(\one^\top x/n)\one$, chooses a representative only.  Since the
-kernels below are row-stochastic, they satisfy $M\one=\one$ and therefore
-$M^\top Q^*\subseteq Q^*$.  Dobrushin certificates are statements on this
-quotient.
-
-If the bipartite support has components $\Gamma$ with column sets $J_\Gamma$,
-the full potential gauge space is
-$G_\Omega=\operatorname{span}\{\one_{J_\Gamma}:\Gamma\}$ and the exact
-component quotient is
-\[
- Q_\Omega=\mathbb{R}^n/G_\Omega,
- \qquad
- Q_\Omega^*=\left\{\eta:
- \one_{J_\Gamma}^\top\eta=0\ \text{for every }\Gamma\right\}.
-\]
-Every single-support statement below remains valid componentwise after
-replacing $(Q,Q^*)$ by $(Q_\Omega,Q_\Omega^*)$ and centering separately on
-each $J_\Gamma$.  For schedules whose component partitions change, the global
-quotient $Q$ is the common state space.  Its Dobrushin coefficient may equal
-one because it retains intercomponent Markov modes; that value must not be
-reported as a sharp contraction rate on the smaller component quotient.
-\end{definition}
-
-\subsection{Derivative Kernel and Overlap}
-
-At a balanced fixed point, the column-to-column homogeneous full-step kernel is
-\[
-M=C^\top R\in\mathbb{R}^{n\times n}.
-\]
-It is row-stochastic, and $b^\top M=b^\top$, so $b$ is a stationary
-distribution.  The map $M$ is the fixed-support quotient operator for the
-homogeneous part of one row-column Sinkhorn cycle; source terms enter through
-$\zeta$ in \eqref{eq:full-linearization-with-sources} and through the projected
-cotangent sources in Section~\ref{sec:tail-cotangent-certificates}.
-
-\begin{proposition}[Adjoint source ledger for one fixed-support cycle]
-\label{prop:adjoint-source-ledger}
-Let $\eta^+\in\mathbb{R}^n$ be a cotangent on the output column potential
-$v^+$ of one row-column cycle at a balanced fixed point. For a finite cycle,
-use the two-half-step extension above. The homogeneous cotangent on the input column
-potential is
-\[
-\eta^- = M^\top\eta^+ .
-\]
-The cotangents carried by the non-homogeneous source variables in
-\eqref{eq:full-linearization-with-sources} are
+\begin{proposition}[Reverse-mode equations for one cycle]
+\label{prop:reverse-mode-cycle}
+For an output adjoint $\eta^+ \in \mathbb{R}^n$ on $v^+$, the input-potential, log-marginal, raw-marginal, and edge-score adjoints of cycle $t$ are
 \begin{align}
- \lambda_b &= \eta^+,
- & \lambda_a &= -C\eta^+,\label{eq:source-log-marginal-adjoints}\\
- g^s_{ij} &= R_{ij}(C\eta^+)_i-C_{ij}\eta^+_j,
- && (i,j)\in\Omega .\label{eq:score-source-adjoint}
+  \eta^- &= M_t^\top \eta^+, &
+  \lambda_b &= \eta^+, &
+  \lambda_a &= -C_t \eta^+, \label{eq:source-log-marginal-adjoints}\\
+  g^a &= -(C_t \eta^+) \oslash a, &
+  g^b &= \eta^+ \oslash b, &
+  g^s_{ij} &= (R_t)_{ij}(C_t \eta^+)_i - (C_t)_{ij}\eta^+_j \quad ((i,j)\in\Omega). \label{eq:score-source-adjoint}
 \end{align}
-Here $\lambda_a$ and $\lambda_b$ are cotangents to the logarithmic marginal
-perturbations $d_a=\dot a\oslash a$ and $d_b=\dot b\oslash b$.  Equivalently,
-the raw marginal and raw-logit cotangents are
-\[
- g^a=-(C\eta^+)\oslash a,\qquad
- g^b=\eta^+\oslash b,\qquad
- g^\theta_{ij}=g^s_{ij}/\varepsilon
-\]
-when $s_{ij}=\theta_{ij}/\varepsilon$.
-
-The displayed marginal covectors are unconstrained source covectors.  If the
-marginals are parameterized inside the compatible fixed-component marginal
-manifold, only their quotient classes are observable.  For each connected
-component $\Gamma=(I_\Gamma,J_\Gamma)$ of the support graph, admissible
-log-marginal perturbations satisfy
-\[
- \sum_{i\in I_\Gamma} a_i(d_a)_i
- =
- \sum_{j\in J_\Gamma} b_j(d_b)_j .
-\]
-Hence the log-marginal cotangent pair
-$(\lambda_a,\lambda_b)$ is defined modulo the component normal
-$(a_{I_\Gamma},-b_{J_\Gamma})$.  Equivalently, any representative
-\[
-(\lambda_a,\lambda_b)
--
-\alpha_\Gamma(a_{I_\Gamma},-b_{J_\Gamma})
-\]
-gives the same derivative on admissible perturbations.  A concrete Euclidean
-orthogonal representative is obtained with
-\[
-\alpha_\Gamma=
-\frac{\sum_{i\in I_\Gamma}a_i(\lambda_a)_i
-      -\sum_{j\in J_\Gamma}b_j(\lambda_b)_j}
-     {\sum_{i\in I_\Gamma}a_i^2+\sum_{j\in J_\Gamma}b_j^2}.
-\]
-In raw marginal coordinates the analogous quotient is modulo
-$(\one_{I_\Gamma},-\one_{J_\Gamma})$.  If only one marginal family is varied
-while the other is fixed, this reduces to the usual componentwise fixed-mass
-projection of that marginal covector modulo constants on the varied component.
-If each component mass is fixed separately in both marginal families, then
-admissible raw variations obey
-$\one_{I_\Gamma}^\top\dot a=0$ and
-$\one_{J_\Gamma}^\top\dot b=0$ independently.  The raw cotangents are then
-defined modulo $(\one_{I_\Gamma},0)$ and
-$(0,\one_{J_\Gamma})$ independently; in logarithmic coordinates the
-corresponding normals are $(a_{I_\Gamma},0)$ and
-$(0,b_{J_\Gamma})$.  Thus the projection is determined by the actual marginal
-parameterization: one joint normal when common component mass may vary, two
-normals when that mass is fixed.
-
-If surrounding differentiable maps feed these source variables from the input
-quotient coordinates at step $t$, their VJPs compose with
-\eqref{eq:source-log-marginal-adjoints}--\eqref{eq:score-source-adjoint} and
-are then projected to $Q^*$.  Thus the tail recurrence used below has the
-form
-\[
-\eta_t=M_t^\top\eta_{t+1}+\Pi_{Q^*}\psi_t,
-\]
-where $\psi_t$ denotes the aggregate non-transport cotangent delivered to the
-input column-potential coordinates before quotient projection.  The displayed
-source adjoints are the complete one-cycle ledger; they are not additional
-applications of $M^\top$.
+For logits $\theta$ at temperature $\varepsilon$, $g^\theta_{ij} = g^s_{ij}/\varepsilon$. When marginals stay compatible on each component $\Gamma = (I_\Gamma, J_\Gamma)$, $(\lambda_a, \lambda_b)$ is defined modulo $(a_{I_\Gamma}, -b_{J_\Gamma})$.
 \end{proposition}
 
-\begin{proof}
-Pair an arbitrary perturbation with
-\eqref{eq:full-linearization-with-sources}:
-\[
- \langle \eta^+,\dot v^+\rangle
- =
- \langle \eta^+,M\dot v\rangle
- +\langle\eta^+,d_b\rangle
- -\langle\eta^+,C^\top d_a\rangle
- +\langle\eta^+,C^\top r(\dot s)\rangle
- -\langle\eta^+,c(\dot s)\rangle .
-\]
-The first term is $\langle M^\top\eta^+,\dot v\rangle$, giving
-$\eta^-=M^\top\eta^+$.  The next two terms give
-$\lambda_b=\eta^+$ and $\lambda_a=-C\eta^+$.  For scores,
-\[
-\langle\eta^+,C^\top r(\dot s)\rangle
- =\sum_i (C\eta^+)_i\sum_j R_{ij}\dot s_{ij},
-\qquad
-\langle\eta^+,c(\dot s)\rangle
- =\sum_j\eta^+_j\sum_i C_{ij}\dot s_{ij}.
-\]
-Collecting the coefficient of each active $\dot s_{ij}$ gives
-\eqref{eq:score-source-adjoint}.  The raw marginal formulas follow from
-$d_a=\dot a\oslash a$ and $d_b=\dot b\oslash b$, and the raw-logit formula
-from $s=\theta/\varepsilon$.  The componentwise marginal projection statement
-is just duality for the linear compatibility constraint
-$a_{I_\Gamma}^\top d_{a,I_\Gamma}-b_{J_\Gamma}^\top d_{b,J_\Gamma}=0$: adding
-any multiple of its normal to the covector pairs to zero with every admissible
-perturbation.  Finally, quotient projection to $Q^*$ is necessary for
-cotangents returned to column-potential quotient coordinates; source-space
-cotangents use the corresponding source constraints described above.
-\end{proof}
-
-\begin{lemma}[Bridge from fixed-support half-steps to quotient topology]
-\label{lem:bridge-half-step-quotient}
-Let $P$ be a realized active-support Sinkhorn plan with compatible marginals
-$(a,b)$.  For homogeneous perturbations of the column log potential,
-\[
-\dot v^+=C^\top R\,\dot v=M\dot v .
-\]
-Hence the homogeneous reverse cotangent propagation on $Q^*$ is governed by
-$M^\top$.
-\end{lemma}
-
-\begin{proof}
-Set $\dot s=0$, $\dot a=0$, and $\dot b=0$ in
-Proposition~\ref{prop:half-step-linearization}.  The resulting forward linear
-map is $M=C^\top R$.  Equivalently, the homogeneous part of
-Proposition~\ref{prop:adjoint-source-ledger} is $\eta^-=M^\top\eta^+$.  By
-Definition~\ref{def:quotient-convention}, $M^\top$ preserves zero-mass
-cotangents and is independent of the chosen centered representative.
-\end{proof}
-
-\begin{definition}[Transport topology certificate]
-For a fixed support $\Omega$, score-induced plan $P$, and quotient operator
-$M=C^\top R$, define
-\[
-\tau(M)=\frac12\max_{p,q}\sum_k |M_{pk}-M_{qk}|.
-\]
-We call $\tau(M)$ the one-step Dobrushin transport-topology certificate.  When
-$\tau(M)<1$, the realized fixed-support quotient operator contracts all
-zero-mass cotangents.  When $\tau(M)=1$, this certificate withholds a global
-one-step contraction guarantee.
-\end{definition}
-
-\begin{theorem}[Support-to-kernel topology]
-\label{thm:support-to-kernel-topology}
-For $\alpha,\beta\in[n]$, the full-step derivative kernel satisfies
-\[
-M_{\alpha\beta}
-=
-\sum_i
-\frac{P_{i\alpha}P_{i\beta}}{b_\alpha a_i}.
-\]
-If all active plan entries are strictly positive, then
-\[
-M_{\alpha\beta}>0
-\quad\Longleftrightarrow\quad
-\exists i\ \text{such that}\ (i,\alpha)\in\Omega
-\ \text{and}\ (i,\beta)\in\Omega.
-\]
-Thus the support of each row of $M$ is exactly the two-hop column
-co-neighborhood induced by the bipartite support $\Omega$.
-\end{theorem}
-
-\begin{proof}
-Substitute $C=P\diag(b)^{-1}$ and $R=\diag(a)^{-1}P$ into $M=C^\top R$:
-\[
-M_{\alpha\beta}=\sum_i C_{i\alpha}R_{i\beta}
-=\sum_i \frac{P_{i\alpha}}{b_\alpha}\frac{P_{i\beta}}{a_i}.
-\]
-Every summand is nonnegative.  Under strict positivity on active edges, a
-summand is positive exactly when row $i$ is incident to both columns $\alpha$
-and $\beta$.
-\end{proof}
-
-\begin{corollary}[Qualitative overlap criterion]
-Under the same strict-positivity assumption, $\tau(M)<1$ if and only if every
-pair of rows of the two-hop kernel support overlap.  Equivalently, $\tau(M)=1$
-if and only if some two columns have disjoint two-hop co-neighborhoods.
-\end{corollary}
-
-\begin{proof}
-Dobrushin's coefficient is strictly below one exactly when every pair of row
-distributions has positive common mass.  Theorem~\ref{thm:support-to-kernel-topology}
-identifies those row supports with the two-hop co-neighborhoods.
-\end{proof}
-
-\paragraph{Main theorem spine.}
-The rest of the main theory asks when this overlap is forced rather than merely
-observed.  The equal-score biregular case gives a graph-walk baseline;
-plan-distortion and zero-temperature arguments explain how scores can expose
-bad faces; the face-lattice theorem gives the exact score-uniform one-step
-criterion; and the windowed face-lattice plus partition heat-bath results show
-how scheduled sparse layers can mix even when every individual layer has
-$\tau=1$.
-
-\subsection{Equal-Score Topology Baseline and Plan Distortion}
-
-\begin{theorem}[Biregular equal-score topology kernel]
-\label{thm:biregular-topology-kernel}
-Let $\Omega\subseteq[m]\times[n]$ be a fixed bipartite support with constant
-positive row degree $d_r$ and constant positive column degree $d_c$. Use
-uniform compatible marginals $a_i=1/m$ and $b_\alpha=1/n$, and set all active
-effective scores equal. Let $E=|\Omega|=m d_r=n d_c$. Then the
-Sinkhorn-scaled plan is
-\[
-P_{i\alpha}=\frac{1}{E}\one\{(i,\alpha)\in\Omega\}.
-\]
-Consequently,
-\[
-M_{\alpha\beta}
-=
-\frac{N_{\alpha\beta}}{d_c d_r},
-\qquad
-
-bipartite support graph: from column $\alpha$, choose an incident row
-uniformly, then choose an incident column of that row uniformly. In
-particular, $\tau(M)$ and $\tau(M^K)$ are pure topology quantities.
-\end{theorem}
-
-\begin{proof}
-Since $|\Omega|=m d_r=n d_c$, the displayed plan has row sums
-$d_r/|\Omega|=1/m$ and column sums $d_c/|\Omega|=1/n$. It is therefore a
-valid Sinkhorn scaling of the equal-score active matrix; uniqueness of the
-entropic matrix-scaling plan fixes this primal plan even if the support has
-multiple compatible connected components. The dual scalings may have separate
-component gauges, but $P$ and $M$ are unchanged. For active edges,
-$R_{i\alpha}=P_{i\alpha}/a_i=1/d_r$ and
-$C_{i\alpha}=P_{i\alpha}/b_\alpha=1/d_c$. Substituting into $M=C^\top R$
-gives
-\[
-M_{\alpha\beta}
-=
-\sum_i \frac{\one\{(i,\alpha)\in\Omega\}\one\{(i,\beta)\in\Omega\}}
-{d_c d_r}
-=
-\frac{N_{\alpha\beta}}{d_c d_r}.
-\]
-The row sum is one because each of the $d_c$ rows incident to $\alpha$ has
-$d_r$ incident columns.
-\end{proof}
-
-Theorem~\ref{thm:biregular-topology-kernel} is the cleanest fixed-support
-certificate baseline in this paper. For equal-score biregular supports, a
-sparse attention topology has an exact Markov-chain representation: its
-Sinkhorn linearization is the Markov chain on the column-overlap graph.
-Score-dependent and non-biregular cases then become perturbations or
-realized-plan certificates rather than graph-only guarantees. If the support
-has multiple closed column-overlap components, the same formula holds
-componentwise but the global Dobrushin coefficient remains one, so the theorem
-does not certify mixing across disconnected topology.
-
-\begin{theorem}[Plan-distortion stability around a topology kernel]
-\label{thm:plan-distortion-stability}
-Let $\Omega$ be biregular with row degree $d_r$, column degree $d_c$,
-uniform marginals, and $E=|\Omega|$. Let $M_0$ be the equal-score topology
-kernel from Theorem~\ref{thm:biregular-topology-kernel}. Let $P$ be any
-other feasible plan on the same support with the same uniform marginals, and
-write
-\[
-q_{i\alpha}=E P_{i\alpha}\qquad ((i,\alpha)\in\Omega).
-\]
-If for some $\kappa\ge1$,
-\[
-\kappa^{-1}\le q_{i\alpha}\le \kappa
-\qquad\text{for every active edge }(i,\alpha)\in\Omega,
-\]
-then the realized derivative kernel $M=C^\top R$ satisfies the elementwise
-comparison
-\[
-M\ge \kappa^{-2}M_0.
-\]
-Consequently,
-\[
-\tau(M)\le 1-\kappa^{-2}\bigl(1-\tau(M_0)\bigr).
-\]
-More generally, if row-stochastic kernels $M_t$ and reference kernels $M_t^0$
-on the same finite state space satisfy
-$M_t\ge \delta_t M_t^0$ elementwise with
-$\delta_t\in[0,1]$ for $t=1,\ldots,K$, then
-\[
-M_K\cdots M_1
-\ge
-\left(\prod_{t=1}^K\delta_t\right)
-M_K^0\cdots M_1^0
-\]
-and hence
-\[
-\tau(M_K\cdots M_1)
-\le
-1-
-\left(\prod_{t=1}^K\delta_t\right)
-\bigl(1-\tau(M_K^0\cdots M_1^0)\bigr).
-\]
-\end{theorem}
-
-\begin{proof}
-With uniform marginals, $a_i=1/m$, $b_\alpha=1/n$, and
-$E=m d_r=n d_c$. For the realized plan,
-\[
-M_{\alpha\beta}
-=
-\sum_i \frac{P_{i\alpha}P_{i\beta}}{b_\alpha a_i}
-=
-\frac{1}{d_cd_r}
-\sum_{i:\,(i,\alpha),(i,\beta)\in\Omega} q_{i\alpha}q_{i\beta}.
-\]
-The edgewise distortion assumption gives
-$q_{i\alpha}q_{i\beta}\ge \kappa^{-2}$ for every common incident row, while
-$(M_0)_{\alpha\beta}$ is the same sum with each common-row contribution equal
-to $1/(d_cd_r)$. This proves $M\ge\kappa^{-2}M_0$.
-
-If two row-stochastic kernels $A,B$ satisfy $A\ge \delta B$ elementwise, then
-$A=\delta B+(1-\delta)N$ for a row-stochastic kernel $N$ when $\delta<1$
-(with the evident interpretation when $\delta=1$). Thus
-\[
-\tau(A)\le \delta\tau(B)+(1-\delta)
-=1-\delta(1-\tau(B)).
-\]
-This gives the one-step Dobrushin bound. The product comparison follows by
-iterating elementwise nonnegative matrix multiplication:
-if $M_t\ge\delta_t M_t^0$, then every term in
-$M_K\cdots M_1$ dominates the corresponding term in
-$(\prod_t\delta_t)M_K^0\cdots M_1^0$. Applying the same mixture argument to
-the product gives the final display.
-\end{proof}
-
-Theorem~\ref{thm:plan-distortion-stability} is the first bridge from pure
-topology to score-dependent plans in this paper. It is not a claim that graph
-support alone controls the magnitude of $\tau(M)$. It says that once a plan
-distortion factor is observed or independently certified, the topology
-certificate degrades continuously rather than disappearing. This is the
-right form for score-robust CPU validation and for score-range corollaries.
-
-\subsection{Score Gauges and Cycle Sensitivity}
-
-\begin{proposition}[Additive scores are topology gauges]
-\label{prop:additive-score-gauge}
-Fix a support $\Omega$ and compatible marginals $a,b$, and assume strict
-feasibility: there exists $Q\in\Pi(a,b;\Omega)$ with $Q_{ij}>0$ on every
-fixed-support edge. Suppose a score pattern is row-plus-column separable on
-each connected component of the fixed support:
-\[
-B_{ij}=\alpha_i+\beta_j+c_\Gamma
-\qquad ((i,j)\in\Gamma),
-\]
-where $\Gamma$ ranges over connected components of the bipartite support.
-Let $P_L$ be the entropic Sinkhorn plan for score $S=L B$, and let $P_0$ be
-the plan for the zero score on the same support and marginals. Then
-\[
-P_L=P_0\qquad\text{for every }L.
-\]
-Consequently the derivative kernel $M=C^\top R$ is unchanged and the
-plan-distortion factor relative to $P_0$ is $\kappa_L=1$.
-In the uniform-marginal biregular case, the topology kernel remains exactly
-the two-step support random walk from
-Theorem~\ref{thm:biregular-topology-kernel}.
-\end{proposition}
-
-\begin{proof}
-For every feasible plan $P\in\Pi(a,b;\Omega)$,
-\[
-\langle B,P\rangle
-=
-\sum_i \alpha_i\sum_j P_{ij}
-+
-\sum_j \beta_j\sum_i P_{ij}
-+
-\sum_\Gamma c_\Gamma m_\Gamma
-=
-\alpha^\top a+\beta^\top b+\sum_\Gamma c_\Gamma m_\Gamma,
-\]
-where $m_\Gamma$ is the fixed marginal mass in component $\Gamma$. This is
-constant over the transport polytope. Therefore maximizing
-$L\langle B,P\rangle+H(P)$ is the same optimization problem as maximizing
-$H(P)$ alone. The primal plan is thus $P_0$ for every $L$, so the derivative
-kernel and the distortion factor are unchanged.
-\end{proof}
-
-On a connected support, the additive condition is equivalent to vanishing
-alternating cycle sums for $B$. Thus row/column gauge scores and rank-one
-Gibbs kernels $\exp(LB_{ij})=\exp(L\alpha_i)\exp(L\beta_j)$ cannot create plan
-distortion. Score sensitivity is carried by non-additive cycle imbalance, not
-by raw score range alone.
-
-\begin{corollary}[Cycle space is the score-sensitive topology]
-\label{cor:cycle-space-score-sensitivity}
-Fix compatible positive marginals $a,b$ and assume strict feasibility on the
-active-edge set $\Omega$. Let the fixed support have $c$ connected components,
-with active row and column vertex sets $I$ and $J$. The quotient dimension of
-score patterns that can affect the entropic plan, after modding out row/column
-additive gauges on each component, is
-\[
-|\Omega|-|I|-|J|+c,
-\]
-the cycle rank of the bipartite support graph. In particular, if every
-connected component is a tree and the compatible transport polytope is
-strictly feasible, then $\Pi(a,b;\Omega)$ is a singleton. Hence $P_L$, the
-derivative kernel $M=C^\top R$, and all quotient-cotangent certificates are
-independent of the score pattern $B$.
-\end{corollary}
-
-\begin{proof}
-On a connected component, row-plus-column scores form a subspace of dimension
-$|I_\Gamma|+|J_\Gamma|-1$, since adding a constant to all row prices and
-subtracting it from all column prices gives the same edge scores. Summing over
-components gives additive-score dimension $|I|+|J|-c$. Quotienting the
-$|\Omega|$ active-edge score coordinates by this gauge subspace leaves
-$|\Omega|-|I|-|J|+c$, the graph cycle rank. Proposition~\ref{prop:additive-score-gauge}
-shows that these additive directions do not change the entropic optimization
-problem.
-
-Conversely, additive gauges are the only score directions that leave the
-entropic plan unchanged. Let $P_0$ be the zero-score entropic plan and suppose
-the score $B$ has the same entropic plan $P_0$. The KKT equations for the two
-strictly concave entropy-regularized transport problems give dual prices
-$(u^0,v^0)$ and $(u^B,v^B)$ such that, on every active edge,
-\[
-\log (P_0)_{ij}=-u_i^0-v_j^0
-=B_{ij}-u_i^B-v_j^B .
-\]
-Thus $B_{ij}=(u_i^B-u_i^0)+(v_j^B-v_j^0)$ on the support, up to the usual
-component gauges. Therefore a non-gauge score direction changes the entropic
-plan for some finite score scale, and the score-sensitive quotient dimension
-is exactly the cycle rank.
-
-If the support is a forest, the cycle rank is zero. Equivalently, the transport
-constraints have a unique feasible solution on each tree component: remove a
-leaf and its incident edge recursively; the edge mass is forced by the leaf
-marginal, and strict feasibility keeps the forced masses positive. Thus every
-score pattern is a gauge direction on the support, and the plan and its
-derivative kernel are fixed by the marginals and support alone.
-\end{proof}
-
-\subsection{Zero-Temperature Face Obstructions}
-
-\begin{theorem}[Zero-temperature entropy-center obstruction]
-\label{thm:zero-temperature-obstruction}
-Let $\Pi(a,b;\Omega)$ be the compact transport polytope on a fixed feasible
-support $\Omega$, and assume it contains a relative-interior point that is
-positive on every active edge. Let $B$ be a fixed score pattern on $\Omega$.
-For $L>0$, let $P_L$ be the entropic Sinkhorn plan for score $S=L B$ and
-marginals $a,b$, equivalently the maximizer of
-\[
-L\langle B,P\rangle + H(P),
-\qquad
-H(P)=-\sum_{(i,j)\in\Omega}P_{ij}\log P_{ij},
-\]
-over $P\in\Pi(a,b;\Omega)$, with the convention $0\log0=0$. Let
-\[
-\mathcal{F}_B
-=
-\arg\max_{P\in\Pi(a,b;\Omega)}\langle B,P\rangle
-\]
-be the optimal face of the zero-temperature linear transport problem. Let
-$P_B^{\mathrm{ent}}$ be the unique maximizer of $H$ over $\mathcal{F}_B$.
-Then
-\[
-P_L\to P_B^{\mathrm{ent}}
-\qquad\text{as }L\to\infty.
-\]
-Consequently, if an active edge $e\in\Omega$ has $P_e=0$ for every
-$P\in\mathcal{F}_B$, then $(P_L)_e\to0$. In particular, any edgewise
-distortion factor relative to a positive reference plan on all of $\Omega$
-diverges.
-\end{theorem}
-
-\begin{proof}
-Let $M_B=\max_{P\in\Pi(a,b;\Omega)}\langle B,P\rangle$ and choose
-$P^\star\in\mathcal{F}_B$. Since $H$ is strictly concave and continuous on the
-compact polytope, its restriction to the compact convex face
-$\mathcal{F}_B$ has a unique maximizer $P_B^{\mathrm{ent}}$.
-
-Since $\Pi(a,b;\Omega)$ is compact and $H$ is bounded above and below on it,
-there is a finite constant $C$ such that
-$|H(P)-H(P^\star)|\le C$ for every feasible $P$. Optimality of $P_L$ gives
-\[
-L\langle B,P_L\rangle + H(P_L)
-\ge
-L M_B + H(P^\star),
-\]
-hence $\langle B,P_L\rangle\ge M_B-C/L$. Every accumulation point $\bar P$ of
-$P_L$ is feasible and therefore satisfies
-$\langle B,\bar P\rangle=M_B$, so $\bar P\in\mathcal{F}_B$.
-
-Now use $P_B^{\mathrm{ent}}$ as the comparison point. Optimality gives
-\[
-L\langle B,P_L\rangle + H(P_L)
-\ge
-L M_B + H(P_B^{\mathrm{ent}}).
-\]
-Writing $g_L=M_B-\langle B,P_L\rangle\ge0$, this says
-$H(P_L)\ge H(P_B^{\mathrm{ent}})+L g_L\ge H(P_B^{\mathrm{ent}})$. Therefore
-any accumulation point $\bar P\in\mathcal{F}_B$ satisfies
-$H(\bar P)\ge H(P_B^{\mathrm{ent}})$. By uniqueness of the entropy maximizer
-on $\mathcal{F}_B$, $\bar P=P_B^{\mathrm{ent}}$. All subsequential limits are
-the same, hence the whole sequence converges.
-
-If an edge $e$ has zero mass on every point of $\mathcal{F}_B$ but some
-subsequence has $(P_{L_k})_e\ge\epsilon>0$, compactness gives a further
-subsequence converging to an element of $\mathcal{F}_B$ with edge mass at
-least $\epsilon$, a contradiction. Thus $(P_L)_e\to0$. If the reference plan is
-positive on $e$, the ratio between the reference edge mass and $(P_L)_e$
-diverges.
-\end{proof}
-
-Theorem~\ref{thm:zero-temperature-obstruction} gives the zero-temperature
-reading of the topology certificate. Equal-score topology describes the reference Markov
-operator. Large structured scores select an entropy-centered point of an
-optimal face of a linear transport problem. Edges outside that face disappear,
-and the realized derivative kernel can inherit the topology of the selected
-face rather than the topology of the nominal architecture. This is the
-finite-dimensional entropic-penalty central-path phenomenon specialized to
-transport polytopes; see \citet{cominetti1994asymptotic} and
-\citet{weed2018explicit} for general LP analyses.
-
-\begin{corollary}[Exposed bad-face obstruction to graph-only contraction]
-\label{cor:exposed-bad-face-obstruction}
-Assume the setting of Theorem~\ref{thm:zero-temperature-obstruction}. Suppose
-there is a score direction $B$ such that the entropy-centered point
-$P_B^{\mathrm{ent}}$ of the exposed zero-temperature face has derivative
-kernel
-\[
-M_B
-=
-\bigl(P_B^{\mathrm{ent}}\diag(b)^{-1}\bigr)^\top
-\bigl(\diag(a)^{-1}P_B^{\mathrm{ent}}\bigr)
-\]
-with $\tau(M_B)=1$. Then for every $\varepsilon>0$ there exists $L$ such that
-the entropic plan for score $LB$ has derivative kernel $M_L$ satisfying
-\[
-\tau(M_L)>1-\varepsilon .
-\]
-Thus this support/marginal instance admits no score-uniform global
-column-quotient upper bound $\tau(M)\le \rho<1$ over arbitrary score
-directions with those fixed compatible marginals.
-\end{corollary}
-
-\begin{proof}
-Theorem~\ref{thm:zero-temperature-obstruction} gives
-$P_L\to P_B^{\mathrm{ent}}$. The map
-\[
-P\mapsto
-\bigl(P\diag(b)^{-1}\bigr)^\top
-\bigl(\diag(a)^{-1}P\bigr)
-\]
-is continuous because the positive marginals $a,b$ are fixed. Dobrushin's
-coefficient is a maximum over finitely many continuous row-pair
-total-variation distances, hence it is continuous. Therefore
-$\tau(M_L)\to \tau(M_B)=1$, which gives the claim.
-\end{proof}
-
-For background on the faces and combinatorics of transportation polytopes,
-see \citet{deloera2013transportation}. The characterization below couples this
-polyhedral structure to overlap of the induced quotient kernels.
-
-\begin{theorem}[Face-lattice characterization of score-uniform global mixing]
-\label{thm:face-lattice-uniform-mixing}
-Let
-\[
-\mathcal P=\Pi(a,b;\Omega)
-\]
-be a nonempty compact transport polytope on a fixed finite support, with
-positive compatible marginals and a relative-interior point positive on every
-edge of $\Omega$. This strict-feasibility hypothesis is essential: finite
-scores then produce plans in $\operatorname{relint}(\mathcal P)$, while
-boundary faces appear only as zero-temperature limits. For any feasible plan
-$P\in\mathcal P$, define
-\[
-M(P)
-=
-\bigl(P\diag(b)^{-1}\bigr)^\top
-\bigl(\diag(a)^{-1}P\bigr),
-\qquad
-\Gamma(P)
-=
-\min_{\alpha,\beta}
-\sum_\gamma \min\{M(P)_{\alpha\gamma},M(P)_{\beta\gamma}\}.
-\]
-Thus $\tau(M(P))=1-\Gamma(P)$. For a nonempty face $F$ of
-$\mathcal P$, write
-\[
-\Omega_F
-=
-\{(i,\alpha)\in\Omega:\text{ some }P\in F\text{ has }P_{i\alpha}>0\}.
-\]
-Say that $F$ has pairwise two-hop column overlap if, for every pair of
-columns $\alpha,\beta$, there is a column $\gamma$ such that each of
-$\alpha$ and $\beta$ shares an active row with $\gamma$ inside $\Omega_F$:
-\[
-\exists i,k\quad
-(i,\alpha),(i,\gamma),(k,\beta),(k,\gamma)\in\Omega_F .
-\]
-Then the following are equivalent.
-\begin{enumerate}
-\item There exists $\delta>0$ such that every finite-score Sinkhorn plan on
-      the fixed support satisfies $\Gamma(P_\Omega(S;a,b))\ge\delta$, or
-      equivalently $\tau(M(P_\Omega(S;a,b)))\le 1-\delta$.
-\item Every nonempty face of $\mathcal P$ has pairwise two-hop column
-      overlap.
-\end{enumerate}
-Equivalently, a fixed support and compatible marginals force score-uniform
-one-step global column-quotient mixing exactly when no feasible face can
-collapse the derivative kernel into two rows with disjoint support. Componentwise
-contraction would require restating the condition on the corresponding
-component quotient.
-\end{theorem}
-
-\begin{proof}
-First, $M(P)$ and $\Gamma(P)$ are continuous functions of $P$ on
-$\mathcal P$, because the marginals $a,b$ are fixed and positive and
-$\Gamma$ is a minimum of finitely many continuous row-overlap functions. For a
-plan $P$, the support-to-kernel identity gives
-\[
-M(P)_{\alpha\gamma}>0
-\quad\Longleftrightarrow\quad
-\exists i\ \text{with}\ P_{i\alpha}>0\ \text{and}\ P_{i\gamma}>0 .
-\]
-Transportation polytopes are standard-form polytopes
-$\{x\ge0:Ax=c\}$, so every face is obtained by setting a subset of edge
-variables to zero. Hence the minimal face containing $P$ has support
-$\supp(P)$, and the relative interior of a face $F$ is positive exactly on
-$\Omega_F$. Therefore $\Gamma(P)>0$ if and only if the minimal face containing
-$P$ has pairwise two-hop column overlap.
-
-Assume every nonempty face has pairwise two-hop column overlap. Then
-$\Gamma(P)>0$ for every $P\in\mathcal P$, including boundary plans. By
-compactness and continuity,
-\[
-\delta_*=\min_{P\in\mathcal P}\Gamma(P)>0.
-\]
-Every finite-score Sinkhorn plan lies in $\mathcal P$, so
-$\Gamma(P_\Omega(S;a,b))\ge\delta_*$ for every finite score matrix.
-
-Conversely, suppose a nonempty face $F$ fails pairwise two-hop column overlap.
-Every face of a finite polytope is exposed, so there is a score direction
-$B$ whose maximizers over $\mathcal P$ are exactly $F$. By
-Theorem~\ref{thm:zero-temperature-obstruction}, the entropic Sinkhorn plan for
-score $LB$ converges as $L\to\infty$ to the unique entropy maximizer
-$P_F^{\mathrm{ent}}$ over $F$. The entropy maximizer over a nonempty face lies
-in $\operatorname{relint}(F)$: if an edge in $\Omega_F$ had zero mass, moving
-from the maximizer a small distance toward any relative-interior point of $F$
-would increase entropy to first order because
-$-\partial_x(x\log x)\to+\infty$ as $x\downarrow0$. Thus the positive support
-of $P_F^{\mathrm{ent}}$ is exactly $\Omega_F$.
-
-Since $\Omega_F$ fails pairwise two-hop column overlap, two rows of
-$M(P_F^{\mathrm{ent}})$ have disjoint support. Hence
-$\Gamma(P_F^{\mathrm{ent}})=0$ and
-$\tau(M(P_F^{\mathrm{ent}}))=1$. Continuity gives
-$\Gamma(P_\Omega(LB;a,b))\to0$, so no positive score-uniform lower bound
-$\delta$ can hold over finite scores.
-\end{proof}
-
-\begin{corollary}[Score-uniform mixing dichotomy]
-\label{cor:score-uniform-mixing-dichotomy}
-Under the hypotheses of
-Theorem~\ref{thm:face-lattice-uniform-mixing}, exactly one of the following
-alternatives holds.
-\begin{enumerate}
-\item There is a constant $\rho<1$, depending only on
-      $(a,b,\Omega)$, such that every finite-score Sinkhorn plan on the fixed
-      support satisfies $\tau(M(P_\Omega(S;a,b)))\le\rho$.
-\item For every $\varepsilon>0$, there is a finite score matrix $S$ on the
-      same support such that
-      \[
-      \tau(M(P_\Omega(S;a,b)))>1-\varepsilon.
-      \]
-\end{enumerate}
-The first alternative holds exactly when every nonempty feasible face of
-$\Pi(a,b;\Omega)$ has pairwise two-hop column overlap.
-\end{corollary}
-
-\begin{proof}
-If every nonempty face has pairwise two-hop column overlap, the theorem gives
-a positive lower bound $\Gamma(P)\ge\delta$ for every finite-score plan, so
-setting $\rho=1-\delta$ proves the first alternative. If some face fails the
-overlap condition, the converse part of the theorem constructs an exposed
-score direction $B$ for which
-$\Gamma(P_\Omega(LB;a,b))\to0$ as $L\to\infty$. Choosing $L$ large enough
-gives $\tau(M(P_\Omega(LB;a,b)))>1-\varepsilon$, which proves the second
-alternative. The alternatives are mutually exclusive because
-$\tau(M)\le\rho<1$ for all finite scores is incompatible with finite scores
-whose coefficients exceed $1-\varepsilon$ for every $\varepsilon>0$.
-\end{proof}
-
-Theorem~\ref{thm:face-lattice-uniform-mixing} and
-Corollary~\ref{cor:score-uniform-mixing-dichotomy} are the sharp
-fixed-support/marginal results of this paper. They explain why equal-score
-topology can be predictive while arbitrary scores remain dangerous: a
-nominally well-connected support may still have a bad boundary face, and
-large scores can expose that face. They also give a concrete design target.
-To make topology force mixing, one must rule out bad feasible faces, or else
-work with realized-plan, windowed, or plan-distortion certificates.
-
-Exact checking should not be oversold. For a fixed tested column pair
-$\alpha,\beta$, the bad-face search can be organized as a finite disjunction
-of ordinary transport-feasibility problems: after guessing the rows carrying
-positive mass into $\alpha$ and $\beta$ and guessing, for each intermediate
-column, on which side the two-hop overlap is killed, each resulting subproblem
-has standard Hall/Gale or max-flow certificates. The difficult part is the
-exponential support-pattern choice. Thus the face-enumeration validator is a
-tiny diagnostic, while Corollaries~\ref{cor:capacity-deficit-forced-bus} and
-\ref{cor:heavy-universal-bus-row} are checkable sufficient architecture
-certificates.
-
-\begin{corollary}[Capacity-deficit forced bus edges]
-\label{cor:capacity-deficit-forced-bus}
-Assume the hypotheses of
-Theorem~\ref{thm:face-lattice-uniform-mixing}. For an active edge
-$(i,\alpha)\in\Omega$, define
-\[
-d_{i\alpha}
-=
-\left[
-b_\alpha-\sum_{k:\,(k,\alpha)\in\Omega,\ k\ne i}a_k
-\right]_+,
-\]
-and set $d_{i\alpha}=0$ for inactive edges. Then every feasible plan
-satisfies $P_{i\alpha}\ge d_{i\alpha}$. Let $B$ be a set of bus rows. Suppose
-that for every pair of distinct columns $\alpha,\beta$, there exists
-$i\in B$ with $d_{i\alpha}>0$ and $d_{i\beta}>0$. Then every feasible face has
-pairwise two-hop column overlap and the support--marginal pair has a score-uniform one-step
-global column-quotient certificate. More quantitatively,
-\[
-\tau(M(P))\le1-\gamma_0
-\qquad\text{for every feasible }P,
-\]
-where
-\[
-\gamma_0
-=
-\min_{\alpha\ne\beta}
-\max_{i\in B:\,d_{i\alpha}d_{i\beta}>0}
-\sum_{\gamma:\,d_{i\gamma}>0}
-\min\left\{
-\frac{d_{i\alpha}d_{i\gamma}}{b_\alpha a_i},
-\frac{d_{i\beta}d_{i\gamma}}{b_\beta a_i}
-\right\}.
-\]
-\end{corollary}
-
-\begin{proof}
-For any feasible plan,
-\[
-P_{i\alpha}
-=
-b_\alpha-\sum_{k\ne i}P_{k\alpha}
-\ge
-b_\alpha-\sum_{k:\,(k,\alpha)\in\Omega,\ k\ne i}a_k
-\]
-on active edges, and the positive part gives the lower bound. If
-$d_{i\alpha},d_{i\beta}>0$, then for every $\gamma$ with $d_{i\gamma}>0$,
-\[
-M_{\alpha\gamma}
-\ge
-\frac{d_{i\alpha}d_{i\gamma}}{b_\alpha a_i},
-\qquad
-M_{\beta\gamma}
-\ge
-\frac{d_{i\beta}d_{i\gamma}}{b_\beta a_i}.
-\]
-Summing coordinatewise minima over such $\gamma$ gives a common mass lower
-bound for rows $\alpha$ and $\beta$ of $M$. Taking the best bus row for each
-pair and then the worst pair gives $\Gamma(P)\ge\gamma_0>0$, hence
-$\tau(M(P))\le1-\gamma_0$. Since the lower bounds hold on every feasible plan
-and every feasible face, Theorem~\ref{thm:face-lattice-uniform-mixing} also
-gives the qualitative face-lattice conclusion.
-\end{proof}
-
-Corollary~\ref{cor:capacity-deficit-forced-bus} is the support-schedule
-version of the face-lattice theorem. It says that support adjacency alone is
-not enough: support and marginals must force positive edge flow on every
-feasible face. The following special case is easier to read and useful for
-sanity checks.
-
-\begin{corollary}[Heavy universal bus row]
-\label{cor:heavy-universal-bus-row}
-Assume the hypotheses of
-Theorem~\ref{thm:face-lattice-uniform-mixing}, and let
-$T=\one^\top a=\one^\top b$. Suppose there is a row $h$ whose support
-contains every column, and suppose
-\[
-\delta_j:=a_h+b_j-T>0
-\qquad\text{for every column }j.
-\]
-Then every feasible face of $\Pi(a,b;\Omega)$ has pairwise two-hop column
-overlap. In fact, every feasible plan satisfies
-\[
-P_{hj}\ge \delta_j
-\qquad\text{for every }j.
-\]
-Consequently the derivative kernel has the uniform common-component bound
-\[
-M_{\alpha\beta}
-\ge
-\left(\min_p\frac{\delta_p}{b_p}\right)\frac{\delta_\beta}{a_h}
-\qquad\text{for every }\alpha,\beta,
-\]
-and therefore
-\[
-\tau(M)
-\le
-1-\gamma_h,
-\qquad
-\gamma_h
-=
-\left(\min_p\frac{\delta_p}{b_p}\right)
-\frac{\sum_\beta \delta_\beta}{a_h}.
-\]
-This is a score-uniform one-step global column-quotient certificate.
-\end{corollary}
-
-\begin{proof}
-For any feasible plan $P$, the non-bus rows have total mass $T-a_h$. Thus
-column $j$ can receive at most $T-a_h$ mass from non-bus rows, and hence
-\[
-P_{hj}
-=
-b_j-\sum_{i\ne h}P_{ij}
-\ge
-b_j-(T-a_h)
-=
-\delta_j>0.
-\]
-Therefore the bus row is positive to every column in every feasible plan and,
-by the coordinate-face structure of transportation polytopes, in every
-relative face support. Every pair of columns then shares row $h$, so
-Theorem~\ref{thm:face-lattice-uniform-mixing} applies.
-
-The explicit lower bound follows from the support-to-kernel formula:
-\[
-M_{\alpha\beta}
-=
-\sum_i\frac{P_{i\alpha}P_{i\beta}}{b_\alpha a_i}
-\ge
-\frac{P_{h\alpha}P_{h\beta}}{b_\alpha a_h}
-\ge
-\frac{\delta_\alpha\delta_\beta}{b_\alpha a_h}
-\ge
-\left(\min_p\frac{\delta_p}{b_p}\right)\frac{\delta_\beta}{a_h}.
-\]
-Thus every row of $M$ dominates the same subprobability vector
-$\ell_\beta=(\min_p\delta_p/b_p)\delta_\beta/a_h$ of total mass
-$\gamma_h$. The sparse-support overlap certificate gives
-$\tau(M)\le1-\gamma_h$.
-\end{proof}
-
-The condition in Corollary~\ref{cor:heavy-universal-bus-row} is deliberately
-strong but checkable. It is not necessary for topology-forced mixing; it is a
-simple architectural sufficient condition. If $a_h+b_j\le T$ for some column,
-the bus row can avoid that column in principle, and the corollary withholds
-rather than guessing. Multiple lighter bus rows can be handled by
-Corollary~\ref{cor:capacity-deficit-forced-bus}, but only when the forced
-edges cover every column pair through at least one common bus row.
-
-\paragraph{Architecture corollaries in appendix.}
-The core face-lattice theorem is independent of the concrete architecture
-families used as examples. Equal-score spectral rules, local-band spectra, and
-other graph-design corollaries are collected in Appendix~\ref{app:architecture-corollaries}.
-They are useful design consequences, but they are not assumptions in the
-support-to-kernel or face-lattice proofs.
-
-\section{Dobrushin and Tail-Cotangent Certificates}
-\label{sec:tail-cotangent-certificates}
-
-The following facts are standard Dobrushin/Doeblin tools
-\citep{gaubert2013dobrushin,levin2017markov}, stated here with the
-quotient convention of Definition~\ref{def:quotient-convention}.  They are the
-bridge from the fixed-support half-step calculus to rigorous tail-gradient
-bounds.
-
-\begin{definition}[Projected source-cotangent interface]
-\label{def:projected-source-cotangent-interface}
-Fix the common column quotient \(Q=\mathbb{R}^n/\mathrm{span}\{\one\}\) for the
-tail and let
-\[
- \iota:Q\longrightarrow \one^\perp,\qquad
- \iota([v])=\Pi_0v,
- \qquad
- \Pi_0=I-\frac1n\one\one^\top
-\]
-be its unique centered lift.  At step \(t\), let \(\mathcal Z_t\) collect the
-other independent local coordinates (parameters, values, residual state, or
-features), and let
-\[
- \Phi_t:\mathbb{R}^n\times\mathcal Z_t\longrightarrow\mathcal S_t
-\]
-collect every differentiable surrounding map that produces a source variable
-for the Sinkhorn cycle, evaluated at the centered input potential and fixed
-local coordinate \(z_t\).  The source space
-may contain active-edge scores, logarithmic marginals, values, query/key/value
-features, residual inputs, or loss-side quantities.  Let
-\(\nu_t\in\mathcal S_t^*\) be the aggregate source-space cotangent after all
-local reverse branches have been summed.  Its score and marginal coordinates
-are the covectors in Proposition~\ref{prop:adjoint-source-ledger}, represented
-in the marginal cotangent quotients specified there.
-
-The exact cotangent returned to the input quotient is the partial VJP of the
-composite map \([v]\mapsto\Phi_t(\iota([v]),z_t)\):
-\[
-\begin{aligned}
- \xi_t
- &=D\!\left([v]\mapsto\Phi_t(\iota([v]),z_t)\right)([v_t])^*\nu_t \\
- &=\iota^*D_1\Phi_t(\iota([v_t]),z_t)^*\nu_t
- =\Pi_0\psi_t\in Q^*,\\
- \psi_t&:=D_1\Phi_t(\iota([v_t]),z_t)^*\nu_t .
-\end{aligned}
-\]
-The final identity uses Euclidean coordinates on the centered section.  Thus
-projection is not an assumed contraction and not another Sinkhorn transpose
-step: it is the adjoint of the chosen quotient lift.  If \(\Phi_t\) is already
-gauge-invariant, then \(\one^\top\psi_t=0\) and the projection changes nothing.
-For a fixed disconnected support, replace \(\iota\) and \(\Pi_0\) by the
-component-centered lift and projection from
-Definition~\ref{def:quotient-convention}.  A source branch that does not descend
-to the declared quotient must first be expressed on a specified section; its
-section VJP, rather than an arbitrary raw covector, defines \(\xi_t\).
-Source coordinates independent of the potential have zero \(D_1\Phi_t\)
-contribution to \(\xi_t\); their \(D_2\Phi_t^*\nu_t\) cotangents continue on
-their own upstream paths.  The aggregate \(\nu_t\) contains each direct local
-source branch once and excludes the homogeneous Sinkhorn branch
-\(M_t^\top\eta_{t+1}\), so the recurrence below neither drops nor duplicates a
-branch.
-\end{definition}
-
-\begin{theorem}[Zero-mass quotient contraction]
-\label{thm:zero-mass-quotient-contraction}
-Let $A$ be any row-stochastic kernel on $n$ states.  For every cotangent
-$\eta\in Q^*=\{\eta:\one^\top\eta=0\}$,
-\[
-\|A^\top\eta\|_{\TV}\le \tau(A)\|\eta\|_{\TV}.
-\]
-For row-stochastic kernels $A_1,\ldots,A_K$,
-\[
-\|(A_K\cdots A_1)^\top\eta\|_{\TV}
-\le \tau(A_K\cdots A_1)\|\eta\|_{\TV}
-\le \prod_{t=1}^K \tau(A_t)\|\eta\|_{\TV}.
-\]
-\end{theorem}
-
-\begin{proof}
-A zero-mass signed vector $\eta$ has Jordan decomposition
-$\eta=\eta^+-\eta^-$ with $\eta^\pm\ge0$ and
-$\eta^+(\one)=\eta^-(\one)=\|\eta\|_{\TV}$.  After normalizing the two positive
-parts to probability vectors, $A^\top\eta$ is the difference of the two
-probability measures pushed forward by the Markov kernel $A$, times
-$\|\eta\|_{\TV}$.  The Dobrushin coefficient is exactly the largest
-possible total-variation distance between two rows, equivalently the largest
-contraction factor on differences of probability measures.  This proves the
-one-step inequality.  The product kernel is row-stochastic, so the first
-inequality applies to it.  Submultiplicativity of Dobrushin coefficients gives
-$\tau(A_K\cdots A_1)\le\prod_t\tau(A_t)$.
-\end{proof}
-
-\begin{theorem}[Projected-source tail-cotangent bound]
-\label{thm:projected-source-tail-bound}
-Let $M_1,\ldots,M_K\in\mathbb{R}^{n\times n}$ be the fixed-support quotient
-operators produced by a sequence of Sinkhorn row-column cycles on a common
-column state space, and let projected quotient sources
-$\xi_t\in Q^*$ collect the zero-mass cotangents delivered to the input quotient
-coordinates at step $t$.  Concretely, the Sinkhorn score and marginal
-components are the adjoints in Proposition~\ref{prop:adjoint-source-ledger};
-all local source-space covectors are summed into $\nu_t$, and the exact partial
-VJP of $[v]\mapsto\Phi_t(\iota([v]),z_t)$ in
-Definition~\ref{def:projected-source-cotangent-interface} constructs
-$\xi_t$.  Suppose the reverse tail recurrence is
+Because column potentials are defined modulo additive constants on a connected support, we work on the quotient $Q = \mathbb{R}^n / \mathrm{span}\{\one\}$ and its dual zero-sum hyperplane $Q^* = \{\eta \in \mathbb{R}^n : \one^\top \eta = 0\}$ equipped with the total-variation norm $\|\eta\|_{\TV} = \frac{1}{2}\|\eta\|_1$. Since $M_t\one = \one$, its transpose maps $Q^*$ into itself. When surrounding differentiable layers inject direct non-transport gradients at step $t$ (through scores, marginals, or residual paths), projecting those upstream terms onto $Q^*$ via $\Pi_0 x = x - (\one^\top x / n)\one$ yields an aggregate source vector $\xi_t \in Q^*$ and the inhomogeneous backward recurrence
 \begin{equation}
 \label{eq:tail-recurrence}
-\eta_t=M_t^\top\eta_{t+1}+\xi_t,
-\qquad t=1,\ldots,K,
+  \eta_t = M_t^\top \eta_{t+1} + \xi_t, \qquad t = 1, \dots, K,
 \end{equation}
-with terminal quotient cotangent $\eta_{K+1}\in Q^*$.  Then
-\begin{equation}
-\label{eq:tail-expansion}
-\eta_1=(M_K\cdots M_1)^\top\eta_{K+1}
-+\sum_{t=1}^K (M_{t-1}\cdots M_1)^\top\xi_t,
-\end{equation}
-where the empty product is the identity.  Consequently the homogeneous residual
-obeys
-\begin{equation}
-\label{eq:homogeneous-residual-bound}
-\|(M_K\cdots M_1)^\top\eta\|_{\TV}
-\le \tau(M_K\cdots M_1)\|\eta\|_{\TV},
-\end{equation}
-and the inhomogeneous tail obeys the path/product sum bound
-\begin{equation}
-\label{eq:inhomogeneous-tail-bound}
-\|\eta_1\|_{\TV}
-\le
-\tau(M_K\cdots M_1)\|\eta_{K+1}\|_{\TV}
-+\sum_{t=1}^K \tau(M_{t-1}\cdots M_1)\|\xi_t\|_{\TV}.
-\end{equation}
-A looser but sometimes cheaper certificate replaces each product coefficient by
-$\prod_{\ell=1}^{t-1}\tau(M_\ell)$.
-\end{theorem}
+with terminal zero-sum adjoint $\eta_{K+1} \in Q^*$. Complete proofs and the formal componentwise quotient lift are given in Appendix~\ref{app:calculus-proofs}.
 
-\begin{proof}
-Unroll \eqref{eq:tail-recurrence}.  For $K=2$,
-$\eta_1=M_1^\top M_2^\top\eta_3+M_1^\top\xi_2+\xi_1$; the general formula
-\eqref{eq:tail-expansion} follows by induction, and
-$M_1^\top\cdots M_K^\top=(M_K\cdots M_1)^\top$.  All terms remain in $Q^*$
-because the $M_t$ are row-stochastic and the sources are quotient VJPs.  Apply
-Theorem~\ref{thm:zero-mass-quotient-contraction} to the homogeneous product and
-to each source product, then use the triangle inequality.  Submultiplicativity
-gives the optional product-of-one-step-coefficients bound.
-\end{proof}
+\subsection{Dobrushin Contraction for Unrolled and Implicit Adjoints}
 
-\begin{corollary}[Implicit quotient VJP certificate]
-\label{cor:implicit-quotient-vjp}
-Let $M$ be a row-stochastic fixed-support quotient operator with
-$\tau(M)<1$, and let $\xi\in Q^*$ be a projected source cotangent.  The implicit
-quotient equation
+For any row-stochastic matrix $A \in \mathbb{R}^{n\times n}$, the Dobrushin contraction coefficient \citep{dobrushin1956central,gaubert2013dobrushin,levin2017markov} measures the worst-case pairwise discrepancy between rows:
 \[
-\eta=M^\top\eta+\xi
+  \tau(A) = \frac{1}{2} \max_{1 \le p,q \le n} \sum_{k=1}^n |A_{pk} - A_{qk}|
+  = 1 - \min_{p,q} \sum_{k=1}^n \min\{A_{pk}, A_{qk}\} \in [0, 1].
 \]
-has a unique solution in $Q^*$,
-\[
-\eta=\sum_{k=0}^{\infty}(M^\top)^k\xi,
-\]
-and
-\[
-\|\eta\|_{\TV}\le \frac{\|\xi\|_{\TV}}{1-\tau(M)}.
-\]
-If $\eta^{(K)}=\sum_{k=0}^{K-1}(M^\top)^k\xi$, then the truncation residual is
-bounded by
-\[
-\|\eta-\eta^{(K)}\|_{\TV}
-\le \frac{\tau(M^K)}{1-\tau(M)}\,\|\xi\|_{\TV}
-\le \frac{\tau(M)^K}{1-\tau(M)}\,\|\xi\|_{\TV}.
-\]
-\end{corollary}
+Thus $\tau(A) < 1$ exactly when every pair of rows shares positive mass.
 
-\begin{proof}
-On $Q^*$, Theorem~\ref{thm:zero-mass-quotient-contraction} gives
-$\|(M^\top)^k\xi\|_{\TV}\le\tau(M)^k\|\xi\|_{\TV}$.  The Neumann series therefore
-converges absolutely in the finite-dimensional quotient space and solves
-$(I-M^\top)\eta=\xi$.  If another solution existed, their difference $z\in Q^*$
-would satisfy $z=M^\top z$, hence
-$\|z\|_{\TV}\le\tau(M)\|z\|_{\TV}$; since $\tau(M)<1$, $z=0$.  The norm bound is
-the geometric series.  For the truncation residual,
-$\eta-\eta^{(K)}=(M^K)^\top\eta$, so
-Theorem~\ref{thm:zero-mass-quotient-contraction} gives
-$\|\eta-\eta^{(K)}\|_{\TV}\le\tau(M^K)\|\eta\|_{\TV}$, and the previous bound on
-$\|\eta\|_{\TV}$ completes the proof.  Submultiplicativity gives the final
-inequality.
-\end{proof}
-
-\paragraph{Scope of the tail theorem.}
-Theorem~\ref{thm:projected-source-tail-bound} proves the fixed-support
-quotient-transport component exactly.  A full neural-gradient statement also
-has to bound $\|\xi_t\|_{\TV}$ and the operator norms of any non-transport maps
-between quotient spaces.  Proposition~\ref{prop:adjoint-source-ledger}
-supplies the one-cycle source VJPs; this theorem supplies the quotient
-transport of the resulting projected sources.
-Without the surrounding source-norm and map-norm bounds, $\tau(M_K\cdots M_1)$
-is a rigorous transport-tail certificate, not a complete parameter-to-loss
-gradient guarantee.
-
-\begin{proposition}[Sparse-support overlap certificate]
-\label{prop:sparse-support-overlap}
-Let $M$ be the derivative kernel induced by a fixed support and plan. Suppose
-there are $\gamma\in[0,1]$ and a probability vector $q$ such that
-\[
-M_{ij}\ge \gamma q_j\qquad\text{for all }i,j.
-\]
-Then $\tau(M)\le 1-\gamma$.
-\end{proposition}
-
-\begin{proof}
-Write each row as $M_i=\gamma q+(1-\gamma)\widetilde M_i$, where
-$\widetilde M_i$ is a probability vector when $\gamma<1$.  The common component
-cancels in $M_i-M_{i'}$, so the total-variation distance between any two rows
-is at most $1-\gamma$.
-\end{proof}
-
-This proposition is deliberately stated as a kernel-level condition. A support
-graph can suggest overlap, but scores and marginal masses determine the actual
-lower bound after scaling. The validator therefore computes the empirical
-shared component
-\[
-\gamma_{\rm cert}=\sum_j\min_i M_{ij}
-\]
-from the realized kernel rather than claiming a graph-only theorem.
-
-\begin{theorem}[Mass-floored hub certificate]
-Let $H\subseteq[n]$ be a set of hub columns. Suppose there is a number
-$p_{\min}>0$ such that for every source column $\alpha\in[n]$ and every hub
-$h\in H$, there exists a witness row $i=i(\alpha,h)$ with
-\[
-P_{i\alpha}\ge p_{\min},\qquad P_{ih}\ge p_{\min}.
-\]
-Let $a_{\max}=\max_i a_i$ and $b_{\max}=\max_\alpha b_\alpha$. Then
-\[
-M_{\alpha h}\ge \frac{p_{\min}^2}{b_{\max}a_{\max}}
-\qquad\text{for every }\alpha\in[n],\ h\in H.
-\]
-Consequently, writing
-\[
-\gamma_{\rm shared}=\sum_\beta\min_\alpha M_{\alpha\beta},
-\]
-we have
-\[
-\gamma_{\rm shared}\ge |H|\frac{p_{\min}^2}{b_{\max}a_{\max}}.
-\]
-Equivalently, with the defensive cap
-\[
-\gamma_H=\min\left\{1, |H|\frac{p_{\min}^2}{b_{\max}a_{\max}}\right\},
-\]
-the derivative kernel has a common component of mass at least $\gamma_H$ and
-$\tau(M)\le1-\gamma_H$.
-\end{theorem}
-
-\begin{proof}
-Using Theorem~\ref{thm:support-to-kernel-topology}, for each $\alpha$ and $h$,
-\[
-M_{\alpha h}=\sum_i\frac{P_{i\alpha}P_{ih}}{b_\alpha a_i}.
-\]
-All summands are nonnegative.  The witness row $i(\alpha,h)$ contributes at
-least
-\[
-\frac{p_{\min}^2}{b_\alpha a_{i(\alpha,h)}}
-\ge
-\frac{p_{\min}^2}{b_{\max}a_{\max}} .
-\]
-Therefore each row of $M$ assigns at least this much mass to every hub column in
-the fixed common set $H$.  Summing the rowwise
-minimum over the distinct columns $h\in H$ gives the displayed lower bound on
-$\gamma_{\rm shared}$; applying Proposition~\ref{prop:sparse-support-overlap}
-gives the Dobrushin bound.  Under exact hypotheses the uncapped lower bound is
-automatically at most one because $M$ is row-stochastic; the cap is included
-only to make numerical reporting robust.
-\end{proof}
-
-This theorem is the safe quantitative form of the topology story. The support
-graph supplies the hub-witness pattern; the scaled plan supplies the mass
-floor. It is therefore a realized-plan certificate, not a pure support theorem.
-Without a mass floor or explicit score/marginal assumptions implying one,
-dense support alone does not prevent $\tau(M)$ from approaching one.
-
-\section{Negative and Windowed Topology Certificates}
-
-The certificate is most useful when it distinguishes topology failures from
-topology fixes. The following negative examples are deliberately simple.
-
-\begin{proposition}[Closed disconnected components]
-If the row-stochastic kernel $M$ has two closed components with disjoint
-transition supports, then $\tau(M)=1$. Hence the one-step certificate gives no
-global quotient contraction.
-\end{proposition}
-
-\begin{proof}
-Choose one row from each closed component. Their row distributions have zero
-overlap, so the total-variation distance between the rows is one. This is the
-maximal value in the Dobrushin coefficient.
-\end{proof}
-
-\begin{proposition}[Permutation-like supports]
-If $M$ is a permutation matrix on at least two states, or more generally if two
-rows of $M$ are point masses on different states, then $\tau(M)=1$.
-Identity-like transport therefore preserves some quotient cotangent modes
-exactly.
-\end{proposition}
-
-\begin{proof}
-Two distinct point masses have total-variation distance one. A permutation
-matrix on at least two states has two rows that are point masses on different
-states. For the identity matrix on at least two states, every zero-mass
-cotangent is propagated without decay.
-\end{proof}
-
-One-step failure is not the same as architectural failure. Alternating supports
-or repeated layers can mix over a window.
-
-\begin{theorem}[Windowed face-lattice characterization]
-\label{thm:windowed-face-lattice}
-For $t=1,\ldots,K$, let
-$\mathcal P_t=\Pi(a_t,b_t;\Omega_t)$ be nonempty compact transport
-polytopes on the same column index set, with positive compatible marginals and
-strict feasibility on every active edge of $\Omega_t$. For
-$P_t\in\mathcal P_t$, define
-\[
-M_t(P_t)=
-\bigl(P_t\diag(b_t)^{-1}\bigr)^\top
-\bigl(\diag(a_t)^{-1}P_t\bigr).
-\]
-For a face tuple $F=(F_1,\ldots,F_K)$ with every $F_t$ nonempty, let
-$\mathcal R_t(F_t)$ be the two-hop column relation induced by the face support
-$\Omega_{F_t}$:
-\[
-\alpha\,\mathcal R_t(F_t)\,\gamma
-\quad\Longleftrightarrow\quad
-\exists i\ \text{with}\ (i,\alpha),(i,\gamma)\in\Omega_{F_t}.
-\]
-Say that the tuple has windowed pairwise product overlap if, for every pair
-of columns $\alpha,\beta$, the $K$-step reachable sets from $\alpha$ and
-$\beta$ through the relation product, applied in matrix-product order,
-\[
-\mathcal R_K(F_K);\mathcal R_{K-1}(F_{K-1});\cdots;\mathcal R_1(F_1)
-\]
-intersect. Then the following are equivalent.
-\begin{enumerate}
-\item There exists $\delta_K>0$ such that every finite score sequence on the
-      fixed supports satisfies
-      \[
-      \tau\!\left(M_K(P_K)\cdots M_1(P_1)\right)\le 1-\delta_K .
-      \]
-\item Every face tuple $(F_1,\ldots,F_K)$ with every $F_t$ nonempty has
-      windowed pairwise product overlap.
+\begin{theorem}[Dobrushin contraction for unrolled and implicit differentiation]
+\label{thm:dobrushin-contraction}
+Let $A, M, M_1, \dots, M_K \in \mathbb{R}^{n\times n}$ be row-stochastic matrices.
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{One-step and multi-step contraction.} For every $\eta \in Q^*$,
+  \[
+    \|A^\top \eta\|_{\TV} \le \tau(A)\|\eta\|_{\TV},
+    \qquad
+    \|(M_K \cdots M_1)^\top \eta\|_{\TV} \le \tau(M_K \cdots M_1)\|\eta\|_{\TV} \le \Bigl(\prod_{t=1}^K \tau(M_t)\Bigr)\|\eta\|_{\TV}.
+  \]
+  \item \textbf{Unrolled tail bound.} If $\eta_1, \dots, \eta_{K+1} \in Q^*$ satisfy \eqref{eq:tail-recurrence} with $\xi_t \in Q^*$, then
+  \begin{equation}
+  \label{eq:inhomogeneous-tail-bound}
+    \|\eta_1\|_{\TV} \le \tau(M_K \cdots M_1)\|\eta_{K+1}\|_{\TV}
+    + \sum_{t=1}^K \tau(M_{t-1}\cdots M_1)\|\xi_t\|_{\TV}.
+  \end{equation}
+  \item \textbf{Implicit adjoint and truncation error.} If $\tau(M) < 1$ and $\xi \in Q^*$, then $(I - M^\top)\eta = \xi$ has a unique solution $\eta = \sum_{k=0}^\infty (M^\top)^k \xi \in Q^*$ with $\|\eta\|_{\TV} \le \|\xi\|_{\TV}/(1-\tau(M))$, and the $K$-step Neumann partial sum $\eta^{(K)} = \sum_{k=0}^{K-1} (M^\top)^k \xi$ satisfies
+  \[
+    \|\eta - \eta^{(K)}\|_{\TV}
+    \le \frac{\tau(M^K)}{1-\tau(M)}\|\xi\|_{\TV}
+    \le \frac{\tau(M)^K}{1-\tau(M)}\|\xi\|_{\TV}.
+  \]
 \end{enumerate}
-Thus a scheduled sparse architecture can force global quotient mixing over a
-window even when each one-step topology withholds a contraction certificate.
 \end{theorem}
 
-\begin{proof}
-For any feasible tuple $(P_1,\ldots,P_K)$, the support of
-$M_K(P_K)\cdots M_1(P_1)$ is the Boolean product obtained by first following
-the support relation of $M_K(P_K)$, then the support relation of
-$M_{K-1}(P_{K-1})$, and so on through $M_1(P_1)$. By the support-to-kernel
-theorem, the one-step support relation of $M_t(P_t)$ is the two-hop relation
-induced by $\supp(P_t)$. Hence the product kernel has Dobrushin coefficient
-strictly below one exactly when every pair of its rows has overlapping support,
-which is precisely the matrix-product-order windowed product-overlap condition
-for the minimal face tuple containing the plans.
+The proof decomposes any zero-sum vector $\eta = \eta^+ - \eta^-$ into normalized positive and negative probability measures and applies standard Markov TV contraction (Appendix~\ref{app:calculus-proofs}).
 
-If every face tuple has windowed product overlap, then
-\[
-\Gamma_K(P_1,\ldots,P_K)
-=
-1-\tau(M_K(P_K)\cdots M_1(P_1))
-\]
-is positive on the compact product polytope
-$\mathcal P_1\times\cdots\times\mathcal P_K$. Continuity gives a positive
-minimum $\delta_K$, and every finite-score sequence satisfies the stated
-bound.
+\section{From Graph Support to Score-Uniform Contraction}
+\label{sec:baselines}
+\label{sec:face-lattice}
 
-Conversely, suppose a face tuple $(F_1,\ldots,F_K)$ fails windowed product
-overlap. Each face $F_t$ is exposed by some score direction $B_t$. Applying
-Theorem~\ref{thm:zero-temperature-obstruction} independently to the score
-sequence $L B_t$ gives plans $P_t(L)$ converging to entropy-center points in
-$\operatorname{relint}(F_t)$. The corresponding product kernels converge to a
-row-stochastic kernel with two disjoint product-row supports, so its
-Dobrushin coefficient is one. By continuity,
-\[
-\tau(M_K(P_K(L))\cdots M_1(P_1(L)))\to1,
-\]
-and no positive score-uniform window bound can hold.
-\end{proof}
+We now determine when a sparse support mask $\Omega$ and marginals $(a,b)$ guarantee $\tau(M) < 1$ at a balanced fixed point $P \in \Pi(a,b;\Omega)$. All full proofs for this section appear in Appendix~\ref{app:face-proofs}.
 
-As in the one-step face-lattice theorem, this is a structural characterization
-rather than a scalable checker. Exact verification over arbitrary supports
-requires quantifying over face tuples of a product of transport polytopes. The
-point is the architectural dichotomy: a scheduled support family either rules
-out bad zero-temperature face sequences, or some finite score sequence can
-make the window certificate arbitrarily weak. The product-coordinate theorem
-below is a tractable family where the good side of the dichotomy can be proved
-without enumerating faces.
+\subsection{Equal-Score Baselines and Score Sensitivity}
 
-Products of stochastic matrices have a classical convergence theory
-\citep{wolfowitz1963products}. Here the quantitative certificate is the
-Dobrushin coefficient of the ordered product on a common quotient space;
-one-step contraction is not required.
+Expanding $M = C^\top R$ shows directly how the sparsity pattern $\Omega$ shapes two-step transitions.
 
-\begin{theorem}[Windowed Dobrushin certificate]
-Let $M_1,\ldots,M_K$ be row-stochastic kernels. For every zero-mass cotangent
-$\eta$,
-\[
-\|(M_K\cdots M_1)^\top\eta\|_{\TV}
-\le
-\tau(M_K\cdots M_1)\|\eta\|_{\TV}.
-\]
-It is possible that $\tau(M_t)=1$ for every $t$ while
-$\tau(M_K\cdots M_1)<1$.
-\end{theorem}
+\begin{proposition}[Two-hop support of $M$]
+\label{prop:two-hop-support}
+At any balanced fixed point $P \in \Pi(a,b;\Omega)$ with positive marginals,
+\begin{equation}
+\label{eq:kernel-entrywise}
+  M_{\alpha\beta} = \sum_{i=1}^m \frac{P_{i\alpha} P_{i\beta}}{b_\alpha a_i}
+  \qquad (\alpha,\beta \in [n]).
+\end{equation}
+If $P_{ij} > 0$ on every edge $(i,j)\in\Omega$, then $M_{\alpha\beta} > 0$ if and only if columns $\alpha$ and $\beta$ share an active row $i$.
+\end{proposition}
 
-\begin{proof}
-The first claim is the zero-mass quotient contraction applied to the product
-kernel, which is row-stochastic. For the second claim, take two partition
-kernels on four states: one averages within $\{1,2\}$ and $\{3,4\}$, and the
-next averages within $\{1,3\}$ and $\{2,4\}$. Each kernel has disjoint row
-pairs and $\tau=1$, but their product sends every row to the uniform
-distribution, so the two-step coefficient is zero.
-\end{proof}
-
-Heat-bath updates resample from a conditional distribution and are standard
-Markov-chain constructions \citep{levin2017markov}. The next result identifies
-such an update exactly as the derivative kernel of a partition-supported
-transport layer.
-
-\begin{theorem}[Partition heat-bath transport layers]
-\label{thm:partition-heat-bath}
-Let $X$ be a finite column set with a positive probability vector $b$. Let
-$\pi:X\to Z$ be a partition map, use rows indexed by $z\in Z$, and define the
-active support by
-\[
-(z,x)\in\Omega
-\quad\Longleftrightarrow\quad
-\pi(x)=z .
-\]
-Set the row marginal to the block mass
-\[
-a_z=\sum_{x:\,\pi(x)=z} b_x .
-\]
-Then the transportation polytope $\Pi(a,b;\Omega)$ is a singleton. For every
-finite score matrix on this active support, the Sinkhorn plan is
-\[
-P_{zx}=b_x\,\mathbf 1\{\pi(x)=z\}.
-\]
-The induced column-to-column derivative kernel is the heat-bath kernel
-\[
-M_{xy}
-=
-\mathbf 1\{\pi(x)=\pi(y)\}\,
-\frac{b_y}{a_{\pi(x)}} .
-\]
-Consequently any sequence of partition-fiber transport layers has exactly the
-same quotient-kernel product as the corresponding sequence of heat-bath
-resampling kernels. Windowed Dobrushin certificates therefore apply directly
-to the resulting kernel products.
-\end{theorem}
-
-\begin{proof}
-Each column $x$ is incident to exactly one row, namely $\pi(x)$. The column
-constraint therefore forces $P_{\pi(x),x}=b_x$, and all other entries in that
-column are inactive. The row sums match by the definition of $a_z$, so this is
-the unique feasible plan; because the feasible set is a singleton, finite
-scores cannot change the plan. Substituting this plan into the
-support-to-kernel formula gives
-\[
-M_{xy}
-=
-\sum_z \frac{P_{zx}P_{zy}}{b_x a_z}
-=
-\mathbf 1\{\pi(x)=\pi(y)\}\frac{b_y}{a_{\pi(x)}} .
-\]
-The statement about products follows by applying the same identity to every
-layer.
-\end{proof}
-
-Theorem~\ref{thm:partition-heat-bath} is deliberately stated as a kernel
-identification theorem, not as a universal mixing theorem. For non-product
-$b$, a sweep of such layers is a systematic block-Gibbs kernel for $b$; it may
-contract, but the coefficient depends on additional minorization or
-reachability properties of the block conditionals and can be arbitrarily close
-to one under strong dependencies. The stronger identity
-$M_{\sigma(K)}\cdots M_{\sigma(1)}=\one b^\top$ in the next theorem uses the
-product form of $b$ in an essential way.
-
-\begin{theorem}[Product-coordinate window certificate]
-\label{thm:product-coordinate-window}
-Let
-\[
-X=X_1\times\cdots\times X_K
-\]
-be a finite product column set. Let
-$b(x)=\prod_{t=1}^K\mu_t(x_t)$ be a strictly positive product marginal. For
-layer $t$, let rows be indexed by fibers
-$z\in X_{-t}:=\prod_{s\ne t}X_s$, connect row $z$ exactly to columns
-$x\in X$ with $x_{-t}=z$, and set
-\[
-a_t(z)=\sum_{u\in X_t}b(z,u)=\prod_{s\ne t}\mu_s(z_s).
-\]
-Then the feasible transport plan on layer $t$ is unique, for every finite
-score matrix on the active support:
-\[
-P_t(z,x)=b(x)\,\mathbf 1\{x_{-t}=z\}.
-\]
-Consequently its derivative kernel is the coordinate-resampling kernel
-\[
-(M_t)_{xy}
-=
-\mathbf 1\{x_{-t}=y_{-t}\}\,\mu_t(y_t).
-\]
-For any permutation $\sigma$ of $\{1,\ldots,K\}$, applying each coordinate
-layer once gives
-\[
-M_{\sigma(K)}\cdots M_{\sigma(1)}=\one b^\top,
-\qquad
-\tau(M_{\sigma(K)}\cdots M_{\sigma(1)})=0.
-\]
-If the product of the coordinates other than $t$ has at least two elements,
-then $\tau(M_t)=1$. Thus coordinate-factorized sparse layers may withhold
-every one-step contraction certificate while a full coordinate window gives
-perfect score-uniform quotient mixing.
-\end{theorem}
-
-\begin{proof}
-Fix $t$. Each column $x$ is incident to exactly one row, namely
-$z=x_{-t}$. The column marginal constraint therefore forces
-$P_t(z,x)=b(x)$ on that active edge. The row sums match by the definition of
-$a_t(z)$:
-\[
-\sum_{x:\,x_{-t}=z}P_t(z,x)
-=
-\sum_{u\in X_t}b(z,u)
-=a_t(z).
-\]
-Thus the transportation polytope for layer $t$ is a singleton and finite
-scores cannot change the plan.
-
-Using the support-to-kernel identity,
-\[
-(M_t)_{xy}
-=
-\sum_z \frac{P_t(z,x)P_t(z,y)}{b(x)a_t(z)} .
-\]
-There is a nonzero summand only when $x_{-t}=y_{-t}=z$. In that case
-\[
-(M_t)_{xy}
-=
-\frac{b(x)b(y)}{b(x)a_t(x_{-t})}
-=
-\frac{b(y)}{a_t(x_{-t})}
-=
-\mu_t(y_t),
-\]
-which proves the coordinate-resampling formula.
-
-The kernel $M_t$ leaves all coordinates except $t$ fixed and resamples
-coordinate $t$ from $\mu_t$. These coordinate-resampling kernels commute
-because $b$ is a product measure and each kernel acts on a different
-coordinate conditional. After every coordinate has been applied once, the
-output distribution is $b$ independently of the input column, so the product
-kernel is $\one b^\top$ and its Dobrushin coefficient is zero.
-
-If $X_{-t}$ has at least two elements, choose columns $x,y$ with
-$x_{-t}\ne y_{-t}$. The supports of rows $x$ and $y$ of $M_t$ lie in disjoint
-fibers, so the two rows have total-variation distance one and $\tau(M_t)=1$.
-\end{proof}
-
-\begin{corollary}[Hypercube butterfly window]
-\label{cor:hypercube-butterfly-window}
-Let $n=2^r$ with $r\ge2$, and index columns by bitstrings
-$x\in\{0,1\}^r$. For layer $t\in\{1,\ldots,r\}$, let the fixed support have
-one row for each unordered pair $\{x,x\oplus e_t\}$, where $e_t$ flips bit
-$t$, and connect that row to exactly the two columns in the pair. Use
-equal active scores, row marginals $a_i=2/n$ on the $n/2$ matching rows, and
-column marginals $b_x=1/n$. Let $M_t$ be the resulting column-to-column
-derivative kernel. Then
-\[
-M_t=\frac12(I+F_t),
-\]
-where $F_t$ is the permutation matrix for bit flip $x\mapsto x\oplus e_t$.
-Consequently $\tau(M_t)=1$ for every $t$, but
-\[
-M_rM_{r-1}\cdots M_1=\frac1n\one\one^\top
-\qquad\text{and hence}\qquad
-\tau(M_rM_{r-1}\cdots M_1)=0.
-\]
+\begin{corollary}[Qualitative overlap criterion]
+\label{cor:overlap-criterion}
+If $P_{ij} > 0$ on every edge of $\Omega$, then $\tau(M) < 1$ if and only if every pair of columns $\alpha,\beta \in [n]$ has overlapping two-hop column neighborhoods in $\Omega$.
 \end{corollary}
 
-\begin{proof}
-Apply Theorem~\ref{thm:product-coordinate-window} with
-$X_t=\{0,1\}$ and $\mu_t$ uniform. The fiber row indexed by
-$x_{-t}$ is exactly the unordered pair $\{x,x\oplus e_t\}$, and the
-coordinate-resampling kernel is $M_t=(I+F_t)/2$. Since $r\ge2$, each
-$X_{-t}$ has at least two elements, so $\tau(M_t)=1$. Applying all bit
-coordinates once gives the uniform kernel $n^{-1}\one\one^\top$, hence the
-window coefficient is zero.
+In the equal-score biregular baseline, $M$ reduces to a simple random walk determined solely by the support graph.
+
+\begin{proposition}[Biregular equal-score baseline]
+\label{prop:biregular-baseline}
+Let $\Omega \subseteq [m]\times[n]$ have constant row degree $d_r \ge 1$ and constant column degree $d_c \ge 1$, with $E = |\Omega| = md_r = nd_c$. With uniform marginals $a_i = 1/m$, $b_\alpha = 1/n$, and equal active scores, the unique Sinkhorn plan is $P_{i\alpha} = E^{-1}\one\{(i,\alpha)\in\Omega\}$ and
+\begin{equation}
+\label{eq:biregular-kernel}
+  M_{\alpha\beta} = \frac{N_{\alpha\beta}}{d_c d_r},
+  \qquad
+  N_{\alpha\beta} = \bigl|\{i \in [m] : (i,\alpha)\in\Omega \text{ and } (i,\beta)\in\Omega\}\bigr|.
+\end{equation}
+\end{proposition}
+
+If non-equal scores keep every active edge weight bounded below relative to the uniform plan, contraction degrades smoothly rather than collapsing abruptly.
+
+\begin{proposition}[Stability under bounded plan distortion]
+\label{prop:plan-distortion-stability}
+In the setting of Proposition~\ref{prop:biregular-baseline}, let $M_0$ be the equal-score kernel \eqref{eq:biregular-kernel}. For any feasible plan $P \in \Pi(a,b;\Omega)$ satisfying $E P_{i\alpha} \ge \kappa^{-1}$ on all active edges ($\kappa \ge 1$), we have $M(P) \ge \kappa^{-2} M_0$ entrywise and $\tau(M(P)) \le 1 - \kappa^{-2}(1 - \tau(M_0))$. More generally, if $M_t \ge \delta_t M_t^0$ with $\delta_t \in [0,1]$, then
+\[
+  \tau(M_K \cdots M_1) \le 1 - \Bigl(\prod_{t=1}^K \delta_t\Bigr)\bigl(1 - \tau(M_K^0 \cdots M_1^0)\bigr).
+\]
+\end{proposition}
+
+Finally, not every change in edge scores changes the transport plan: row-plus-column additive offsets simply shift the dual potentials.
+
+\begin{proposition}[Additive score invariance and bipartite cycle rank]
+\label{prop:additive-score-invariance}
+Fix $\Omega$ and positive compatible marginals $(a,b)$ satisfying strict feasibility, with $c$ connected components and active vertex sets $I, J$. Scores of the separable form $B_{ij} = \alpha_i + \beta_j + c_\Gamma$ on each component $\Gamma$ leave the Sinkhorn plan unchanged ($P_L = P_0$ for all $S = LB$). Modulo this additive subspace, the space of score patterns that alter the plan has dimension equal to the bipartite cycle rank $|\Omega| - |I| - |J| + c$. In particular, if $\Omega$ is a forest, $\Pi(a,b;\Omega)$ is a singleton and $M$ is independent of the scores.
+\end{proposition}
+
+\subsection{The Face-Lattice Dichotomy}
+
+When scores are not additive, scaling $S = LB$ by a large factor $L \to \infty$ concentrates the plan onto the optimal linear-programming face $\mathcal{F}_B = \arg\max_{P\in\Pi(a,b;\Omega)} \langle B, P\rangle$, converging to its maximum-entropy center $P_B^{\mathrm{ent}} \in \operatorname{relint}(\mathcal{F}_B)$ (Lemma~\ref{lem:zero-temperature-limit} in Appendix~\ref{app:face-proofs}). Any edge outside $\mathcal{F}_B$ vanishes in the limit.
+
+For any nonempty face $F$ of $\Pi(a,b;\Omega)$, let $\Omega_F = \{(i,\alpha)\in\Omega : P_{i\alpha} > 0 \text{ for some } P \in F\}$ be its active support. We say $F$ has \emph{pairwise two-hop column overlap} if for every pair of columns $\alpha,\beta \in [n]$ there exist $\gamma \in [n]$ and rows $i,k \in [m]$ with $(i,\alpha), (i,\gamma), (k,\beta), (k,\gamma) \in \Omega_F$.
+
+\begin{theorem}[Face-lattice characterization of score-uniform mixing]
+\label{thm:face-lattice-dichotomy}
+Under Assumption~\ref{ass:fixed-support-feasible} with strict feasibility on $\Omega$, the following are equivalent:
+\begin{enumerate}[leftmargin=1.5em]
+  \item There exists $\rho < 1$, depending only on $(a,b,\Omega)$, such that $\tau(M(P_\Omega(S;a,b))) \le \rho$ for every finite score matrix $S$ on $\Omega$.
+  \item Every nonempty face $F$ of $\Pi(a,b;\Omega)$ has pairwise two-hop column overlap.
+\end{enumerate}
+Equivalently, if (2) fails, then for every $\varepsilon > 0$ there is a finite score matrix $S$ on $\Omega$ with $\tau(M(P_\Omega(S;a,b))) > 1 - \varepsilon$.
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+By Proposition~\ref{prop:two-hop-support}, $1 - \tau(M(P)) > 0$ on $\Pi(a,b;\Omega)$ exactly when $\supp(P)$ has pairwise two-hop column overlap. If every nonempty face $F$ satisfies (2), then $1 - \tau(M(P))$ is strictly positive everywhere on the compact polytope $\Pi(a,b;\Omega)$, so continuity guarantees a uniform positive minimum $\delta_* = 1 - \rho > 0$. Conversely, if some face $F$ lacks pairwise overlap, choosing an exposing score direction $B$ with $\mathcal{F}_B = F$ and taking $S = LB$ with $L \to \infty$ sends $P_\Omega(LB;a,b)$ into $\operatorname{relint}(F)$, whose limiting kernel has two disjoint rows and hence $\tau \to 1$. (See Appendix~\ref{app:face-proofs}.)
 \end{proof}
 
+\begin{figure}[t]
+  \centering
+  \resizebox{\linewidth}{!}{%
+  \begin{tikzpicture}[>=stealth, font=\small]
+    % Left panel: Light vs Heavy hub
+    \node[anchor=west, font=\bfseries] at (-0.2, 3.68) {(a) Light vs.\ heavy hub ($n=6$)};
+    \draw[rounded corners, draw=black!25, fill=black!2] (-0.2,-0.32) rectangle (7.0,3.36);
 
-\section{Support-Schedule Design Consequences}
+    % Light hub box
+    \node[anchor=west, font=\scriptsize\bfseries, text=crimson] at (0.05, 3.04) {Light hub: bad face isolates $\{1,2\}$ and $\{4,5\}$};
+    \node[draw, rectangle, fill=white, font=\scriptsize] (lh) at (0.85, 2.38) {hub $0$};
+    \node[draw, circle, fill=white, minimum size=0.42cm, font=\scriptsize] (lc0) at (2.25, 2.38) {$0$};
+    \node[draw, rectangle, fill=crimson!10, font=\scriptsize] (lb1) at (3.95, 2.38) {$\{1,2\}$};
+    \node[draw, rectangle, fill=crimson!10, font=\scriptsize] (lb2) at (5.65, 2.38) {$\{4,5\}$};
+    \draw[very thick, color=crimson, ->] (lh) -- node[above, font=\scriptsize] {$1/6$} (lc0);
+    \draw[dashed, color=slate, ->] (lh.south) .. controls (1.5, 1.85) and (3.2, 1.85) .. (lb1.south);
+    \node[font=\scriptsize, text=slate] at (3.45, 1.66) {edges to cols $1$--$5$ vanish as $L\to\infty$};
 
-The theorem spine turns support design into a question about feasible faces and
-row-overlap of induced Markov kernels.  Three examples are important for
-interpretation.  First, local windows can be qualitatively connected while
-still withholding one-step contraction, so powered or windowed certificates are
-needed.  Second, register or dustbin rows can create shared mass, but only when
-the realized plan or the marginal constraints force genuine common components.
-Third, layered sparse schedules can mix globally even when each layer alone has
-$\tau=1$, as shown by Theorem~\ref{thm:product-coordinate-window} and the
-hypercube butterfly corollary.  The detailed spectral, register, and shared-bus
-corollaries are collected in Appendix~\ref{app:architecture-corollaries}; the
-DAG path-sum material is only a short appendix remark.  The main claims here
-are the fixed-support quotient operator, the face-lattice dichotomy, and the
-windowed/product-coordinate support-schedule certificates.
+    % Divider
+    \draw[draw=black!15] (0.05, 1.42) -- (6.75, 1.42);
 
-\section{Computational Complexity of Certificates}
-\label{sec:computational-complexity}
+    % Heavy hub box
+    \node[anchor=west, font=\scriptsize\bfseries, text=navy] at (0.05, 1.16) {Heavy hub: $a_0 + b_j - 1 > 0$ forces hub mass};
+    \node[draw, rectangle, fill=navy!10, font=\scriptsize] (hh) at (0.8, 0.44) {hub $0$};
+    \foreach \col/\xpos in {0/2.05, 1/2.85, 2/3.65, 3/4.45, 4/5.25, 5/6.05} {
+      \node[draw, circle, fill=white, minimum size=0.38cm, font=\scriptsize] (hc\col) at (\xpos, 0.44) {\col};
+      \draw[thick, color=navy, ->] (hh) to[bend left=22] (hc\col);
+    }
+    \node[font=\scriptsize, text=navy] at (3.45, -0.06) {every $P_{0j} \ge \delta_j = 0.0467$ for all $S$};
 
-Let $d_i=|\Omega_i|$ be the active degree of row $i$, let
-$E=|\Omega|$, and let $s_\alpha$ denote the number of nonzeros in row $\alpha$
-of the realized kernel $M$.
+    % Right panel: Plot of tau(M_L) vs L
+    \node[anchor=west, font=\bfseries] at (7.55, 3.68) {(b) Adversarial score sweep ($r=1$ + hub)};
+    \draw[rounded corners, draw=black!25, fill=black!2] (7.55,-0.32) rectangle (15.25,3.36);
 
-\paragraph{Building the quotient operator.}
-Using
+    % Plot frame: x in [8.50, 14.50] maps L in [0, 15] -> x = 8.50 + 0.4*L
+    % y in [0.35, 2.75] maps tau in [0, 1] -> y = 0.35 + 2.4*tau
+    \draw[->] (8.50, 0.35) -- (14.75, 0.35) node[right, font=\scriptsize] {$L$};
+    \draw[->] (8.50, 0.35) -- (8.50, 2.95) node[above, font=\scriptsize] {$\tau(M_L)$};
+
+    % Y ticks
+    \foreach \tv/\ty in {0.0/0.35, 0.5/1.55, 1.0/2.75} {
+      \draw (8.42, \ty) -- (8.50, \ty);
+      \node[left, font=\scriptsize] at (8.42, \ty) {\tv};
+    }
+    % X ticks
+    \foreach \lv/\lx in {0/8.50, 2/9.30, 5/10.50, 10/12.50, 15/14.50} {
+      \draw (\lx, 0.27) -- (\lx, 0.35);
+      \node[below, font=\scriptsize] at (\lx, 0.27) {\lv};
+    }
+
+    % Analytical bound line tau = 0.910909 -> y = 0.35 + 2.4*0.910909 = 2.536
+    \draw[dashed, thick, color=navy!70] (8.50, 2.536) -- (14.50, 2.536);
+    \node[anchor=east, font=\scriptsize, text=navy] at (14.45, 2.26) {Bound $1 - \gamma_h = 0.911$};
+
+    % Light hub curve: (0,0.537535)->1.640, (2,0.976935)->2.695, (5,0.999941)->2.750, (10,1)->2.750, (15,1)->2.750
+    \draw[very thick, color=crimson]
+      (8.50, 1.640) -- (9.30, 2.695) -- (10.50, 2.750) -- (12.50, 2.750) -- (14.50, 2.750);
+    \foreach \px/\py in {8.50/1.640, 9.30/2.695, 10.50/2.750, 12.50/2.750, 14.50/2.750} {
+      \fill[crimson] (\px, \py) circle (1.9pt);
+    }
+    \node[anchor=west, font=\scriptsize\bfseries, text=crimson] at (9.70, 1.82) {Light hub ($a_0 = 1/6$)};
+
+    % Heavy hub curve: (0,0.072200)->0.523, (2,0.143916)->0.695, (5,0.144000)->0.696, (10,0.144)->0.696, (15,0.144)->0.696
+    \draw[very thick, color=navy]
+      (8.50, 0.523) -- (9.30, 0.695) -- (10.50, 0.696) -- (12.50, 0.696) -- (14.50, 0.696);
+    \foreach \px/\py in {8.50/0.523, 9.30/0.695, 10.50/0.696, 12.50/0.696, 14.50/0.696} {
+      \node[fill=navy, minimum size=3.4pt, inner sep=0pt] at (\px, \py) {};
+    }
+    \node[anchor=west, font=\scriptsize\bfseries, text=navy] at (9.70, 1.00) {Heavy hub ($a_0 = 0.88$)};
+  \end{tikzpicture}
+  }
+  \caption{\textbf{Illustration of the face-lattice dichotomy (Table~\ref{tab:face-stress}).} \textbf{(a)} Even with a universal hub row $0$, uniform marginals allow large scores to isolate disconnected components. \textbf{(b)} Under the adversarial score sweep $S = LB$, the light hub approaches $\tau(M_L) = 1$, whereas raising $a_0$ to $0.88$ forces mass across all columns and keeps $\tau(M_L) \le 0.1440$, well below the Corollary~\ref{cor:forced-hub-edges}(2) bound $0.9109$.}
+  \label{fig:face-dichotomy}
+\end{figure}
+
+Figure~\ref{fig:face-dichotomy} illustrates this dichotomy on a $6\times 6$ circular band augmented with one universal hub row.
+
+\subsection{Sufficient Conditions via Minorization and Forced Hubs}
+
+Because checking all faces of $\Pi(a,b;\Omega)$ is exponential in $|\Omega|$, we next state two tractable lower bounds on row overlap.
+
+\begin{proposition}[Doeblin minorization and mass-floored hubs]
+\label{prop:minorization-hubs}
+Let $M$ be the derivative kernel of a feasible plan $P \in \Pi(a,b;\Omega)$.
+\begin{enumerate}[leftmargin=1.5em]
+  \item If $M_{\alpha\beta} \ge \gamma q_\beta$ for all $\alpha,\beta$ and some probability vector $q$ ($\gamma \in [0,1]$), then $\tau(M) \le 1 - \gamma$; in particular, $\tau(M) \le 1 - \gamma_{\mathrm{shared}}$ where $\gamma_{\mathrm{shared}} = \sum_\beta \min_\alpha M_{\alpha\beta}$.
+  \item If $H \subseteq [n]$ is a set of hub columns such that every column $\alpha \in [n]$ and hub $h \in H$ share a witness row $i(\alpha,h)$ with $P_{i\alpha} \ge p_{\min} > 0$ and $P_{ih} \ge p_{\min}$, then $M_{\alpha h} \ge p_{\min}^2 / (a_{\max} b_{\max})$ and $\tau(M) \le 1 - \min\{1,\, |H|\, p_{\min}^2 / (a_{\max} b_{\max})\}$, where $a_{\max} = \max_i a_i$ and $b_{\max} = \max_\alpha b_\alpha$.
+\end{enumerate}
+\end{proposition}
+
+When hub rows hold more marginal budget than non-hub rows can leave behind, edge masses are forced to stay strictly positive regardless of scores.
+
+\begin{corollary}[Marginal-forced hub edges and heavy global hubs]
+\label{cor:forced-hub-edges}
+Under Assumption~\ref{ass:fixed-support-feasible}, set $d_{i\alpha} = \bigl[b_\alpha - \sum_{k \in \Omega^\alpha \setminus \{i\}} a_k\bigr]_+$ on $(i,\alpha)\in\Omega$ and $0$ otherwise; then every $P \in \Pi(a,b;\Omega)$ satisfies $P_{i\alpha} \ge d_{i\alpha}$.
+\begin{enumerate}[leftmargin=1.5em]
+  \item If a set of hub rows $B \subseteq [m]$ covers every column pair $\alpha \neq \beta$ with some $i \in B$ having $d_{i\alpha} > 0$ and $d_{i\beta} > 0$, then every nonempty face has pairwise two-hop overlap and $\tau(M(P)) \le 1 - \gamma_0$ uniformly over $\Pi(a,b;\Omega)$, where
+  \[
+    \gamma_0 = \min_{\alpha\neq\beta} \max_{i\in B:\, d_{i\alpha} d_{i\beta} > 0}
+    \sum_{\gamma:\, d_{i\gamma} > 0} \min\!\left\{\frac{d_{i\alpha} d_{i\gamma}}{b_\alpha a_i},\, \frac{d_{i\beta} d_{i\gamma}}{b_\beta a_i}\right\} > 0.
+  \]
+  \item In particular, if a single global hub row $h$ connects to every column and satisfies $\delta_j := a_h + b_j - T > 0$ for all $j \in [n]$, then $P_{hj} \ge \delta_j$ and $\tau(M(P)) \le 1 - \gamma_h$ uniformly, where
+  \[
+    \gamma_h = \Bigl(\min_{p \in [n]} \frac{\delta_p}{b_p}\Bigr) \frac{\sum_{\beta=1}^n \delta_\beta}{a_h} > 0.
+  \]
+\end{enumerate}
+\end{corollary}
+
+\section{Multi-Layer Schedules and Canonical Sparse Attention Patterns}
+\label{sec:schedules}
+
+Single layers with disconnected components or permutation-like kernels always give $\tau(M) = 1$ (Proposition~\ref{prop:one-step-obstructions} in Appendix~\ref{app:schedule-proofs}). Composing multiple sparse layers across depth, however, can mix gradients completely.
+
+\subsection{Multi-Step Schedules and Factorized Mixing}
+
+Consider $K$ fixed-support Sinkhorn layers $\mathcal{P}_t = \Pi(a_t, b_t; \Omega_t)$ on a common column index set $[n]$, each satisfying Assumption~\ref{ass:fixed-support-feasible} with strict feasibility. For a tuple of nonempty faces $(F_1,\dots,F_K)$, let $\mathcal{R}_t(F_t)$ denote the two-hop column relation induced by $\Omega_{F_t}$. A column $\alpha$ reaches $\gamma$ through the ordered product $M_K \cdots M_1$ when there is a chain $\alpha = \alpha_K, \alpha_{K-1}, \dots, \alpha_0 = \gamma$ with $(\alpha_t, \alpha_{t-1}) \in \mathcal{R}_t(F_t)$ for $t = K, \dots, 1$. We say $(F_1,\dots,F_K)$ has \emph{windowed pairwise product overlap} if the $K$-step reachable sets of every pair $\alpha, \beta \in [n]$ intersect.
+
+\begin{theorem}[Multi-step face-lattice characterization]
+\label{thm:multistep-face-lattice}
+In the setting above, there exists $\delta_K > 0$ such that $\tau(M_K(P_K)\cdots M_1(P_1)) \le 1 - \delta_K$ for all finite score matrices $(S_1,\dots,S_K)$ if and only if every tuple of nonempty faces $(F_1,\dots,F_K)$ of $\mathcal{P}_1 \times \cdots \times \mathcal{P}_K$ has windowed pairwise product overlap.
+\end{theorem}
+
+While face-tuple enumeration is intractable for arbitrary supports, block-partition masks yield exact, score-independent kernels.
+
+\begin{theorem}[Block-partition supports induce block-Gibbs kernels]
+\label{thm:block-partition}
+Let $\pi : X \to Z$ partition a finite column set $X$ with positive marginal $b$, define $(z,x)\in\Omega \iff \pi(x)=z$, and set $a_z = \sum_{x:\pi(x)=z} b_x$. Then $\Pi(a,b;\Omega)$ is a singleton: for every finite score matrix, $P_{zx} = b_x\one\{\pi(x)=z\}$ and
 \[
-M_{\alpha\beta}=\sum_i P_{i\alpha}P_{i\beta}/(b_\alpha a_i),
+  M_{xy} = \one\{\pi(x)=\pi(y)\}\,\frac{b_y}{a_{\pi(x)}}.
 \]
-one can build $M$ by adding the rank-one contribution of each support row $i$
-to the column pairs in $\Omega_i\times\Omega_i$.  The arithmetic work and the
-candidate-pair storage are
+Hence any sequence of block-partition Sinkhorn layers has the exact same reverse-mode kernel product as the corresponding sequence of block-Gibbs (heat-bath) conditional-expectation operators.
+\end{theorem}
+
+Because each column touches only one row, the marginals fix every edge weight uniquely. When $b$ factorizes across coordinates, sweeping through all coordinates mixes the entire column space in one pass, even though each individual layer has $\tau(M_t) = 1$.
+
+\begin{theorem}[Exact mixing of coordinate-factorized schedules]
+\label{thm:coordinate-schedule}
+Let $X = X_1 \times \cdots \times X_K$ have strictly positive product marginal $b(x) = \prod_{t=1}^K \mu_t(x_t)$. For layer $t$, index rows by fibers $z \in X_{-t} = \prod_{s\neq t} X_s$, connect row $z$ to columns $x$ with $x_{-t} = z$, and set $a_t(z) = \prod_{s\neq t} \mu_s(z_s)$. Then for any finite scores, $(M_t)_{xy} = \one\{x_{-t}=y_{-t}\}\mu_t(y_t)$. If $|X_{-t}| \ge 2$, then $\tau(M_t) = 1$, yet for every permutation $\sigma$ of $\{1,\dots,K\}$,
 \[
-O\!\left(\sum_i d_i^2\right),
-\qquad
-\operatorname{nnz}(M)\le \sum_i d_i^2 .
+  M_{\sigma(K)} \cdots M_{\sigma(1)} = \one b^\top,
+  \qquad
+  \tau\bigl(M_{\sigma(K)} \cdots M_{\sigma(1)}\bigr) = 0.
 \]
-The bound is tight up to duplicated pairs.  A dense row, or enough sparse rows
-covering all column pairs, gives the worst case $\operatorname{nnz}(M)=n^2$ and
-$O(n^2)$ storage even when $P$ is sparse.
+\end{theorem}
 
-\paragraph{Exact Dobrushin coefficient.}
-Exact $\tau(M)$ compares all pairs of rows of $M$:
+\begin{corollary}[Hypercube butterfly schedule]
+\label{cor:butterfly-schedule}
+Let $n = 2^r$ ($r \ge 2$), index columns by $x \in \{0,1\}^r$, and let layer $t \in \{1,\dots,r\}$ pair each $x$ with $x \oplus e_t$ via $n/2$ rows of marginal $2/n$ and $b_x = 1/n$. Then $M_t = \frac{1}{2}(I + F_t)$ where $F_t$ flips bit $t$, so $\tau(M_t) = 1$ for every $t$ while $\tau(M_r \cdots M_1) = 0$.
+\end{corollary}
+
+Proofs of Theorems~\ref{thm:multistep-face-lattice}--\ref{thm:coordinate-schedule} and Corollary~\ref{cor:butterfly-schedule} are in Appendix~\ref{app:schedule-proofs}.
+
+\subsection{Canonical Sparse Attention Masks}
+\label{sec:canonical-topologies}
+
+Applying our baseline, spectral, and minorization results to standard sparse attention topologies gives three concrete design rules (proofs in Appendix~\ref{app:canonical-proofs}).
+
+\begin{proposition}[Spectral bound and expander mixing depth]
+\label{prop:spectral-bound}
+In the biregular equal-score setting of Proposition~\ref{prop:biregular-baseline}, $M$ is symmetric and doubly stochastic. Let $\lambda_\star = \max\{|\lambda| : \lambda \text{ eigenvalue of } M \text{ on } \one^\perp\}$. Then for every $\eta \in Q^*$ and $K \ge 1$,
 \[
-\tau(M)=\frac12\max_{\alpha,\beta}\|M_{\alpha\cdot}-M_{\beta\cdot}\|_1.
+  \|(M^K)^\top \eta\|_2 \le \lambda_\star^K \|\eta\|_2,
+  \qquad
+  \tau(M^K) \le \min\!\bigl\{1,\, \sqrt{n/2}\,\lambda_\star^K\bigr\}.
 \]
-For a dense kernel this costs $O(n^3)$ time and $O(n^2)$ memory.  With sparse
-rows, a merge of row supports costs $O(s_\alpha+s_\beta)$, so the all-pairs
-cost is $O(\sum_{\alpha<\beta}(s_\alpha+s_\beta))\le O(n\operatorname{nnz}(M))$,
-which again becomes $O(n^3)$ after densification.
+In particular, if $\lambda_\star \le \rho \in (0,1)$, then $\tau(M^K) \le \varepsilon$ whenever $K \ge \lceil \log(\sqrt{n/2}/\varepsilon) / (-\log\rho) \rceil$.
+\end{proposition}
 
-\paragraph{Window products.}
-A window certificate uses $\tau(M_K\cdots M_1)$.  Even if each $M_t$ is sparse,
-products can densify after a few layers; exact products are therefore intended
-for small or offline validation unless a family theorem, sparse approximation,
-or symbolic product structure is available.  The spectral bounds for reversible
-equal-score baselines, the Doeblin/minorization bounds, forced-bus certificates,
-and product-coordinate heat-bath identities avoid materializing dense products
-when their hypotheses hold.
+\begin{proposition}[Circular local-band spectrum and diffusive mixing]
+\label{prop:circular-band}
+Consider the equal-score biregular baseline on $n$ circular positions where row $i$ connects to columns $i-r,\dots,i+r \pmod n$ ($0 \le r < n/2$, degree $d = 2r+1$). If $n \ge 8r + 2$, then $\tau(M) = 1$. Moreover, $M$ is circulant with eigenvalues $\lambda_0 = 1$ and
+\[
+  \lambda_k = \left(\frac{\sin(\pi k d / n)}{d \sin(\pi k / n)}\right)^2 \quad (1 \le k \le n-1),
+  \qquad
+  \lambda_\star \ge \lambda_1 = 1 - \frac{\pi^2(d^2-1)}{3n^2} + O(n^{-4}).
+\]
+Hence for fixed $r$ and $K = o(n^2)$, the first Fourier mode satisfies $\|(M^K)^\top \eta^{(1)}\|_2 / \|\eta^{(1)}\|_2 = \lambda_1^K \to 1$: fixed-width local bands require $\Omega(n^2)$ steps to mix global zero-sum gradients.
+\end{proposition}
 
-\paragraph{Face-lattice checking.}
-The exact one-step criterion quantifies over every nonempty face of
-$\Pi(a,b;\Omega)$, and the windowed criterion quantifies over tuples of faces.
-For arbitrary supports this is exponential in the number of active edges.  The
-practical uses are therefore: prove tractable family theorems, compute
-realized-plan certificates for observed scores, certify distortion or mass
-floors, and search for counterexample faces.  These certificates are offline
-design and validation tools unless a sparse approximation or family theorem is
-provided.
+\begin{theorem}[Closed-form equal-score plan for local-plus-hub supports]
+\label{thm:register-hub-plan}
+Let $n \ge 1$ token nodes have a $d$-regular token--token support ($d \ge 1$), augmented with $r \ge 1$ global hub (or register) rows and columns connected to all $N = n+r$ nodes, while token rows connect to their $d$ local tokens and all $r$ hubs. With equal scores and $a = b = N^{-1}\one$, define
+\[
+  t = \frac{2d}{\sqrt{(n-r)^2 + 4rd} + (n-r)} > 0,
+  \qquad
+  A = \frac{1}{N(d+rt)},
+  \quad B = tA,
+  \quad D = t^2 A.
+\]
+Then the Sinkhorn plan equals $A$ on token--token edges, $B$ on token--hub edges, and $D$ on hub--hub edges, giving $\tau(M) \le 1 - \gamma_{\mathrm{reg}}$ with $\gamma_{\mathrm{reg}} = rt(d + rt^2)/(d + rt)^2$.
+\end{theorem}
 
-\section{Discussion}
+Away from equal scores, retaining the contraction guaranteed by Theorem~\ref{thm:register-hub-plan} requires either a realized hub mass floor (Proposition~\ref{prop:minorization-hubs}) or marginal-forced hub capacity (Corollary~\ref{cor:forced-hub-edges}), consistent with Theorem~\ref{thm:face-lattice-dichotomy}.
 
-The theorem spine separates four levels of reasoning.  At the half-step level,
-fixed support and finite scores give an exact quotient Markov operator
-$M=C^\top R$ plus explicit source terms.  At the tail level, Dobrushin
-coefficients bound homogeneous residuals and projected-source path sums.  At
-the pure topology level, equal-score biregular supports become explicit graph
-walks, and the face-lattice dichotomy says exactly when a fixed support and
-marginals force score-uniform one-step quotient mixing.  At the scheduled
-support level, windowed face tuples and product-coordinate supports explain how
-individually non-mixing sparse layers can mix over a finite window.
+\section{Computational Complexity and Numerical Verification}
+\label{sec:verification}
 
-The face-lattice and product-coordinate theorems depend only on primal
-entropy-center face convergence, compactness, and support overlap.  The
-quantitative regimes in the manuscript are exactly the equal-score,
-forced-capacity, realized-plan, and plan-distortion regimes.
+\subsection{Computational Complexity}
 
-\section{Conclusion}
+Let $d_i = |\Omega_i|$ be the active degree of row $i$ and $E = |\Omega|$. Summing rank-one outer products $P_{i\alpha}P_{i\beta}/(b_\alpha a_i)$ over $\Omega_i \times \Omega_i$ forms $M$ in $O(\sum_i d_i^2)$ time with $\operatorname{nnz}(M) \le \sum_i d_i^2$. Exact evaluation of $\tau(M)$ compares all row pairs in $O(n\,\operatorname{nnz}(M))$ time, reaching $O(n^3)$ when $M$ densifies (as with a universal hub row). Multi-step products $M_K\cdots M_1$ also densify quickly, and checking every face in Theorems~\ref{thm:face-lattice-dichotomy} and~\ref{thm:multistep-face-lattice} is exponential in $E$ in the worst case. Consequently, exact $\tau(M_K\cdots M_1)$ and face enumeration are small-scale diagnostics, whereas Propositions~\ref{prop:minorization-hubs}--\ref{prop:circular-band}, Corollary~\ref{cor:forced-hub-edges}, and Theorems~\ref{thm:coordinate-schedule}--\ref{thm:register-hub-plan} give analytical bounds without materializing dense $n\times n$ products.
 
-Fixed-support Sinkhorn scaling exposes a precise quotient-transport operator.
-The homogeneous column-potential update is $\delta v^+=C^\top R\delta v$, and
-the reverse quotient cotangent update is governed by $M^\top$ together with
-projected source terms.  Dobrushin, minorization, face-lattice, and windowed
-certificates turn support schedules into rigorous statements about this fixed
-calculus.  The result consists of exact
-fixed-support proofs, explicit limits, computational costs, and
-certificate-level validation without downstream or systems overclaiming.
+\subsection{Numerical Verification}
+\label{sec:numerical}
+
+All checks below run deterministically in \texttt{scripts/verify\_paper\_examples.py} (NumPy, fixed seed $0$) using \texttt{src/transport\_topology.py} and \texttt{src/topology\_masks.py}.
+
+\paragraph{Finite-cycle two-plan VJP check.}
+On a $6 \times 6$ circular band ($r=1$) with nonuniform compatible marginals and Gaussian scores ($\sigma=0.4$), one unbalanced row--column cycle from a nonzero potential $v_0$ gives distinct half-step plans ($\max|P_t^r - P_t^c| = 7.216 \times 10^{-2}$). Against central finite differences ($\epsilon = 10^{-6}$), the two-plan Jacobian $M_t = C_t^\top R_t$ and the adjoints $(\eta^-, \lambda_a, \lambda_b, g^s)$ from Propositions~\ref{prop:half-step-linearization}--\ref{prop:reverse-mode-cycle} agree to within $3.905 \times 10^{-10}$ max absolute error ($2.460\times 10^{-10}$ for $M_t$, $3.905\times 10^{-10}$ for $\eta^-$, $1.979\times 10^{-10}$ for $\lambda_a$, $1.719\times 10^{-10}$ for $\lambda_b$, and $2.530\times 10^{-10}$ for $g^s$). Using $P_t^c$ for both half-steps introduces a Jacobian error of $2.928 \times 10^{-1}$.
+
+\paragraph{Canonical sparse attention supports.}
+Table~\ref{tab:canonical-supports} compares seven topologies at $n=32$ with uniform marginals and Gaussian scores ($\sigma = 0.15$; $2{,}000$ Sinkhorn steps for single-layer masks, $500$ steps per singleton partition layer; max marginal residual $\le 2.78 \times 10^{-17}$). The local band ($r=2$) is connected with diameter $4$ yet keeps $\tau(M) = 1.0000$ and $\tau(M^3) = 0.9655$. Adding $2$ global hubs to a $30$-token band lowers $\tau(M)$ to $0.8887$ and $\tau(M^3)$ to $0.6383$ with empirical shared mass $\gamma_{\mathrm{shared}} = 0.1041$ ($\tau(M) \le 1 - \gamma_{\mathrm{shared}} = 0.8959$). At the same $160$-edge budget as the local band, a random $5$-regular graph reaches $\tau(M) = 0.7992$ and $\tau(M^3) = 0.2831$, while the $32$-node butterfly mask achieves $\tau(M^3) = 0.2021$ despite $\tau(M) = 1.0000$. The $5$-layer bit-partition hypercube schedule satisfies $\tau(M_t) = 1.0000$ per layer and $\tau(M_5 \cdots M_1) = 4.44 \times 10^{-16}$, matching Corollary~\ref{cor:butterfly-schedule}.
+
+\begin{table}[t]
+  \centering
+  \small
+  \caption{\textbf{Dobrushin contraction and structural descriptors across canonical supports ($n=32$, $\sigma=0.15$).} $E$ is edge count, $\mathrm{diam}$ is column-overlap diameter ($33$ denotes disconnected), $\gamma_{\mathrm{shared}}$ is the empirical common mass of Proposition~\ref{prop:minorization-hubs}(1), and $\mathrm{decay}_3$ is the 3-step TV contraction ratio of a random zero-sum vector. Marginal residuals are $\le 2.78 \times 10^{-17}$.}
+  \label{tab:canonical-supports}
+  \begin{tabular}{@{}lrrrrrrr@{}}
+    \toprule
+    Support Topology ($n=32$) & $E$ & Density & $\tau(M)$ & $\tau(M^3)$ & $\mathrm{decay}_3$ & $\gamma_{\mathrm{shared}}$ & $\mathrm{diam}$ \\
+    \midrule
+    Dense ($32\times 32$) & $1024$ & $1.000$ & $0.0036$ & $0.0000$ & $0.0000$ & $0.9927$ & $1$ \\
+    Local band ($r=2$) & $160$ & $0.156$ & $1.0000$ & $0.9655$ & $0.1823$ & $0.0000$ & $4$ \\
+    Disconnected ($2$ blocks) & $512$ & $0.500$ & $1.0000$ & $1.0000$ & $0.0454$ & $0.0000$ & $33$ \\
+    Random $5$-regular & $160$ & $0.156$ & $0.7992$ & $0.2831$ & $0.0265$ & $0.0000$ & $2$ \\
+    Local band ($r=2$) $+ 2$ hubs & $274$ & $0.268$ & $0.8887$ & $0.6383$ & $0.1161$ & $0.1041$ & $1$ \\
+    Butterfly ($n=32$) & $192$ & $0.188$ & $1.0000$ & $0.2021$ & $0.0227$ & $0.0000$ & $3$ \\
+    Bit-partition schedule ($5$ layers) & $5 \times 32$ & --- & $1.0000$ & \multicolumn{4}{c}{5-layer product $\tau(M_5\cdots M_1) = 4.44 \times 10^{-16}$} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Face-lattice dichotomy stress test.}
+On the $6\times 6$ circular band ($r=1$) with one universal hub row ($h=0$) and adversarial score direction $B \in \{\pm 1\}$ favoring the decoupled face $\{(0,0), (3,3)\} \cup (\{1,2\}\times\{1,2\}) \cup (\{4,5\}\times\{4,5\})$, we sweep $S = LB$ over $L \in \{0, 2, 5, 10, 15\}$ (Table~\ref{tab:face-stress}, Figure~\ref{fig:face-dichotomy}). With uniform marginals ($a_i = b_j = 1/6$, where $a_h + b_j - T = -2/3 \le 0$), $\tau(M_L)$ rises from $0.537535$ ($L=0$) to $1.000000$ ($L=10, 15$). Setting $a_0 = 0.88$ with $a_{1..5} = 0.024$ and $b_j = 1/6$ gives $\delta_j = 0.046667 > 0$ and the Corollary~\ref{cor:forced-hub-edges}(2) bound $\tau(M) \le 1 - \gamma_h = 0.910909$ ($\gamma_h = 0.089091$); across all $L$, $\min_j P_{0j} \ge 0.142387 \ge \delta_j$ and $\tau(M_L) \le 0.144000$.
+
+\begin{table}[t]
+  \centering
+  \small
+  \caption{\textbf{Adversarial score sweep on a $6\times 6$ band ($r=1$) plus one universal hub row ($10^5$ Sinkhorn steps).} Under uniform marginals (Light hub), $\tau(M_L) \to 1$. With $a_0 = 0.88$ (Heavy hub), Corollary~\ref{cor:forced-hub-edges}(2) forces $P_{0j} \ge 0.046667$ and guarantees $\tau(M_L) \le 0.910909$ uniformly. Marginal residuals are $\le 6.86 \times 10^{-10}$.}
+  \label{tab:face-stress}
+  \begin{tabular}{@{}cccccc@{}}
+    \toprule
+    Score Scale $L$ & Light Hub $\tau(M_L)$ & Light Max Res. & Heavy Hub $\tau(M_L)$ & Heavy Max Res. & $\min_j P_{0j}$ \\
+    \midrule
+    $0$  & $0.537535$ & $2.78 \times 10^{-17}$ & $0.072200$ & $2.78 \times 10^{-17}$ & $0.142944$ \\
+    $2$  & $0.976935$ & $1.11 \times 10^{-16}$ & $0.143916$ & $6.94 \times 10^{-18}$ & $0.142387$ \\
+    $5$  & $0.999941$ & $1.43 \times 10^{-13}$ & $0.144000$ & $3.33 \times 10^{-16}$ & $0.142666$ \\
+    $10$ & $1.000000$ & $6.86 \times 10^{-10}$ & $0.144000$ & $1.11 \times 10^{-16}$ & $0.142667$ \\
+    $15$ & $1.000000$ & $3.12 \times 10^{-14}$ & $0.144000$ & $8.33 \times 10^{-17}$ & $0.142667$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Closed-form equal-score formulas.}
+On the $n=32, r=2$ equal-score circular band, numerical eigenvalues match Proposition~\ref{prop:circular-band} to $2.11 \times 10^{-15}$ ($\lambda_\star = \lambda_1 = 0.925186$). On the $(30+2)$ local-band-plus-hub support ($d=5, r=2$), the equal-score Sinkhorn plan matches Theorem~\ref{thm:register-hub-plan} to $2.60 \times 10^{-18}$, with $\gamma_{\mathrm{reg}} = 0.062316$, empirical $\gamma_{\mathrm{shared}} = 0.127442$, and $\tau(M) = 0.872558 \le 1 - \gamma_{\mathrm{reg}} = 0.937684$.
+
+\section{Limitations and Conclusion}
+\label{sec:conclusion}
+
+\paragraph{Limitations.}
+First, our calculus assumes a fixed support $\Omega$; dynamic pruning or top-$k$ rewiring introduces non-differentiable support jumps outside the present analysis. Second, Theorem~\ref{thm:dobrushin-contraction} characterizes the Sinkhorn scaling operator itself; end-to-end network gradients also depend on the norms of surrounding projections and residual paths entering through $\xi_t$. Third, checking every face in Theorem~\ref{thm:face-lattice-dichotomy} scales exponentially with $|\Omega|$, so large architectures must rely on the sufficient conditions in Propositions~\ref{prop:minorization-hubs}--\ref{prop:circular-band}, Corollary~\ref{cor:forced-hub-edges}, and Theorems~\ref{thm:coordinate-schedule}--\ref{thm:register-hub-plan}, or empirical evaluation of $\tau(M)$ at realized plans.
+
+\paragraph{Conclusion.}
+Differentiating a fixed-support Sinkhorn cycle yields a row-stochastic Markov kernel $M_t = C_t^\top R_t$ whose transpose governs reverse-mode gradients on zero-sum dual potentials. Evaluating sparse masks by $\tau(M)$ rather than graph diameter or density alone exposes both diffusive trapping in narrow bands and score-induced collapse onto disconnected faces of the transportation polytope. Together, the face-lattice dichotomy, marginal-forced hub bounds, and multi-layer coordinate schedules provide concrete criteria for designing sparse differentiable transport layers.
 
 \appendix
 
-\section{Spectral Architecture Corollaries}
-\label{app:architecture-corollaries}
+\section{Proofs and Quotient Details for Section~\ref{sec:calculus}}
+\label{app:calculus-proofs}
 
-The spectral estimates below use standard reversible-chain bounds
-\citep{levin2017markov}, applied to the column-overlap kernel.
-
-\begin{corollary}[Spectral topology certificate]
-\label{cor:spectral-topology-certificate}
-In the setting of Theorem~\ref{thm:biregular-topology-kernel}, $M$ is
-symmetric and doubly stochastic. Let
-\[
-\lambda_\star=\|M\Pi_{\one^\perp}\|_2
-=\max\{|\lambda|:\lambda\ \text{is an eigenvalue of }M
-\text{ on } \one^\perp\}.
-\]
-Then, for every zero-mass cotangent $\eta$ and every integer $K\ge 1$,
-\[
-\|(M^K)^\top\eta\|_2\le \lambda_\star^K\|\eta\|_2,
-\qquad
-\|(M^K)^\top\eta\|_{\TV}
-\le
-\sqrt{n/2}\lambda_\star^K\|\eta\|_{\TV}.
-\]
-Moreover,
-\[
-\tau(M^K)\le \min\{1,\sqrt{n/2}\lambda_\star^K\}.
-\]
-\end{corollary}
-
-\begin{proof}
-The formula $M=N/(d_cd_r)$ has $N=N^\top$ and row sums $d_cd_r$, hence $M$
-is symmetric and doubly stochastic. The Euclidean bound follows by diagonalizing
-$M$ on the invariant subspace $\one^\perp$. For total variation, use
-$\|x\|_{\TV}\le \sqrt n\|x\|_2/2$ and
-$\|\eta\|_2\le \sqrt2\|\eta\|_{\TV}$ for zero-mass $\eta$. For Dobrushin's
-coefficient, apply the same Euclidean contraction to the zero-mass row
-difference $e_\alpha-e_\beta$, whose Euclidean norm is $\sqrt2$, then
-maximize over row pairs and cap by the trivial bound $\tau\le 1$.
+\begin{proof}[Proof of Proposition~\ref{prop:half-step-linearization}]
+Differentiating \eqref{eq:row-half-step} replaces the log-sum-exp normalizer in row $i$ with the conditional expectation under $(R_t)_{ij} = (P_t^r)_{ij}/a_i$, giving $\dot u^+ = d_a - R_t \dot v - r_t(\dot s)$. Differentiating \eqref{eq:column-half-step} similarly replaces the column normalizer with the conditional expectation under $(C_t)_{ij} = (P_t^c)_{ij}/b_j$, giving $\dot v^+ = d_b - C_t^\top \dot u^+ - c_t(\dot s)$. Substituting the first differential into the second cancels the two negative signs on the homogeneous term to give \eqref{eq:full-linearization-with-sources}. At a balanced fixed point $P_t^r = P_t^c = P$, so $R_t = R$ and $C_t = C$.
 \end{proof}
 
-This corollary is the bridge from graph design to tail-depth design. In the
-equal-score biregular baseline, choosing a support is choosing a reversible
-Markov chain for quotient cotangents. Expander-like column-overlap walks make
-$\lambda_\star$ small, while butterfly-like supports may have weak one-step
-$\tau(M)$ but strong powered certificates for $M^K$.
-
-\begin{corollary}[Expander tail-depth rule]
-In the setting of Theorem~\ref{thm:biregular-topology-kernel}, suppose the
-zero-mass spectral rate satisfies $\lambda_\star\le \rho<1$. Then
+\begin{proof}[Proof of Proposition~\ref{prop:reverse-mode-cycle}]
+Pairing $\eta^+ \in \mathbb{R}^n$ with \eqref{eq:full-linearization-with-sources} gives
 \[
-\tau(M^K)\le \min\{1,\sqrt{n/2}\rho^K\}.
+  \langle \eta^+, \dot v^+ \rangle
+  = \langle M_t^\top \eta^+, \dot v \rangle
+  + \langle \eta^+, d_b \rangle
+  - \langle C_t \eta^+, d_a \rangle
+  + \sum_i (C_t \eta^+)_i \sum_{j \in \Omega_i} (R_t)_{ij}\dot s_{ij}
+  - \sum_j \eta^+_j \sum_{i \in \Omega^j} (C_t)_{ij}\dot s_{ij}.
 \]
-If $\rho=0$, any $K\ge1$ suffices. If $0<\rho<1$, then for any
-$\varepsilon\in(0,1)$ it is sufficient to choose
-\[
-K\ge
-\left\lceil
-\frac{\log(\sqrt{n/2}/\varepsilon)}{-\log\rho}
-\right\rceil
-\]
-to obtain $\tau(M^K)\le\varepsilon$.
-\end{corollary}
-
-\begin{proof}
-Substitute $\lambda_\star\le\rho$ in
-Corollary~\ref{cor:spectral-topology-certificate} and solve
-$\sqrt{n/2}\rho^K\le\varepsilon$ for $K$.
+Reading off the coefficients of $\dot v$, $d_b$, $d_a$, and $\dot s_{ij}$ yields $\eta^-$ and \eqref{eq:source-log-marginal-adjoints}--\eqref{eq:score-source-adjoint}. Since $d_a = \dot a \oslash a$, $d_b = \dot b \oslash b$, and $s = \theta/\varepsilon$, the chain rule gives $g^a, g^b, g^\theta$. On each connected component $\Gamma = (I_\Gamma, J_\Gamma)$, admissible log-marginal perturbations satisfy $a_{I_\Gamma}^\top d_{a, I_\Gamma} - b_{J_\Gamma}^\top d_{b, J_\Gamma} = 0$, so adding any multiple of the constraint normal $(a_{I_\Gamma}, -b_{J_\Gamma})$ to $(\lambda_a, \lambda_b)$ leaves the pairing unchanged.
 \end{proof}
 
-\begin{corollary}[Circular local-band spectrum]
-\label{cor:circular-local-band-spectrum}
-Consider the equal-score biregular baseline on $n$ circular positions where
-row $i$ is connected to columns $i-r,\ldots,i+r$ modulo $n$. Assume
-$0\le r<n/2$, so the local degree is $d=2r+1$. Then the derivative kernel
-$M$ is circulant and has Fourier eigenvalues
-\[
-\lambda_k
-=
-\frac1{d^2}
-\left|
-\sum_{s=-r}^{r}\exp(2\pi \mathrm{i}ks/n)
-\right|^2
-=
-\begin{cases}
-1, & k=0,\\[4pt]
-\left(
-\dfrac{\sin(\pi k d/n)}{d\sin(\pi k/n)}
-\right)^2, & k=1,\ldots,n-1.
-\end{cases}
-\]
-Consequently the zero-mass spectral rate is
-\[
-\lambda_{\mathrm{band}}
-=
-\max_{1\le k\le n-1}
-\left(
-\frac{\sin(\pi k d/n)}{d\sin(\pi k/n)}
-\right)^2,
-\]
-and Corollary~\ref{cor:spectral-topology-certificate} gives
-\[
-\tau(M^K)\le \min\{1,\sqrt{n/2}\,\lambda_{\mathrm{band}}^K\}.
-\]
-For fixed $r$ and $n\to\infty$,
-\[
-\lambda_{\mathrm{band}}\ge \lambda_1
-=
-1-\frac{\pi^2(d^2-1)}{3n^2}+O(n^{-4}),
-\]
-so this spectral certificate is diffusive for fixed-radius local bands. More
-sharply, for the first nonconstant Fourier cotangent $\eta^{(1)}$,
-\[
-\frac{\|(M^K)^\top\eta^{(1)}\|_2}{\|\eta^{(1)}\|_2}
-=\lambda_1^K.
-\]
-Thus, if $r$ is fixed and $K=o(n^2)$, then
-$\lambda_1^K\to1$. No fixed-radius circular local band can uniformly contract
-all zero-mass quotient modes in subquadratic depth under this equal-score
-spectral model.
-\end{corollary}
+\paragraph{Componentwise quotients and coupling with surrounding layers.}
+When $\Omega$ has multiple connected components $\Gamma$ with column sets $J_\Gamma$, the potential gauge space is $G_\Omega = \mathrm{span}\{\one_{J_\Gamma} : \Gamma\}$, giving the component quotient $Q_\Omega = \mathbb{R}^n / G_\Omega$ and dual $Q_\Omega^* = \{\eta \in \mathbb{R}^n : \one_{J_\Gamma}^\top \eta = 0 \text{ for all } \Gamma\}$. Every single-support statement holds on each component with $(Q_\Omega, Q_\Omega^*)$. For schedules whose component partition changes across layers, $Q = \mathbb{R}^n/\mathrm{span}\{\one\}$ serves as the common ambient quotient (noting that $\tau(M) = 1$ on $Q$ when $\Omega$ is disconnected because it retains inter-component modes).
 
-\begin{proof}
-Let $h\in\mathbb R^n$ be the circular band indicator,
-$h_s=1$ for $s\in\{-r,\ldots,r\}$ modulo $n$ and $h_s=0$ otherwise. By
-Theorem~\ref{thm:biregular-topology-kernel}, $M_{\alpha\beta}$ is
-$d^{-2}$ times the number of rows incident to both columns $\alpha$ and
-$\beta$. Hence $M$ is the circulant cyclic autocorrelation
-\[
-M_{\alpha\beta}
-=
-\frac1{d^2}\sum_{s\in\mathbb Z/n\mathbb Z}h_s h_{s+\beta-\alpha}.
-\]
-The discrete Fourier characters diagonalize circulant convolution operators,
-and the autocorrelation has Fourier transform
-$|\widehat h_k|^2$, where
-\[
-\widehat h_k=\sum_{s=-r}^{r}\exp(2\pi \mathrm{i}ks/n).
-\]
-This gives the displayed eigenvalues. For $k\ne0$, the finite geometric sum
-is the Dirichlet kernel
-\[
-\widehat h_k
-=
-\frac{\sin(\pi k d/n)}{\sin(\pi k/n)}
-\]
-up to a phase, whose absolute value gives the second expression. The
-zero-mass subspace removes the $k=0$ constant eigenvector, and the spectral
-Dobrushin bound is Corollary~\ref{cor:spectral-topology-certificate}.
+Formally, let $\iota : Q \to \one^\perp$ denote the centered lift $\iota([v]) = \Pi_0 v$ with $\Pi_0 = I - n^{-1}\one\one^\top$, and let $\Phi_t : \mathbb{R}^n \times \mathcal{Z}_t \to \mathcal{S}_t$ collect all differentiable surrounding maps producing source variables at step $t$ from the centered potential and local state $z_t \in \mathcal{Z}_t$. If $\nu_t \in \mathcal{S}_t^*$ is the aggregate non-transport adjoint at step $t$ (summed over direct local branches and excluding $M_t^\top \eta_{t+1}$), then the exact adjoint returned to $Q^*$ is the partial VJP $\xi_t = \iota^* D_1\Phi_t(\iota([v_t]), z_t)^* \nu_t = \Pi_0 \psi_t \in Q^*$, where $\psi_t = D_1\Phi_t(\Pi_0 v_t, z_t)^* \nu_t$. If $\Phi_t$ is already shift-invariant, $\one^\top\psi_t = 0$ and $\Pi_0\psi_t = \psi_t$.
 
-Finally, put $x=\pi/n$. For fixed $d$,
-\[
-\frac{\sin(dx)}{d\sin x}
-=
-1-\frac{(d^2-1)x^2}{6}+O(x^4),
-\]
-and squaring gives the expansion for $\lambda_1$. Since
-$\lambda_{\mathrm{band}}\ge\lambda_1$, the stated lower asymptotic follows.
-The first nonconstant Fourier character is an eigenvector with eigenvalue
-$\lambda_1$, so the displayed $L^2$ ratio after $K$ applications is exact.
-If $K=o(n^2)$ and $r$ is fixed, the expansion gives
-$K(1-\lambda_1)\to0$, hence $\lambda_1^K\to1$.
+\begin{proof}[Proof of Theorem~\ref{thm:dobrushin-contraction}]
+(1) Decompose $\eta = \eta^+ - \eta^-$ with $\eta^\pm \ge 0$ and $\one^\top \eta^+ = \one^\top \eta^- = \|\eta\|_{\TV}$. If $\|\eta\|_{\TV} = 0$, the inequality is trivial; otherwise $p = \eta^+/\|\eta\|_{\TV}$ and $q = \eta^-/\|\eta\|_{\TV}$ are probability vectors, so $\|A^\top \eta\|_{\TV} = \|\eta\|_{\TV} \cdot \frac{1}{2}\|A^\top p - A^\top q\|_1 \le \tau(A)\|\eta\|_{\TV}$ because $\tau(A)$ bounds the TV distance between pushforwards of arbitrary distributions. Applying this to the row-stochastic product $M_K \cdots M_1$ and using submultiplicativity $\tau(AB) \le \tau(A)\tau(B)$ yields the multi-step bounds.
+
+(2) Unrolling \eqref{eq:tail-recurrence} gives $\eta_1 = (M_K \cdots M_1)^\top \eta_{K+1} + \sum_{t=1}^K (M_{t-1}\cdots M_1)^\top \xi_t$. Since each $M_t^\top$ preserves $Q^*$ and $\xi_t \in Q^*$, every summand lies in $Q^*$. Applying part (1) and the triangle inequality gives \eqref{eq:inhomogeneous-tail-bound}.
+
+(3) By part (1), $\|(M^\top)^k \xi\|_{\TV} \le \tau(M)^k \|\xi\|_{\TV}$, so the Neumann series converges absolutely in $Q^*$ to a solution of $(I - M^\top)\eta = \xi$. Any two solutions differ by $z \in Q^*$ with $z = M^\top z$, giving $\|z\|_{\TV} \le \tau(M)\|z\|_{\TV}$ and hence $z = 0$. Summing the geometric series bounds $\|\eta\|_{\TV} \le \|\xi\|_{\TV}/(1-\tau(M))$, and $\eta - \eta^{(K)} = (M^K)^\top \eta$ gives the truncation error bound.
 \end{proof}
 
-\begin{proposition}[Circular local-band one-step obstruction]
-Consider the equal-score biregular baseline on $n$ circular positions where
-row $i$ is connected to columns $i-r,\ldots,i+r$ modulo $n$, with
-$r\ge0$. If $n\ge 8r+2$, then $\tau(M)=1$.
+\section{Proofs for Section~\ref{sec:face-lattice}}
+\label{app:face-proofs}
+
+\begin{proof}[Proof of Proposition~\ref{prop:two-hop-support}]
+Substitute $C_{i\alpha} = P_{i\alpha}/b_\alpha$ and $R_{i\beta} = P_{i\beta}/a_i$ into $M_{\alpha\beta} = \sum_i C_{i\alpha} R_{i\beta}$. Every summand is nonnegative, so under strict edgewise positivity the sum is positive precisely when columns $\alpha$ and $\beta$ share an active row $i$.
+\end{proof}
+
+\begin{proof}[Proof of Corollary~\ref{cor:overlap-criterion}]
+By definition, $\tau(M) < 1$ holds iff $\sum_\gamma \min\{M_{\alpha\gamma}, M_{\beta\gamma}\} > 0$ for every pair $\alpha,\beta$, which by Proposition~\ref{prop:two-hop-support} is equivalent to pairwise two-hop column overlap.
+\end{proof}
+
+\begin{proof}[Proof of Proposition~\ref{prop:biregular-baseline}]
+Since $P_{i\alpha} = E^{-1}\one\{(i,\alpha)\in\Omega\}$ satisfies $\sum_\alpha P_{i\alpha} = d_r / E = 1/m$ and $\sum_i P_{i\alpha} = d_c / E = 1/n$ with constant log-ratio on $\Omega$, it is the unique equal-score Sinkhorn plan. Here $R_{i\alpha} = P_{i\alpha}/a_i = 1/d_r$ and $C_{i\alpha} = P_{i\alpha}/b_\alpha = 1/d_c$ on active edges, so \eqref{eq:kernel-entrywise} yields $M_{\alpha\beta} = N_{\alpha\beta}/(d_c d_r)$.
+\end{proof}
+
+\begin{proof}[Proof of Proposition~\ref{prop:plan-distortion-stability}]
+With uniform marginals, \eqref{eq:kernel-entrywise} gives $M_{\alpha\beta} = (d_c d_r)^{-1}\sum_{i:(i,\alpha),(i,\beta)\in\Omega} q_{i\alpha} q_{i\beta} \ge \kappa^{-2} (M_0)_{\alpha\beta}$. Whenever row-stochastic matrices satisfy $A \ge \delta B$ entrywise with $\delta \in [0,1]$, writing $A = \delta B + (1-\delta)N$ for a row-stochastic $N$ (when $\delta < 1$) gives $\tau(A) \le \delta\tau(B) + (1-\delta) = 1 - \delta(1-\tau(B))$. Iterating entrywise nonnegative matrix multiplication yields the multi-step bound.
+\end{proof}
+
+\begin{proof}[Proof of Proposition~\ref{prop:additive-score-invariance}]
+For any $P \in \Pi(a,b;\Omega)$ and separable $B$, $\langle B, P \rangle = \alpha^\top a + \beta^\top b + \sum_\Gamma c_\Gamma m_\Gamma$, where $m_\Gamma$ is the fixed marginal mass of component $\Gamma$. Since $\langle B, P\rangle$ is constant on $\Pi(a,b;\Omega)$, maximizing $L\langle B, P\rangle + H(P)$ yields the same unique maximizer $P_0$ for every $L$, where $H(P) = -\sum_{(i,j)\in\Omega} P_{ij}\log P_{ij}$.
+
+Conversely, on each component $\Gamma$, additive scores $\alpha_i + \beta_j + c_\Gamma$ form a subspace of dimension $|I_\Gamma| + |J_\Gamma| - 1$, summing to $|I| + |J| - c$ across components, so the quotient score space has dimension $|\Omega| - |I| - |J| + c$. If a score $B$ leaves the plan unchanged at $P_0 > 0$ on $\Omega$, the KKT optimality conditions for $H(P)$ and $\langle B, P\rangle + H(P)$ give dual potentials $(u^0, v^0)$ and $(u^B, v^B)$ satisfying
+\[
+  \log(P_0)_{ij} = u_i^0 + v_j^0 = B_{ij} + u_i^B + v_j^B \qquad ((i,j)\in\Omega),
+\]
+so $B_{ij} = (u_i^0 - u_i^B) + (v_j^0 - v_j^B)$ is additive on $\Omega$. When $\Omega$ is a forest, recursively stripping degree-1 leaves uniquely fixes every edge mass from the marginals alone.
+\end{proof}
+
+\begin{lemma}[Zero-temperature limit on the optimal face]
+\label{lem:zero-temperature-limit}
+Let $\mathcal{P} = \Pi(a,b;\Omega)$ satisfy Assumption~\ref{ass:fixed-support-feasible} with strict feasibility. For any finite score matrix $S$, the Sinkhorn plan $P_\Omega(S;a,b)$ is the unique maximizer of $\langle S, P\rangle + H(P)$ over $\mathcal{P}$. Given a score direction $B$ on $\Omega$ and $L > 0$, let $P_L = P_\Omega(LB;a,b)$, let $\mathcal{F}_B = \arg\max_{P\in\mathcal{P}} \langle B, P\rangle$, and let $P_B^{\mathrm{ent}}$ be the unique maximizer of $H(P)$ over $\mathcal{F}_B$. Then
+\[
+  \lim_{L\to\infty} P_L = P_B^{\mathrm{ent}} \in \operatorname{relint}(\mathcal{F}_B).
+\]
+\end{lemma}
+
+\begin{proof}
+Under strict feasibility, the strictly concave objective $\langle S, P\rangle + H(P)$ attains its unique maximum in $\operatorname{relint}(\mathcal{P})$, where the KKT conditions coincide with the Sinkhorn equations $P_{ij} = \exp(S_{ij}+u_i+v_j)$ with marginals $(a,b)$ \citep{peyre2019computational}. For $S = LB$, let $M_B = \max_{P\in\mathcal{P}} \langle B, P\rangle$. Since $H$ is bounded on the compact polytope $\mathcal{P}$ (say $|H(P) - H(P')| \le C$), optimality of $P_L$ relative to $P_B^{\mathrm{ent}} \in \mathcal{F}_B$ gives
+\[
+  L\langle B, P_L\rangle + H(P_L) \ge L M_B + H(P_B^{\mathrm{ent}}),
+\]
+so $\langle B, P_L\rangle \ge M_B - C/L$ and $H(P_L) \ge H(P_B^{\mathrm{ent}}) + L(M_B - \langle B, P_L\rangle) \ge H(P_B^{\mathrm{ent}})$. Every accumulation point $\bar P$ of $\{P_L\}$ therefore lies in $\mathcal{F}_B$ and satisfies $H(\bar P) \ge H(P_B^{\mathrm{ent}})$. By strict concavity of $H$ on the convex face $\mathcal{F}_B$, $\bar P = P_B^{\mathrm{ent}}$, so the whole family converges to $P_B^{\mathrm{ent}}$. Because $-\partial_x(x\log x) \to +\infty$ as $x \downarrow 0$, moving from any boundary point of $\mathcal{F}_B$ toward a point in $\operatorname{relint}(\mathcal{F}_B)$ increases entropy to first order, forcing $P_B^{\mathrm{ent}} \in \operatorname{relint}(\mathcal{F}_B)$.
+\end{proof}
+
+\begin{proof}[Proof of Theorem~\ref{thm:face-lattice-dichotomy}]
+For $P \in \mathcal{P} = \Pi(a,b;\Omega)$, write
+\[
+  \Gamma(P) = 1 - \tau(M(P)) = \min_{\alpha,\beta} \sum_\gamma \min\{M(P)_{\alpha\gamma}, M(P)_{\beta\gamma}\}.
+\]
+Because $a$ and $b$ are fixed and positive, $M(P)$ and $\Gamma(P)$ are continuous functions of $P$ on the compact polytope $\mathcal{P}$. Every face of a standard-form transportation polytope is determined by zeroing a subset of edge variables \citep{deloera2013transportation}, so the minimal face containing $P$ has support $\supp(P)$, and by Proposition~\ref{prop:two-hop-support} we have $\Gamma(P) > 0$ if and only if $\supp(P)$ has pairwise two-hop column overlap.
+
+If every nonempty face $F$ satisfies (2), then $\Gamma(P) > 0$ for all $P \in \mathcal{P}$. By compactness and continuity, $\delta_* = \min_{P \in \mathcal{P}} \Gamma(P) > 0$, so every finite-score Sinkhorn plan $P_\Omega(S;a,b) \in \mathcal{P}$ satisfies $\tau(M(P_\Omega(S;a,b))) \le 1 - \delta_* < 1$.
+
+Conversely, suppose a nonempty face $F$ fails pairwise two-hop column overlap. Since every face of a polytope is exposed, there exists a score direction $B$ with $\mathcal{F}_B = F$. By Lemma~\ref{lem:zero-temperature-limit}, $P_\Omega(LB;a,b) \to P_B^{\mathrm{ent}} \in \operatorname{relint}(F)$, whose positive support is $\Omega_F$. Because $\Omega_F$ fails pairwise two-hop overlap, two rows of $M(P_B^{\mathrm{ent}})$ have disjoint support, giving $\tau(M(P_B^{\mathrm{ent}})) = 1$. Continuity of $\tau(M(\cdot))$ then implies $\tau(M(P_\Omega(LB;a,b))) \to 1$ as $L \to \infty$.
+\end{proof}
+
+\begin{proof}[Proof of Proposition~\ref{prop:minorization-hubs}]
+For (1), writing each row $M_{\alpha\cdot} = \gamma q + (1-\gamma)\widetilde M_{\alpha\cdot}$ cancels $\gamma q$ in $M_{\alpha\cdot} - M_{\beta\cdot}$, bounding the TV distance by $1-\gamma$. Setting $q_\beta = (\min_\alpha M_{\alpha\beta})/\gamma_{\mathrm{shared}}$ when $\gamma_{\mathrm{shared}} > 0$ yields $\tau(M) \le 1 - \gamma_{\mathrm{shared}}$. For (2), dropping all terms except $i = i(\alpha, h)$ in \eqref{eq:kernel-entrywise} gives $M_{\alpha h} \ge p_{\min}^2 / (b_\alpha a_i) \ge p_{\min}^2 / (a_{\max} b_{\max})$. Summing this rowwise lower bound over $h \in H$ bounds $\gamma_{\mathrm{shared}}$ from below (capped at $1$ for numerical reporting), and part (1) gives the claim.
+\end{proof}
+
+\begin{proof}[Proof of Corollary~\ref{cor:forced-hub-edges}]
+For any feasible plan $P$, $P_{i\alpha} = b_\alpha - \sum_{k \in \Omega^\alpha \setminus \{i\}} P_{k\alpha} \ge b_\alpha - \sum_{k \in \Omega^\alpha \setminus \{i\}} a_k$, proving $P_{i\alpha} \ge d_{i\alpha}$. Under condition (1), \eqref{eq:kernel-entrywise} yields $M_{\alpha\gamma} \ge d_{i\alpha} d_{i\gamma}/(b_\alpha a_i)$ and similarly for $\beta$, so summing $\min\{M_{\alpha\gamma}, M_{\beta\gamma}\}$ over $\gamma$ gives $1 - \tau(M(P)) \ge \gamma_0 > 0$. In case (2), non-hub rows carry total mass $T - a_h$, so $d_{hj} \ge b_j - (T - a_h) = \delta_j > 0$. Then $M_{\alpha\beta} \ge P_{h\alpha} P_{h\beta}/(b_\alpha a_h) \ge (\min_p \delta_p/b_p)\, \delta_\beta / a_h$, so Proposition~\ref{prop:minorization-hubs}(1) yields $\tau(M(P)) \le 1 - \gamma_h$.
+\end{proof}
+
+\section{Proofs for Section~\ref{sec:schedules} (Schedules)}
+\label{app:schedule-proofs}
+
+\begin{proposition}[One-step obstructions]
+\label{prop:one-step-obstructions}
+If $M$ has two closed components with disjoint transition supports, or if two rows of $M$ are point masses on distinct columns (as in any permutation matrix on $n \ge 2$ columns), then $\tau(M) = 1$.
 \end{proposition}
 
 \begin{proof}
-The support of row $\alpha$ of the derivative kernel $M$ consists exactly of
-columns within circular distance at most $2r$ from $\alpha$: to move from
-column $\alpha$ to column $\beta$ in one full derivative step, the two columns
-must share a support row, and this happens precisely when their circular
-distance is at most $2r$. If $n\ge 8r+2$, there are two columns whose circular
-distance is at least $4r+1$. Their radius-$2r$ derivative neighborhoods are
-disjoint. The corresponding rows of $M$ therefore have disjoint supports, so
-their total-variation distance is one and $\tau(M)=1$.
+Two rows with disjoint supports or point masses on distinct states have total-variation distance $1$.
 \end{proof}
 
-\section{Registers, Dustbins, and Shared Buses}
-
-Global tokens, register tokens, dustbin rows or columns, and expert buses can
-all create a common component in the derivative kernel. The architectural
-reading is simple: if every local region sends some reverse-mode mass through
-the same bus, zero-mass cotangents can no longer remain perfectly isolated.
-
-\begin{proposition}[Register/dustbin mixing certificate]
-Consider a fixed support in which a register or dustbin substructure induces
-a realized derivative kernel $M$. If the realized rows of $M$ share common
-mass
-\[
-\gamma_{\mathrm{cert}}
-=\sum_j \min_i M_{ij}>0,
-\]
-then
-\[
-\|M^\top\eta\|_{\TV}
-\le (1-\gamma_{\mathrm{cert}})\|\eta\|_{\TV}
-\]
-for every zero-mass cotangent $\eta$.
-\end{proposition}
-
-\begin{proof}
-This is the sparse-support overlap certificate with
-$q_j=\min_i M_{ij}/\gamma_{\mathrm{cert}}$. The register or dustbin
-interpretation is architectural; the theorem only uses the realized common
-component.
+\begin{proof}[Proof of Theorem~\ref{thm:multistep-face-lattice}]
+By Proposition~\ref{prop:two-hop-support}, for any $P_t \in \mathcal{P}_t$, the support of $M_t(P_t)$ is the two-hop relation of $\supp(P_t)$. Hence $(M_K(P_K)\cdots M_1(P_1))_{\alpha\gamma} > 0$ iff $\gamma$ is reachable from $\alpha$ along the two-hop relations of $(\supp(P_K), \dots, \supp(P_1))$. Writing $\Gamma_K(P_1,\dots,P_K) = 1 - \tau(M_K(P_K)\cdots M_1(P_1))$, we have $\Gamma_K > 0$ iff the minimal face tuple containing $(P_1,\dots,P_K)$ has windowed pairwise product overlap. If every nonempty face tuple satisfies this overlap condition, continuity of $\Gamma_K$ on the compact product polytope $\mathcal{P}_1 \times \cdots \times \mathcal{P}_K$ yields $\delta_K = \min \Gamma_K > 0$. Conversely, if a face tuple $(F_1, \dots, F_K)$ fails windowed overlap, choosing an exposing score direction $B_t$ for each $F_t$ and applying Lemma~\ref{lem:zero-temperature-limit} independently at scale $L \to \infty$ sends $M_K(P_K(L))\cdots M_1(P_1(L))$ to a stochastic matrix with two disjoint rows, driving $\tau$ to $1$.
 \end{proof}
 
-\begin{theorem}[Equal-score register-bus certificate]
-\label{thm:equal-score-register-bus}
-Let $n\ge1$, $r\ge1$, and let the token-token support on the $n$ token rows
-and columns be $d$-regular with $d\ge1$:
-every token row and every token column has exactly $d$ active token-token
-edges. Add $r\ge1$ register rows and $r$ register columns. Token rows connect
-to their active token columns and to every register column; register rows
-connect to every token and register column. Let $N=n+r$, use equal active
-scores, and set uniform marginals $a=b=N^{-1}\one$.
-
-Define $t>0$ by
-\[
-r t^2+(n-r)t-d=0,
-\qquad
-t=\frac{2d}{\sqrt{(n-r)^2+4rd}+(n-r)}.
-\]
-Then the Sinkhorn plan has four values:
-\[
-P_{ij}=
-\begin{cases}
-A, & i,j \text{ token and }(i,j)\text{ active},\\
-B, & \text{one endpoint token and one endpoint register},\\
-D, & i,j \text{ both registers},
-\end{cases}
-\]
-where
-\[
-A=\frac{1}{N(d+rt)},\qquad B=tA,\qquad D=t^2A.
-\]
-For the derivative kernel $M=C^\top R$, every source column $\alpha$ and
-every register target column $h$ satisfy
-\[
-M_{\alpha h}\ge
-m_{\mathrm{reg}}
-:=
-\frac{t(d+rt^2)}{(d+rt)^2}.
-\]
-Consequently the $r$ register columns form a common component of mass at least
-\[
-\gamma_{\mathrm{reg}}
-=r\,m_{\mathrm{reg}}
-=
-\frac{rt(d+rt^2)}{(d+rt)^2},
-\]
-and
-\[
-\tau(M)\le 1-\gamma_{\mathrm{reg}}.
-\]
-\end{theorem}
-
-\begin{proof}
-The proposed plan has Sinkhorn scaling form for equal scores: token row and
-column scales are constant within the token class, and register row and
-column scales are constant within the register class. Its token row sum is
-\[
-dA+rB=A(d+rt)=\frac1N.
-\]
-The token column sum is identical because the token-token support is
-$d$-regular and $B$ is used for register-token edges. The register row and
-register column sums are
-\[
-nB+rD=A(nt+rt^2).
-\]
-The defining quadratic for $t$ is equivalent to
-$nt+rt^2=d+rt$, so these sums also equal $1/N$. Thus the candidate is a
-strictly positive feasible scaling of the equal-score support. By uniqueness
-of the entropic Sinkhorn plan on the fixed connected support, it is the
-Sinkhorn plan.
-
-Since $a=b=N^{-1}\one$,
-\[
-M_{\alpha\beta}=N^2\sum_i P_{i\alpha}P_{i\beta}.
-\]
-If $\alpha$ is a token column and $h$ is a register column, the contributing
-rows are the $d$ token rows incident to $\alpha$ and the $r$ register rows:
-\[
-M_{\alpha h}=N^2(dAB+rBD)
-=\frac{t(d+rt^2)}{(d+rt)^2}.
-\]
-If $\alpha$ is itself a register column, then
-\[
-M_{\alpha h}=N^2(nB^2+rD^2)
-=\frac{t^2(n+rt^2)}{(d+rt)^2}.
-\]
-Using $d=rt^2+(n-r)t$, the difference between the register-source value and
-the token-source value is
-\[
-\frac{r t^2(t-1)^2}{(d+rt)^2}\ge0.
-\]
-Thus every row of $M$ assigns at least $m_{\mathrm{reg}}$ to each register
-target column. The sparse-support overlap certificate applied to the common
-mass on the $r$ register columns gives $\tau(M)\le1-\gamma_{\mathrm{reg}}$.
+\begin{proof}[Proof of Theorem~\ref{thm:block-partition}]
+Each column $x$ has a single active edge $(\pi(x), x)$, forcing $P_{\pi(x), x} = b_x$, which matches the row marginals $a_z$ automatically. Substituting this unique plan into \eqref{eq:kernel-entrywise} yields $M_{xy} = \one\{\pi(x)=\pi(y)\} b_y / a_{\pi(x)}$. Note that for non-product $b$, systematic block-Gibbs sweeps can still mix slowly when blocks are strongly correlated \citep{geman1984stochastic,levin2017markov}.
 \end{proof}
 
-\paragraph{Equal-score limitation.}
-Theorem~\ref{thm:equal-score-register-bus} is a pure topology theorem because
-equal scores and uniform marginals force a four-value scaled plan. With
-structured scores or nonuniform marginals, the same support still has a
-register-bus interpretation, but quantitative contraction must be certified
-from the realized plan or from a separate distortion/mass-floor hypothesis.
-The degenerate case $d=0$ is a pure register-mediated support and is not
-covered by the four-value formula above.
+\begin{proof}[Proof of Theorem~\ref{thm:coordinate-schedule}]
+Applying Theorem~\ref{thm:block-partition} to $\pi_t(x) = x_{-t}$ shows the plan is unique and $(M_t)_{xy} = \one\{x_{-t}=y_{-t}\} b(y)/a_t(x_{-t}) = \one\{x_{-t}=y_{-t}\} \mu_t(y_t)$. Columns with $x_{-t} \neq y_{-t}$ have disjoint fiber supports in $M_t$, so $\tau(M_t) = 1$ whenever $|X_{-t}| \ge 2$. Since each $M_t$ independently resamples coordinate $t$ from $\mu_t$ while leaving the remaining coordinates unchanged, applying all $K$ coordinates once in any order produces distribution $b$ from every starting state, giving $M_{\sigma(K)}\cdots M_{\sigma(1)} = \one b^\top$ and $\tau = 0$.
+\end{proof}
 
-\paragraph{Design implication.}
-A narrow local window may have $\tau(M)=1$ because distant row distributions
-do not overlap. Adding a small register budget can reduce $\tau(M)$ if the
-scaled plan routes enough mass through the shared component. This is a
-certificate knob, not a proof of task accuracy.
+\begin{proof}[Proof of Corollary~\ref{cor:butterfly-schedule}]
+Apply Theorem~\ref{thm:coordinate-schedule} with $X_t = \{0,1\}$ and uniform $\mu_t$.
+\end{proof}
 
-\section{Certificate-Level Design Rules}
+\section{Proofs for Canonical Sparse Attention Masks}
+\label{app:canonical-proofs}
 
-The previous theorems describe what can be proved for the fixed-support
-transport derivative under the stated assumptions. They establish certificate
-logic rather than accuracy claims.
+\begin{proof}[Proof of Proposition~\ref{prop:spectral-bound}]
+By Proposition~\ref{prop:biregular-baseline}, $M = N/(d_c d_r)$ is symmetric ($N = N^\top$) and doubly stochastic. Orthogonalizing on $\one^\perp$ gives $\|(M^K)^\top \eta\|_2 \le \lambda_\star^K \|\eta\|_2$ for all $\eta \in Q^*$. Using $\|x\|_{\TV} = \frac{1}{2}\|x\|_1 \le \frac{\sqrt{n}}{2}\|x\|_2$, applying this to each zero-sum row difference $M^K_{\alpha\cdot} - M^K_{\beta\cdot} = (M^K)^\top (e_\alpha - e_\beta)$ with $\|e_\alpha - e_\beta\|_2 = \sqrt{2}$ yields
+\[
+  \tau(M^K) \le \min\!\Bigl\{1,\, \frac{\sqrt{n}}{2}\lambda_\star^K \sqrt{2}\Bigr\}
+  = \min\!\bigl\{1,\, \sqrt{n/2}\,\lambda_\star^K\bigr\}.
+\]
+Setting $\sqrt{n/2}\,\rho^K \le \varepsilon$ and taking logarithms gives the sufficient depth $K$.
+\end{proof}
 
+\begin{proof}[Proof of Proposition~\ref{prop:circular-band}]
+Row $\alpha$ of $M$ is supported on columns within circular distance at most $2r$ of $\alpha$. When $n \ge 8r + 2$, two columns exist at circular distance at least $4r + 1$, so their radius-$2r$ neighborhoods are disjoint and $\tau(M) = 1$.
 
-These results suggest a practical matched-edge workflow. First test an
-equal-score biregular baseline to understand the pure graph walk. Then compare
-the candidate support's realized $\tau(M^K)$ against simple graph descriptors
-and against a local-band control with the same edge budget. Finally, stress
-the candidate with nonuniform marginals and score perturbations; if the
-certificate survives, the topology becomes a candidate for a downstream task
-gate. If it does not survive, the failure is informative: the architecture may
-still be useful for restricted data, but the fixed-support transport
-derivative has no global quotient-mixing certificate under those conditions.
+Let $h \in \mathbb{R}^n$ be the indicator of $\{-r, \dots, r\} \pmod n$. By Proposition~\ref{prop:biregular-baseline}, $M_{\alpha\beta} = d^{-2}\sum_{s \in \mathbb{Z}/n\mathbb{Z}} h_s h_{s+\beta-\alpha}$ is circulant and diagonalized by the discrete Fourier basis, with eigenvalues $|\widehat h_k|^2 / d^2$ where $\widehat h_k = \sum_{s=-r}^r e^{2\pi i k s / n} = \frac{\sin(\pi k d / n)}{\sin(\pi k / n)}$ (up to phase) for $k \neq 0$. Expanding $\frac{\sin(dx)}{d\sin x} = 1 - \frac{(d^2-1)x^2}{6} + O(x^4)$ at $x = \pi/n$ and squaring gives $\lambda_1 = 1 - \frac{\pi^2(d^2-1)}{3n^2} + O(n^{-4})$. The first Fourier character $\eta^{(1)}$ is an eigenvector of $M^\top$ with eigenvalue $\lambda_1$, so $\|(M^K)^\top \eta^{(1)}\|_2 / \|\eta^{(1)}\|_2 = \lambda_1^K$, which tends to $1$ whenever $K = o(n^2)$.
+\end{proof}
 
-\section{Short DAG Path-Sum Remark}
+\begin{proof}[Proof of Theorem~\ref{thm:register-hub-plan}]
+The candidate plan $P$ uses constant row and column scalings on the token class and on the hub class, so it has the Sinkhorn form for equal scores. Each token row or column has sum $dA + rB = A(d+rt) = 1/N$. Each hub row or column has sum $nB + rD = A(nt + rt^2)$. Since $rt^2 + (n-r)t - d = 0$ is equivalent to $nt + rt^2 = d + rt$, all row and column sums equal $1/N$; uniqueness of the equal-score Sinkhorn plan on the connected support confirms this is $P$.
+
+With $a = b = N^{-1}\one$, \eqref{eq:kernel-entrywise} gives $M_{\alpha\beta} = N^2 \sum_i P_{i\alpha} P_{i\beta}$. For a token column $\alpha$ and hub column $h$, summing over the $d$ active token rows and $r$ hub rows yields
+\[
+  M_{\alpha h} = N^2(dAB + rBD) = \frac{t(d + r t^2)}{(d + rt)^2} = m_{\mathrm{reg}}.
+\]
+For a hub column $\alpha$ and hub column $h$, $M_{\alpha h} = N^2(nB^2 + rD^2) = \frac{t^2(n + r t^2)}{(d + rt)^2}$. Using $d = rt^2 + (n-r)t$, the difference $M_{\alpha h}^{\mathrm{hub}} - m_{\mathrm{reg}} = \frac{r t^2(t-1)^2}{(d+rt)^2} \ge 0$. Thus every row of $M$ puts at least $m_{\mathrm{reg}}$ on each of the $r$ hub columns, and Proposition~\ref{prop:minorization-hubs}(1) gives $\tau(M) \le 1 - r m_{\mathrm{reg}}$.
+\end{proof}
+
+\section{Branching and Residual Computation Graphs}
 \label{app:dag-remark}
 
-A residual or branching computation graph is outside the core chain theorem,
-but the same quotient bookkeeping applies once every edge map has an explicitly
-bounded operator norm on the chosen quotient representative.  If a sink-to-source
-cotangent can be expanded as a finite path sum
+For a branching or residual directed acyclic computation graph in which every edge operator $M_e$ is row-stochastic and maps zero-sum adjoints to $Q^*$, suppose the homogeneous sink-to-source adjoint expands over paths $p$ from sink to source as
 \[
-\eta_{\rm source}=\sum_p w_p\left(\prod_{e\in p}M_e^\top\right)\eta_{\rm sink}
+  \eta_{\mathrm{source}} = \sum_p w_p \Bigl(\prod_{e \in p} M_e^\top\Bigr)\eta_{\mathrm{sink}},
 \]
-with zero-mass cotangents throughout, then Theorem~\ref{thm:zero-mass-quotient-contraction}
-and the triangle inequality give
+with scalar path weights $w_p$. Applying Theorem~\ref{thm:dobrushin-contraction}(1) and the triangle inequality yields
 \[
-\|\eta_{\rm source}\|_{\TV}
-\le
-\left(\sum_p |w_p|\prod_{e\in p}\tau(M_e)\right)
-\|\eta_{\rm sink}\|_{\TV}.
+  \|\eta_{\mathrm{source}}\|_{\TV}
+  \le \Bigl(\sum_p |w_p| \prod_{e \in p} \tau(M_e)\Bigr)\|\eta_{\mathrm{sink}}\|_{\TV}.
 \]
-Any inhomogeneous source term must be projected and bounded separately, exactly
-as in Theorem~\ref{thm:projected-source-tail-bound}.  This appendix remark is a
-bookkeeping consequence, not an additional architecture claim.
+Any inhomogeneous source contributions injected at internal vertices must be projected onto $Q^*$ and summed with their corresponding upstream path weights, as in \eqref{eq:inhomogeneous-tail-bound}.
 
 \bibliographystyle{plainnat}
 \bibliography{references}

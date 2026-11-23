@@ -6,13 +6,11 @@
 
 ## Paper 2 Abstract
 
-Sparse Sinkhorn layers use a fixed support graph to restrict transport between tokens. How does this graph control gradient propagation through the scaling iterations. We develop a fixed-support calculus showing that each row-column cycle induces a row-stochastic operator on column-potential perturbations modulo constants. Its transpose propagates zero-mass reverse-mode cotangents.
+Sinkhorn attention layers normalize weights over a fixed sparse mask by alternating row and column scaling. When training these layers, sparse masks are usually judged by their edge count, graph diameter, or forward reachability. We show that the sparsity pattern and marginal budgets also govern how gradients flow backward through the scaling steps.
 
-The finite-cycle operator uses two distinct half-step transport plans; at a balanced fixed point it reduces to a two-step walk determined by a single plan. We derive the accompanying score and marginal source terms and use Dobrushin contraction and minorization to bound homogeneous and source-driven tail cotangents.
+Differentiating one row-column cycle on column log-potentials yields an explicit row-stochastic Markov kernel built from the two half-step transport plans, which reduces to a reversible two-step random walk at a balanced fixed point. Because potentials are defined only up to additive constants on each connected component, reverse-mode gradients propagate as zero-sum vectors whose total-variation norm contracts at a rate given by the kernel's Dobrushin coefficient. This coefficient bounds both unrolled backpropagation and implicit-differentiation truncation error.
 
-Our main result characterizes when support and marginals guarantee one-step contraction uniformly over finite scores: every feasible face of the transportation polytope must have pairwise two-hop column overlap. Otherwise, suitable score directions make the contraction coefficient arbitrarily close to one. We extend this analysis to ordered support schedules and derive certificates for partition heat-bath layers, coordinate sweeps, forced shared mass, and register-augmented supports.
-
-These results provide mathematical criteria for support design in differentiable transport layers, with guarantees restricted to the fixed-support quotient-gradient component.
+Crucially, graph connectivity alone does not prevent gradient trapping: we prove a face-lattice dichotomy showing that a mask and marginals guarantee score-uniform one-step contraction if and only if every nonempty face of the transportation polytope retains pairwise two-hop column overlap; otherwise, large learned scores can push the contraction rate arbitrarily close to one. We extend this criterion to multi-layer schedules, prove exact one-sweep mixing for coordinate-factorized and butterfly masks, and derive closed-form bounds for expanders, local bands, and global hub tokens. Deterministic numerical checks verify our finite-difference adjoints, canonical sparse masks, adversarial score limits, and spectral formulas.
 
 ## Paper 1 Abstract
 
